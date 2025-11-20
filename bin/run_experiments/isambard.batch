@@ -5,9 +5,9 @@
 #SBATCH --nodes=1
 # One task per node by default (override with CLI if needed)
 #SBATCH --ntasks-per-node=1
-# Request 1 GPUs per node by default (override with CLI if needed)
+# Request 4 GPUs per node by default (override with CLI if needed)
 # Use GRES syntax for compatibility on this site
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:4
 #SBATCH --mem=0
 #SBATCH --time=00:09:59
 

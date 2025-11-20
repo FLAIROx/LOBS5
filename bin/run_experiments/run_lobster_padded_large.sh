@@ -41,7 +41,7 @@ python3 -u -B run_train.py \
         --warmup_end=1 --weight_decay=0.05 --msg_seq_len=500 \
         --use_book_data=True --use_simple_book=False --book_transform=True  \
         --masking=none \
-        --num_devices=1 --n_data_workers=0 \
+        --num_devices=4 --n_data_workers=0 \
         --debug_loading=False \
         --enable_profiler=False \
         --random_offsets_train=True \
