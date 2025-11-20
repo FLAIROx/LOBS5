@@ -58,9 +58,7 @@ if __name__ == "__main__":
  
  
 	# ······· choice 3 ······· STR
-	# M1 Checkpoint fix: Must enable JIT for checkpoint to work
-	# os.environ["JAX_DISABLE_JIT"] = "1"  # 完全关闭JIT编译 - COMMENTED OUT
-	os.environ["JAX_CHECKPOINT_POLICY"] = "dots_with_no_batch_dims"  # Optimize checkpoint strategy
+	os.environ["JAX_DISABLE_JIT"] = "1"  # 完全关闭JIT编译
 	# ······· choice 3 ······· END
 
 	#physical_devices = tf.config.list_physical_devices('GPU')
@@ -73,7 +71,7 @@ if __name__ == "__main__":
 	os.environ["NCCL_P2P_DISABLE"] = "0"  # Disable peer-to-peer if causing issues
  
  
-	# os.environ["XLA_FLAGS"] = "--xla_gpu_enable_while_loop_unrolling=false"
+	os.environ["XLA_FLAGS"] = "--xla_gpu_enable_while_loop_unrolling=false"
 
 
 	import argparse
