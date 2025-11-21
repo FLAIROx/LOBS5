@@ -227,11 +227,13 @@ def apply_ssm_chunked(Lambda_bar, B_bar, C_tilde, input_sequence,
         else:
             scan_fn = partial(jax.lax.associative_scan, binary_operator)
 
-        _, xs_with_carry = scan_fn((Lambda_with_carry, Bu_with_carry))
+        # associative_scan returns (Lambda_cumulative, Bu_cumulative)
+        Lambda_cum, Bu_cum = scan_fn((Lambda_with_carry, Bu_with_carry))
 
-        # Extract results
-        xs = xs_with_carry[1:]  # Remove prepended carry element
-        new_carry = xs_with_carry[-1]  # Last state for next chunk
+        # Extract results - Bu_cum contains the hidden states
+        xs = Bu_cum[1:]  # Remove prepended carry element
+        new_carry = Bu_cum[-1]  # Last state for next chunk
+        Lambda_out = Lambda_cum[1:]  # For consistency (not used but available)
 
         # Return hidden states (not outputs) to save memory
         return new_carry, (xs, Lambda_elements, Bu_elements)
@@ -254,14 +256,15 @@ def apply_ssm_chunked(Lambda_bar, B_bar, C_tilde, input_sequence,
             Lambda_elements = Lambda_bar * np.ones((chunk_size, P))
             Bu_elements = jax.vmap(lambda u: B_bar @ u)(chunk)
 
+            # For backward scan: APPEND carry at the end (flows from right to left)
             Lambda_with_carry = np.concatenate([
-                np.ones((1, P), dtype=Lambda_elements.dtype),
-                Lambda_elements
+                Lambda_elements,
+                np.ones((1, P), dtype=Lambda_elements.dtype)
             ], axis=0)
 
             Bu_with_carry = np.concatenate([
-                carry_state[np.newaxis, :],
-                Bu_elements
+                Bu_elements,
+                carry_state[np.newaxis, :]
             ], axis=0)
 
             if chunk_size >= 1000:
@@ -272,23 +275,28 @@ def apply_ssm_chunked(Lambda_bar, B_bar, C_tilde, input_sequence,
             else:
                 scan_fn = lambda args: jax.lax.associative_scan(binary_operator, args, reverse=True)
 
-            _, xs_with_carry = scan_fn((Lambda_with_carry, Bu_with_carry))
+            # associative_scan returns (Lambda_cumulative, Bu_cumulative)
+            Lambda_cum, Bu_cum = scan_fn((Lambda_with_carry, Bu_with_carry))
 
-            xs = xs_with_carry[1:]
-            new_carry = xs_with_carry[-1]
+            # For reverse scan with appended carry:
+            # Bu_cum[-1] is the carry
+            # Bu_cum[0:-1] are the hidden states for this chunk
+            xs = Bu_cum[:-1]  # Extract hidden states, remove appended carry
+            new_carry = Bu_cum[0]  # Leftmost state becomes carry for next chunk (on the left)
 
             return new_carry, xs
 
-        # Process chunks in reverse order
-        init_carry_backward = np.zeros(P, dtype=np.complex64)
+        # Process chunks in reverse order (no reverse=True in scan to avoid double reversal)
+        init_carry_backward = np.zeros(P, dtype=Lambda_bar.dtype)
         _, xs_backward_chunks = jax.lax.scan(
             scan_chunk_backward,
             init_carry_backward,
-            np.flip(chunks, axis=0),
-            reverse=True
+            np.flip(chunks, axis=0)  # Process from last to first chunk
         )
 
-        xs_backward = np.flip(xs_backward_chunks.reshape(L, P), axis=0)
+        # Flip chunks back to original order, then reshape
+        xs_backward_chunks = np.flip(xs_backward_chunks, axis=0)  # Reverse chunk order
+        xs_backward = xs_backward_chunks.reshape(L, P)  # Now in correct sequence order
         xs = np.concatenate((xs_forward, xs_backward), axis=-1)
     else:
         xs = xs_forward

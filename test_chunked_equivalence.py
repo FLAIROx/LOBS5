@@ -24,18 +24,35 @@ from s5.ssm import apply_ssm_original, apply_ssm_chunked, apply_ssm
 
 
 def create_test_data(L, P, H, key):
-    """Create random test data for SSM."""
-    keys = jax.random.split(key, 5)
+    """Create stable random test data for SSM."""
+    keys = jax.random.split(key, 7)
 
-    # Complex-valued parameters (typical for S5)
-    Lambda_bar = jax.random.normal(keys[0], (P,), dtype=jnp.complex64)
-    Lambda_bar = Lambda_bar - 0.5 - 1j * jnp.abs(Lambda_bar.imag)  # Ensure stable
+    # Generate stable Lambda_bar (eigenvalues with magnitude < 1)
+    # Important: For SSM stability, all eigenvalues must have magnitude < 1
+    Lambda_real = jax.random.normal(keys[0], (P,)) * 0.3
+    Lambda_imag = jax.random.normal(keys[1], (P,)) * 0.3
+    Lambda_bar = Lambda_real + 1j * Lambda_imag
 
-    B_bar = jax.random.normal(keys[1], (P, H), dtype=jnp.complex64) * 0.1
-    C_tilde = jax.random.normal(keys[2], (H, P), dtype=jnp.complex64) * 0.1
+    # Simple and gentle stabilization: scale if any eigenvalue has magnitude >= 0.95
+    max_magnitude = jnp.max(jnp.abs(Lambda_bar))
+    if max_magnitude > 0.95:
+        Lambda_bar = Lambda_bar * 0.95 / max_magnitude
 
-    # Real-valued input
-    input_sequence = jax.random.normal(keys[3], (L, H), dtype=jnp.float32)
+    # Optional: ensure negative real parts for continuous-time stability
+    # (but more gently - only shift if positive)
+    Lambda_bar = Lambda_bar - jnp.maximum(Lambda_bar.real, 0.0) - 0.01
+
+    # Generate B_bar and C_tilde with proper complex values
+    B_real = jax.random.normal(keys[2], (P, H)) * 0.01
+    B_imag = jax.random.normal(keys[3], (P, H)) * 0.01
+    B_bar = B_real + 1j * B_imag
+
+    C_real = jax.random.normal(keys[4], (H, P)) * 0.01
+    C_imag = jax.random.normal(keys[5], (H, P)) * 0.01
+    C_tilde = C_real + 1j * C_imag
+
+    # Real-valued input with small magnitude
+    input_sequence = jax.random.normal(keys[6], (L, H), dtype=jnp.float32) * 0.1
 
     return Lambda_bar, B_bar, C_tilde, input_sequence
 
