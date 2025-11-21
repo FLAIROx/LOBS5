@@ -1,5 +1,7 @@
 from flax import linen as nn
 import jax
+from functools import partial
+from jax import remat
 
 
 class SequenceLayer(nn.Module):
@@ -52,6 +54,7 @@ class SequenceLayer(nn.Module):
             deterministic=not self.training,
         )
 
+    @partial(nn.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
     def __call__(self, x):
         """
         Compute the LxH output of S5 layer given an LxH input.

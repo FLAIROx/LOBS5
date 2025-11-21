@@ -58,22 +58,25 @@ if __name__ == "__main__":
  
  
 	# ······· choice 3 ······· STR
-	# M1 Checkpoint fix: Must enable JIT for checkpoint to work
-	# os.environ["JAX_DISABLE_JIT"] = "1"  # 完全关闭JIT编译 - COMMENTED OUT
-	os.environ["JAX_CHECKPOINT_POLICY"] = "dots_with_no_batch_dims"  # Optimize checkpoint strategy
+	# M1 Fix: Enhanced checkpoint and XLA optimization
+	# os.environ["JAX_DISABLE_JIT"] = "1"  # 完全关闭JIT编译 - MUST STAY COMMENTED
+	os.environ["JAX_CHECKPOINT_POLICY"] = "nothing_saveable"  # Most aggressive checkpoint policy
 	# ······· choice 3 ······· END
 
 	#physical_devices = tf.config.list_physical_devices('GPU')
 	#tf.config.experimental.set_memory_growth(physical_devices[0], True)
 	#tf.config.experimental.set_visible_devices([], "GPU")
- 
+
 
 	os.environ["NCCL_TIMEOUT"] = "600"  # 10 minutes
 	os.environ["NCCL_IB_DISABLE"] = "0"  # Disable InfiniBand if not used
 	os.environ["NCCL_P2P_DISABLE"] = "0"  # Disable peer-to-peer if causing issues
- 
- 
-	# os.environ["XLA_FLAGS"] = "--xla_gpu_enable_while_loop_unrolling=false"
+
+ 	# M1 Fix: Use conservative XLA flags for compatibility
+	os.environ["XLA_FLAGS"] = (
+		"--xla_gpu_deterministic_ops=true "
+		"--xla_force_host_platform_device_count=4"
+	)
 
 
 	import argparse
@@ -105,8 +108,8 @@ if __name__ == "__main__":
 	parser.add_argument("--use_book_data", type=str2bool, default=False,
 		     			help="use book data in addition to message data")
 	parser.add_argument("--merging", type=str, choices={'projected', 'padded'},
-						default='projected', 
-						help="Method for merging the book model with the message model. Cannot use RNN mode with projected mode.")
+						default='padded',  # Changed default to 'padded' for full autoregressive
+						help="Method for merging: 'padded' for full autoregressive (BatchPaddedLobPredModel with __call_ar__), 'projected' for standard (BatchFullLobPredModel)")
 	parser.add_argument("--use_simple_book", type=str2bool, default=False,
 		     			help="use raw price (-p0) and volume series instead of 'volume image representation'")
 	parser.add_argument("--book_transform", type=str2bool, default=False,
@@ -225,8 +228,13 @@ if __name__ == "__main__":
 				help="Runs the training loop in overfit mode on a single batch of data. Validation and testing are from the same set. ")
 	parser.add_argument("--log_ce_tables", type=str2bool, default=False,
 				help="Logs the CE values on a per token level to wandb. Memory intensive.")
-	
+
 	args = parser.parse_args()
+
+	# DEBUG: Confirm merging parameter is recognized
+	print(f"[DEBUG] --merging parameter = '{args.merging}'")
+	print(f"[DEBUG] Using {'BatchPaddedLobPredModel (WITH __call_ar__)' if args.merging == 'padded' else 'BatchFullLobPredModel (NO __call_ar__)'}")
+	assert args.merging in ["padded", "projected"], f"Invalid merging mode: {args.merging}"
 
 
 	import torch

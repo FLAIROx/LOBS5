@@ -229,7 +229,11 @@ def init_train_state(
         #     model_cls = BatchFullLobPredModel
         
 
+        # DEBUG: Print args.merging value at the start
+        print(f"[DEBUG init_train] args.merging = '{args.merging}' (type: {type(args.merging)})")
+
         if args.merging == 'projected':
+            print(f"[DEBUG init_train] ❌ Selecting BatchFullLobPredModel (args.merging='projected')")
             model_cls = partial(
                 # projecting sequence lengths down has appeared better than padding
                 BatchFullLobPredModel,
@@ -251,6 +255,7 @@ def init_train_state(
                 bn_momentum=args.bn_momentum,
             )
         elif args.merging == 'padded': #i.e. 'padded'
+            print(f"[DEBUG init_train] ✅ Selecting BatchPaddedLobPredModel (args.merging='{args.merging}')")
             model_cls = partial(
                 # projecting sequence lengths down has appeared better than padding
                 BatchPaddedLobPredModel,

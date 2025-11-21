@@ -97,33 +97,38 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
     Bu_elements = jax.vmap(lambda u: B_bar @ u)(input_sequence)
 
 
-    # M1 Checkpoint optimization for memory reduction
-    from jax import checkpoint
+    # M1 Fix: Use jax.remat for more reliable checkpointing
+    from functools import partial
+    from jax import remat
 
     # Check sequence length to decide whether to use checkpoint
     seq_len = Lambda_elements.shape[0]
-    use_checkpoint = seq_len > 1000  # Use checkpoint for sequences longer than 1000
+    use_checkpoint = seq_len > 500  # Lowered threshold from 1000 to 500
 
+    # Debug output to verify checkpoint activation
     if use_checkpoint:
-        # Use checkpoint for long sequences to save memory
-        @checkpoint
-        def scan_with_checkpoint(Lambda, Bu):
-            return jax.lax.associative_scan(binary_operator, (Lambda, Bu))
+        jax.debug.print("Checkpoint activated for seq_len={}", seq_len)
 
-        _, xs = scan_with_checkpoint(Lambda_elements, Bu_elements)
+    # Use jax.remat instead of decorator for more reliable checkpointing
+    if use_checkpoint:
+        # Create remat version of associative_scan
+        scan_fn = remat(
+            partial(jax.lax.associative_scan, binary_operator),
+            policy=jax.checkpoint_policies.nothing_saveable  # Most aggressive policy
+        )
+        _, xs = scan_fn((Lambda_elements, Bu_elements))
     else:
         # Keep original implementation for short sequences
         _, xs = jax.lax.associative_scan(binary_operator, (Lambda_elements, Bu_elements))
 
-
     if bidirectional:
         if use_checkpoint:
-            @checkpoint
-            def scan_reverse_with_checkpoint(Lambda, Bu):
-                return jax.lax.associative_scan(binary_operator,
-                                              (Lambda, Bu),
-                                              reverse=True)
-            _, xs2 = scan_reverse_with_checkpoint(Lambda_elements, Bu_elements)
+            # Remat for reverse scan
+            scan_rev_fn = remat(
+                lambda args: jax.lax.associative_scan(binary_operator, args, reverse=True),
+                policy=jax.checkpoint_policies.nothing_saveable
+            )
+            _, xs2 = scan_rev_fn((Lambda_elements, Bu_elements))
         else:
             _, xs2 = jax.lax.associative_scan(binary_operator,
                                               (Lambda_elements, Bu_elements),
