@@ -23,12 +23,17 @@
 #         # --wandb_entity=kang-oxford 2>&1 | grep -v "sol_gpu_cost_model"
 #         # --restore='/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/ruby-aardvark-62_98nov1i7' \
 #         # --restore_step=37
-#         #--restore='checkpoints/eager-shadow-750_af39bb9u/'
+#         #--restore='checkpoints/eager-shaodw-750_af39bb9u/'
 #         #5135
 #         # --curtail_epochs=5135 \
 
 # -u: unbuffered output for real-time logging
 # -B don't write .pyc files
+
+# Optional: Override default chunking behavior (default n_chunks=5)
+# export JAX_N_CHUNKS=5  # Number of chunks for sequence processing
+# export JAX_DEBUG_PRINT=true  # Enable debug logging
+
 python3 -u -B run_train.py \
         --C_init=trunc_standard_normal --prenorm=True --batchnorm=False --bidirectional=False \
         --blocks=16 --bsz=64 --d_model=1024 --dataset=lobster-prediction --merging=padded \
@@ -52,8 +57,6 @@ python3 -u -B run_train.py \
         --USE_WANDB=True \
         --wandb_project=lobs5-full-autoreg-tok24 \
         --wandb_entity=kang-oxford \
-        --use_chunked_scan=auto \
-        --n_chunks=4 \
         2>&1 | grep -v "sol_gpu_cost_model"
         # --wandb_entity=kang-oxford 
         # --restore='/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/ruby-aardvark-62_98nov1i7' \

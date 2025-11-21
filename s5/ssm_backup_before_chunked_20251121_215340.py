@@ -318,25 +318,16 @@ def apply_ssm_chunked(Lambda_bar, B_bar, C_tilde, input_sequence,
 
 def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional):
     """
-    Unified apply_ssm using scan-based chunking for ALL sequence lengths.
+    Enhanced apply_ssm with automatic chunking for long sequences.
 
-    CRITICAL FIX: No conditional branches to avoid XLA compiling multiple versions.
-    Uses FIXED n_chunks=5 for simplicity and predictability.
+    Strategy:
+    - L < 3000: Use original associative_scan
+    - L >= 3000: Use chunked version for memory efficiency
 
-    For typical sequence length L=12000:
-    - n_chunks=5 → chunk_size=2400
-
-    For other lengths:
-    - L=6000 → chunk_size=1200
-    - L=3000 → chunk_size=600
-    - L < 3000 → Uses full sequence if not divisible by 5
-
-    By always using the same code path, we guarantee only ONE version is compiled,
-    preventing the memory explosion from compiling both chunked and original versions.
-
-    Environment variables (optional):
-    - JAX_N_CHUNKS=5: Override number of chunks (default: 5)
-    - JAX_DEBUG_PRINT=true: Enable debug logging
+    Environment variables:
+    - JAX_USE_CHUNKED_SCAN=false: Force original implementation
+    - JAX_USE_CHUNKED_SCAN=true: Force chunked implementation
+    - JAX_CHUNK_SIZE=2000: Specify chunk size when forcing chunked
 
     Args:
         Lambda_bar: Discretized diagonal state matrix (P,)
@@ -354,26 +345,30 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
     """
     L = input_sequence.shape[0]
 
-    # Fixed n_chunks approach (simple and predictable)
-    n_chunks_env = os.environ.get('JAX_N_CHUNKS', '5')
-    n_chunks = int(n_chunks_env)
+    # Check environment variable for forcing behavior
+    use_chunking = os.environ.get('JAX_USE_CHUNKED_SCAN', 'auto').lower()
 
-    # Calculate chunk_size
-    if L % n_chunks == 0:
-        chunk_size = L // n_chunks
-    else:
-        # If L not divisible by n_chunks, use full sequence as single chunk
-        chunk_size = L
-        debug_enabled = os.environ.get('JAX_DEBUG_PRINT', '').lower() == 'true'
-        if debug_enabled:
-            jax.debug.print("⚠️ L={} not divisible by n_chunks={}, using chunk_size=L",
-                           L, n_chunks)
-
-    # ✅ ALWAYS call chunked version (NO conditional branching!)
-    # This ensures only ONE version is compiled by XLA
-    return apply_ssm_chunked(Lambda_bar, B_bar, C_tilde,
-                            input_sequence, conj_sym, bidirectional,
-                            chunk_size)
+    if use_chunking == 'false':
+        # Force original implementation
+        return apply_ssm_original(Lambda_bar, B_bar, C_tilde,
+                                 input_sequence, conj_sym, bidirectional)
+    elif use_chunking == 'true':
+        # Force chunked implementation
+        chunk_size_env = os.environ.get('JAX_CHUNK_SIZE', None)
+        chunk_size = int(chunk_size_env) if chunk_size_env else None
+        return apply_ssm_chunked(Lambda_bar, B_bar, C_tilde,
+                                input_sequence, conj_sym, bidirectional,
+                                chunk_size)
+    else:  # 'auto'
+        # Automatic selection based on sequence length
+        if L >= 3000:
+            # Long sequences: use chunked for memory efficiency
+            return apply_ssm_chunked(Lambda_bar, B_bar, C_tilde,
+                                    input_sequence, conj_sym, bidirectional)
+        else:
+            # Short sequences: use original (chunking overhead not worth it)
+            return apply_ssm_original(Lambda_bar, B_bar, C_tilde,
+                                     input_sequence, conj_sym, bidirectional)
 
 
 def apply_ssm_rnn(Lambda_bar, B_bar, C_tilde,hidden, input_sequence,resets, conj_sym, bidirectional):
