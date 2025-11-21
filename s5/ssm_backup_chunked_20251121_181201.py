@@ -3,8 +3,6 @@ import jax
 import jax.numpy as np
 from flax import linen as nn
 from jax.nn.initializers import lecun_normal, normal
-from jax import remat
-import os
 
 from .ssm_init import init_CV, init_VinvB, init_log_steps, trunc_standard_normal
 
@@ -77,8 +75,8 @@ def binary_operator_reset(q_i, q_j):
     )
 
 
-def apply_ssm_original(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional):
-    """ Original implementation - Compute the LxH output of discretized SSM given an LxH input.
+def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional):
+    """ Compute the LxH output of discretized SSM given an LxH input.
         Args:
             Lambda_bar (complex64): discretized diagonal state matrix    (P,)
             B_bar      (complex64): discretized input matrix             (P, H)
@@ -99,12 +97,17 @@ def apply_ssm_original(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bid
     Bu_elements = jax.vmap(lambda u: B_bar @ u)(input_sequence)
 
 
+    # M1 Fix: Use jax.remat for more reliable checkpointing
+    from functools import partial
+    from jax import remat
+
     # Check sequence length to decide whether to use checkpoint
     seq_len = Lambda_elements.shape[0]
     use_checkpoint = seq_len > 500  # Lowered threshold from 1000 to 500
 
     # Debug output to verify checkpoint activation
     # Only print if both checkpoint is activated AND debug mode is enabled
+    import os
     debug_enabled = os.environ.get('JAX_DEBUG_PRINT', 'False').lower() == 'true'
     if use_checkpoint and debug_enabled:
         jax.debug.print("Checkpoint activated for seq_len={}", seq_len)
@@ -139,230 +142,7 @@ def apply_ssm_original(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bid
         return jax.vmap(lambda x: 2*(C_tilde @ x).real)(xs),Bu_elements,Lambda_elements,xs
     else:
         return jax.vmap(lambda x: (C_tilde @ x).real)(xs),Bu_elements,Lambda_elements,xs
-
-
-def apply_ssm_chunked(Lambda_bar, B_bar, C_tilde, input_sequence,
-                      conj_sym, bidirectional, chunk_size=None):
-    """
-    Optimized chunked associative scan implementation.
-
-    Key optimizations:
-    1. Uses jax.lax.scan over chunks (generates while loop, not unrolled)
-    2. Computes Lambda/Bu incrementally inside scan body (reduces HLO graph)
-    3. Returns hidden states, not outputs (more memory efficient when H > P)
-    4. Output projection done after scan completes
-
-    Compilation memory: O(chunk_size × log(chunk_size)) instead of O(L × log(L))
-
-    Args:
-        Lambda_bar: Discretized diagonal state matrix (P,)
-        B_bar: Input-to-state matrix (P, H)
-        C_tilde: State-to-output matrix (H, P)
-        input_sequence: Input sequence (L, H)
-        conj_sym: Whether to enforce conjugate symmetry
-        bidirectional: Whether to use bidirectional processing
-        chunk_size: Size of each chunk (None = auto-select)
-
-    Returns:
-        ys: Output sequence (L, H)
-        Bu_elements: For compatibility (L, P)
-        Lambda_elements: For compatibility (L, P)
-        xs: Hidden states (L, P) or (L, 2P) if bidirectional
-    """
-    L, H = input_sequence.shape
-    P = Lambda_bar.shape[0]
-
-    # Auto-select chunk_size if not provided
-    if chunk_size is None:
-        if L >= 12000:
-            chunk_size = 3000  # 12000/3000 = 4 chunks
-        elif L >= 6000:
-            chunk_size = 2000  # 6000/2000 = 3 chunks
-        elif L >= 3000:
-            chunk_size = 1500  # 3000/1500 = 2 chunks
-        else:
-            # Sequence too short for chunking, fall back to original
-            raise ValueError(f"Sequence length {L} too short for chunking")
-
-    # Validate chunk_size divides L evenly
-    if L % chunk_size != 0:
-        # Try to find a valid chunk_size
-        valid_sizes = [s for s in [500, 1000, 1500, 2000, 2400, 3000, 4000, 6000]
-                      if L % s == 0 and 2 <= L // s <= 20]
-        if valid_sizes:
-            chunk_size = max(valid_sizes)  # Choose largest valid size
-            debug_enabled = os.environ.get('JAX_DEBUG_PRINT', '').lower() == 'true'
-            if debug_enabled:
-                jax.debug.print("Auto-adjusted chunk_size to {} for L={}",
-                               chunk_size, L)
-        else:
-            raise ValueError(f"Cannot find valid chunk_size for L={L}")
-
-    n_chunks = L // chunk_size
-    chunks = input_sequence.reshape(n_chunks, chunk_size, H)
-
-    def scan_chunk_forward(carry_state, chunk):
-        """Process single chunk (forward direction)."""
-        # Compute Lambda and Bu for this chunk only (not full sequence!)
-        Lambda_elements = Lambda_bar * np.ones((chunk_size, P))
-        Bu_elements = jax.vmap(lambda u: B_bar @ u)(chunk)
-
-        # Prepend carry state (maintains associative property)
-        Lambda_with_carry = np.concatenate([
-            np.ones((1, P), dtype=Lambda_elements.dtype),
-            Lambda_elements
-        ], axis=0)
-
-        Bu_with_carry = np.concatenate([
-            carry_state[np.newaxis, :],
-            Bu_elements
-        ], axis=0)
-
-        # Use checkpointing for large chunks
-        if chunk_size >= 1000:
-            scan_fn = remat(
-                partial(jax.lax.associative_scan, binary_operator),
-                policy=jax.checkpoint_policies.nothing_saveable
-            )
-        else:
-            scan_fn = partial(jax.lax.associative_scan, binary_operator)
-
-        _, xs_with_carry = scan_fn((Lambda_with_carry, Bu_with_carry))
-
-        # Extract results
-        xs = xs_with_carry[1:]  # Remove prepended carry element
-        new_carry = xs_with_carry[-1]  # Last state for next chunk
-
-        # Return hidden states (not outputs) to save memory
-        return new_carry, (xs, Lambda_elements, Bu_elements)
-
-    # Execute forward scan over chunks
-    init_carry = np.zeros(P, dtype=np.complex64)
-    final_carry, (xs_chunks, Lambda_chunks, Bu_chunks) = jax.lax.scan(
-        scan_chunk_forward, init_carry, chunks
-    )
-
-    # Reshape back to original dimensions
-    xs_forward = xs_chunks.reshape(L, P)
-    Lambda_elements = Lambda_chunks.reshape(L, P)
-    Bu_elements = Bu_chunks.reshape(L, P)
-
-    # Handle bidirectional case
-    if bidirectional:
-        def scan_chunk_backward(carry_state, chunk):
-            """Process single chunk (backward direction)."""
-            Lambda_elements = Lambda_bar * np.ones((chunk_size, P))
-            Bu_elements = jax.vmap(lambda u: B_bar @ u)(chunk)
-
-            Lambda_with_carry = np.concatenate([
-                np.ones((1, P), dtype=Lambda_elements.dtype),
-                Lambda_elements
-            ], axis=0)
-
-            Bu_with_carry = np.concatenate([
-                carry_state[np.newaxis, :],
-                Bu_elements
-            ], axis=0)
-
-            if chunk_size >= 1000:
-                scan_fn = remat(
-                    lambda args: jax.lax.associative_scan(binary_operator, args, reverse=True),
-                    policy=jax.checkpoint_policies.nothing_saveable
-                )
-            else:
-                scan_fn = lambda args: jax.lax.associative_scan(binary_operator, args, reverse=True)
-
-            _, xs_with_carry = scan_fn((Lambda_with_carry, Bu_with_carry))
-
-            xs = xs_with_carry[1:]
-            new_carry = xs_with_carry[-1]
-
-            return new_carry, xs
-
-        # Process chunks in reverse order
-        init_carry_backward = np.zeros(P, dtype=np.complex64)
-        _, xs_backward_chunks = jax.lax.scan(
-            scan_chunk_backward,
-            init_carry_backward,
-            np.flip(chunks, axis=0),
-            reverse=True
-        )
-
-        xs_backward = np.flip(xs_backward_chunks.reshape(L, P), axis=0)
-        xs = np.concatenate((xs_forward, xs_backward), axis=-1)
-    else:
-        xs = xs_forward
-
-    # Output projection (done after scan to maintain API compatibility)
-    if conj_sym:
-        ys = jax.vmap(lambda x: 2*(C_tilde @ x).real)(xs)
-    else:
-        ys = jax.vmap(lambda x: (C_tilde @ x).real)(xs)
-
-    # Debug logging
-    debug_enabled = os.environ.get('JAX_DEBUG_PRINT', '').lower() == 'true'
-    if debug_enabled:
-        jax.debug.print("Chunked scan: L={}, chunk_size={}, n_chunks={}",
-                       L, chunk_size, n_chunks)
-
-    return ys, Bu_elements, Lambda_elements, xs
-
-
-def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional):
-    """
-    Enhanced apply_ssm with automatic chunking for long sequences.
-
-    Strategy:
-    - L < 3000: Use original associative_scan
-    - L >= 3000: Use chunked version for memory efficiency
-
-    Environment variables:
-    - JAX_USE_CHUNKED_SCAN=false: Force original implementation
-    - JAX_USE_CHUNKED_SCAN=true: Force chunked implementation
-    - JAX_CHUNK_SIZE=2000: Specify chunk size when forcing chunked
-
-    Args:
-        Lambda_bar: Discretized diagonal state matrix (P,)
-        B_bar: Discretized input matrix (P, H)
-        C_tilde: Output matrix (H, P)
-        input_sequence: Input sequence (L, H)
-        conj_sym: Whether conjugate symmetry is enforced
-        bidirectional: Whether bidirectional setup is used
-
-    Returns:
-        ys: SSM outputs (L, H)
-        Bu_elements: For debugging (L, P)
-        Lambda_elements: For debugging (L, P)
-        xs: Hidden states (L, P) or (L, 2P) if bidirectional
-    """
-    L = input_sequence.shape[0]
-
-    # Check environment variable for forcing behavior
-    use_chunking = os.environ.get('JAX_USE_CHUNKED_SCAN', 'auto').lower()
-
-    if use_chunking == 'false':
-        # Force original implementation
-        return apply_ssm_original(Lambda_bar, B_bar, C_tilde,
-                                 input_sequence, conj_sym, bidirectional)
-    elif use_chunking == 'true':
-        # Force chunked implementation
-        chunk_size_env = os.environ.get('JAX_CHUNK_SIZE', None)
-        chunk_size = int(chunk_size_env) if chunk_size_env else None
-        return apply_ssm_chunked(Lambda_bar, B_bar, C_tilde,
-                                input_sequence, conj_sym, bidirectional,
-                                chunk_size)
-    else:  # 'auto'
-        # Automatic selection based on sequence length
-        if L >= 3000:
-            # Long sequences: use chunked for memory efficiency
-            return apply_ssm_chunked(Lambda_bar, B_bar, C_tilde,
-                                    input_sequence, conj_sym, bidirectional)
-        else:
-            # Short sequences: use original (chunking overhead not worth it)
-            return apply_ssm_original(Lambda_bar, B_bar, C_tilde,
-                                     input_sequence, conj_sym, bidirectional)
-
-
+    
 def apply_ssm_rnn(Lambda_bar, B_bar, C_tilde,hidden, input_sequence,resets, conj_sym, bidirectional):
     """ Compute the LxH output of discretized SSM given an LxH input.
         Args:
