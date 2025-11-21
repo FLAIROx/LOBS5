@@ -121,6 +121,16 @@ if __name__ == "__main__":
 	parser.add_argument("--restore_step", type=int)
 	parser.add_argument("--msg_seq_len", type=int, default=500,  # 500
 						help="How many past messages to include in each sample")
+
+	# Chunking parameters for memory optimization
+	parser.add_argument("--use_chunked_scan", type=str, default='auto',
+						choices=['auto', 'true', 'false'],
+						help="Use chunked associative scan: 'auto' (L>=3000), 'true' (force), 'false' (disable)")
+	parser.add_argument("--n_chunks", type=int, default=None,
+						help="Number of chunks to split sequence into (must divide msg_seq_len evenly). If None, auto-select based on sequence length")
+	parser.add_argument("--chunk_size", type=int, default=None,
+						help="Size of each chunk in tokens (alternative to n_chunks). If both specified, chunk_size takes precedence")
+
 	parser.add_argument("--n_data_workers", type=int, default=0,
 		     			help="number of workers used in DataLoader")
 
@@ -237,6 +247,47 @@ if __name__ == "__main__":
 	print(f"[DEBUG] --merging parameter = '{args.merging}'")
 	print(f"[DEBUG] Using {'BatchPaddedLobPredModel (WITH __call_ar__)' if args.merging == 'padded' else 'BatchFullLobPredModel (NO __call_ar__)'}")
 	assert args.merging in ["padded", "projected"], f"Invalid merging mode: {args.merging}"
+
+	# Validate and configure chunking parameters
+	# Compute total sequence length (msg_seq_len is number of orders, MSG_LEN=24 tokens per order)
+	MSG_LEN = 24  # Tokens per message/order
+	total_seq_len = args.msg_seq_len * MSG_LEN  # e.g., 500 * 24 = 12000
+
+	# Validate n_chunks or chunk_size if specified
+	if args.chunk_size is not None:
+		# chunk_size specified: validate it divides total_seq_len
+		if total_seq_len % args.chunk_size != 0:
+			raise ValueError(
+				f"chunk_size={args.chunk_size} must divide total_seq_len={total_seq_len} "
+				f"(msg_seq_len={args.msg_seq_len} × {MSG_LEN}) evenly. "
+				f"Valid chunk sizes: {[s for s in [500, 1000, 1500, 2000, 2400, 3000, 4000, 6000] if total_seq_len % s == 0]}"
+			)
+		chunk_size_to_use = args.chunk_size
+		n_chunks = total_seq_len // args.chunk_size
+	elif args.n_chunks is not None:
+		# n_chunks specified: validate it divides total_seq_len
+		if total_seq_len % args.n_chunks != 0:
+			raise ValueError(
+				f"n_chunks={args.n_chunks} must divide total_seq_len={total_seq_len} "
+				f"(msg_seq_len={args.msg_seq_len} × {MSG_LEN}) evenly. "
+				f"Valid n_chunks values: {[total_seq_len // s for s in [500, 1000, 1500, 2000, 2400, 3000, 4000, 6000] if total_seq_len % s == 0]}"
+			)
+		chunk_size_to_use = total_seq_len // args.n_chunks
+		n_chunks = args.n_chunks
+	else:
+		# Neither specified: use auto defaults
+		chunk_size_to_use = None  # Will be auto-selected by apply_ssm_chunked
+		n_chunks = None
+
+	# Set environment variables for chunked scan
+	os.environ['JAX_USE_CHUNKED_SCAN'] = args.use_chunked_scan
+	if chunk_size_to_use is not None:
+		os.environ['JAX_CHUNK_SIZE'] = str(chunk_size_to_use)
+		print(f"[Chunking] Enabled with chunk_size={chunk_size_to_use} ({n_chunks} chunks)")
+		print(f"[Chunking] Total sequence length: {total_seq_len} tokens ({args.msg_seq_len} orders × {MSG_LEN} tokens/order)")
+	else:
+		print(f"[Chunking] Mode: {args.use_chunked_scan} (chunk_size will be auto-selected if needed)")
+		print(f"[Chunking] Total sequence length: {total_seq_len} tokens")
 
 
 	import torch
