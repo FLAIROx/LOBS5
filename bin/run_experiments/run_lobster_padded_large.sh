@@ -31,7 +31,7 @@
 # -B don't write .pyc files
 python3 -u -B run_train.py \
         --C_init=trunc_standard_normal --prenorm=True --batchnorm=False --bidirectional=False \
-        --blocks=16 --bsz=56 --d_model=1024 --dataset=lobster-prediction --merging=padded \
+        --blocks=16 --bsz=16 --d_model=1024 --dataset=lobster-prediction --merging=padded \
         --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG2016TO2021' \
         --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/tokenized_lobs5_v2' \
         --data_mode='preproc' \
