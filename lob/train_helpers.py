@@ -120,6 +120,7 @@ def create_train_state(model_cls,
                        lr=1e-3,
                        dt_global=False,
                        num_devices=1,
+                       debug_enabled=False,
                        ):
     """
     Initializes the training state using optax
@@ -171,8 +172,9 @@ def create_train_state(model_cls,
 
     model = model_cls(training=True)
     init_rng, dropout_rng = jax.random.split(rng, num=2)
-    
-    jax.debug.print("Dummy input shapes (msg,book) ({}, \n {})",dummy_input[0].shape,dummy_input[1].shape)
+
+    if debug_enabled:  # Python-level conditional - excluded from XLA when False
+        jax.debug.print("Dummy input shapes (msg,book) ({}, \n {})",dummy_input[0].shape,dummy_input[1].shape)
     #RNN mode and initialisation needs to go in here if we need it. 
 
     variables = model.init({"params": init_rng,
@@ -525,6 +527,7 @@ def train_epoch(
         epoch,
         ignore_times,
         log_ce_tables,
+        debug_enabled=False,
     ):
 
     """
@@ -576,6 +579,7 @@ def train_epoch(
                 integration_times,
                 batchnorm,
                 ignore_times,
+                debug_enabled,
             )
             if debug_profiler:
                 loss.block_until_ready()
@@ -658,8 +662,8 @@ def repeat_book(msg,book,shift_start):
 @partial(
     jax.pmap,
     axis_name="batch_devices",
-    static_broadcasted_argnums=(5,6),  # TODO: revert to 5 for batchnorm in pmap
-    in_axes=(0, None, 0, 0, 0, None, None),
+    static_broadcasted_argnums=(5,6,7),  # batchnorm, ignore_times, debug_enabled
+    in_axes=(0, None, 0, 0, 0, None, None, None),
     # out_axes=(0, 0),
     # devices=global_devices
 )
@@ -671,6 +675,7 @@ def train_step(
         batch_integration_timesteps: Tuple[jax.Array, jax.Array], # 4
         batchnorm: bool, # 5
         ignore_times:bool, #6
+        debug_enabled:bool=False, #7
     ):
 
     # Print hash values of static arguments
@@ -685,13 +690,14 @@ def train_step(
         # print('checking for compile in loss_fn')
 
         # === Memory Debugging: Print dimensions before forward pass ===
-        jax.debug.print("=== GPU Memory Debug ===")
-        jax.debug.print("Batch size (B): {}", batch_inputs[0].shape[0])
-        jax.debug.print("Sequence length (L): {}", batch_inputs[0].shape[1])
-        jax.debug.print("Input (messages) shape: {}", batch_inputs[0].shape)
-        if len(batch_inputs) > 1:
-            jax.debug.print("Input (book) shape: {}", batch_inputs[1].shape)
-        jax.debug.print("Labels shape: {}", batch_labels.shape)
+        if debug_enabled:  # Python-level conditional - excluded from XLA when False
+            jax.debug.print("=== GPU Memory Debug ===")
+            jax.debug.print("Batch size (B): {}", batch_inputs[0].shape[0])
+            jax.debug.print("Sequence length (L): {}", batch_inputs[0].shape[1])
+            jax.debug.print("Input (messages) shape: {}", batch_inputs[0].shape)
+            if len(batch_inputs) > 1:
+                jax.debug.print("Input (book) shape: {}", batch_inputs[1].shape)
+            jax.debug.print("Labels shape: {}", batch_labels.shape)
 
         if batchnorm:
             logits, mod_vars = state.apply_fn(
@@ -712,16 +718,18 @@ def train_step(
 
 
         # === Memory Debugging: Print logits dimensions and memory ===
-        jax.debug.print("Logits shape: {}", logits.shape)
-        jax.debug.print("Logits dtype: {}", logits.dtype)
-        # Calculate approximate memory usage (shape[0] * shape[1] * shape[2] * bytes_per_element)
-        jax.debug.print("Logits memory (MB): {}",
-                        logits.shape[0] * logits.shape[1] * logits.shape[2] * 4 / (1024**2))
-        jax.debug.print("Labels shape: {}", batch_labels.shape)
+        if debug_enabled:  # Python-level conditional - excluded from XLA when False
+            jax.debug.print("Logits shape: {}", logits.shape)
+            jax.debug.print("Logits dtype: {}", logits.dtype)
+            # Calculate approximate memory usage (shape[0] * shape[1] * shape[2] * bytes_per_element)
+            jax.debug.print("Logits memory (MB): {}",
+                            logits.shape[0] * logits.shape[1] * logits.shape[2] * 4 / (1024**2))
+            jax.debug.print("Labels shape: {}", batch_labels.shape)
 
 
         ce=cross_entropy_loss(logits, batch_labels)
-        jax.debug.print("CE shape (before reshape): {}", ce.shape)
+        if debug_enabled:  # Python-level conditional - excluded from XLA when False
+            jax.debug.print("CE shape (before reshape): {}", ce.shape)
         if ignore_times:
             ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
             ce_1=ce[:,:,:TIME_START_I]

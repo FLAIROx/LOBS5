@@ -143,19 +143,24 @@ def log_tensor_memory(tensor, name="tensor"):
 
 
 # JAX-compatible debug print version for use inside jitted functions
-def jax_debug_log_memory(step_name):
+def jax_debug_log_memory(step_name, debug_enabled=False):
     """
     JAX debug print version - can be called inside jitted functions
     Note: This will print during trace/compilation, not during execution
-    """
-    cpu_gb = get_process_memory_gb()
-    gpu_stats = get_device_memory_stats(0)
 
-    if gpu_stats:
-        jax.debug.print(
-            "Memory @ {}: CPU={:.2f}GB, GPU={:.2f}/{:.2f}GB ({:.1f}%)",
-            step_name, cpu_gb, gpu_stats['used_gb'], gpu_stats['limit_gb'], gpu_stats['used_pct']
-        )
+    Args:
+        step_name: Identifier for this measurement point
+        debug_enabled: If False, debug print is excluded from XLA compilation
+    """
+    if debug_enabled:  # Python-level conditional - evaluated at trace-time
+        cpu_gb = get_process_memory_gb()
+        gpu_stats = get_device_memory_stats(0)
+
+        if gpu_stats:
+            jax.debug.print(
+                "Memory @ {}: CPU={:.2f}GB, GPU={:.2f}/{:.2f}GB ({:.1f}%)",
+                step_name, cpu_gb, gpu_stats['used_gb'], gpu_stats['limit_gb'], gpu_stats['used_pct']
+            )
 
 
 class MemoryTracker:

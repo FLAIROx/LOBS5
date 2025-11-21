@@ -274,7 +274,8 @@ def init_train_state(
                 prenorm=args.prenorm,
                 batchnorm=args.batchnorm,
                 bn_momentum=args.bn_momentum,
-                #args not adding to partial: training & rescale. 
+                debug_enabled=args.debugprint,
+                #args not adding to partial: training & rescale.
             )
         else:
             raise ValueError("Merge method: " + args.merging + " is not valid (check spelling)")
@@ -317,6 +318,7 @@ def init_train_state(
         lr=lr,
         dt_global=args.dt_global,
         num_devices=args.num_devices,
+        debug_enabled=args.debugprint,
     )
 
     return state, model_cls

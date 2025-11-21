@@ -106,7 +106,10 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
     use_checkpoint = seq_len > 500  # Lowered threshold from 1000 to 500
 
     # Debug output to verify checkpoint activation
-    if use_checkpoint:
+    # Only print if both checkpoint is activated AND debug mode is enabled
+    import os
+    debug_enabled = os.environ.get('JAX_DEBUG_PRINT', 'False').lower() == 'true'
+    if use_checkpoint and debug_enabled:
         jax.debug.print("Checkpoint activated for seq_len={}", seq_len)
 
     # Use jax.remat instead of decorator for more reliable checkpointing

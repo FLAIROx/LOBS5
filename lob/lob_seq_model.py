@@ -361,6 +361,7 @@ class PaddedLobPredModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    debug_enabled: bool = False
 
     def setup(self):
         """
@@ -456,7 +457,8 @@ class PaddedLobPredModel(nn.Module):
         # TODO: again, check integration time steps make sense here
         x = self.fused_s5(x, jnp.ones(x.shape[0]))
 
-        jax.debug.print("x output shape {}, 1st five: \n {}",x.shape,x[:5,:5])
+        if self.debug_enabled:  # Python-level conditional - excluded from XLA when False
+            jax.debug.print("x output shape {}, 1st five: \n {}",x.shape,x[:5,:5])
 
         if self.mode in ["pool"]:
             x = jnp.mean(x, axis=0)
@@ -469,10 +471,12 @@ class PaddedLobPredModel(nn.Module):
             #FIXME: Provide the ntoks argument for averaging as an arg.
         else:
             raise NotImplementedError("Mode must be in ['pool', 'last','none','ema']")
-        
-        jax.debug.print("x output shape after pool/last/ema/none shape {}, 1st five: \n {}",x.shape,x[:5,:5])
+
+        if self.debug_enabled:  # Python-level conditional - excluded from XLA when False
+            jax.debug.print("x output shape after pool/last/ema/none shape {}, 1st five: \n {}",x.shape,x[:5,:5])
         x = self.decoder(x)
-        jax.debug.print("x output shape after decoder {}",x.shape,x[:5,:5])
+        if self.debug_enabled:  # Python-level conditional - excluded from XLA when False
+            jax.debug.print("x output shape after decoder {}",x.shape,x[:5,:5])
 
         return nn.log_softmax(x, axis=-1)
 

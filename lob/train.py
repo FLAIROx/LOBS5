@@ -32,6 +32,14 @@ def train(args):
     Main function to train over a certain number of epochs
     """
 
+    # Set JAX debug print environment variable based on --debugprint flag
+    if hasattr(args, 'debugprint') and args.debugprint:
+        os.environ['JAX_DEBUG_PRINT'] = 'true'
+        print("[DEBUG] JAX debug prints ENABLED (XLA compilation will include debug nodes)")
+    else:
+        os.environ['JAX_DEBUG_PRINT'] = 'false'
+        print("[INFO] JAX debug prints DISABLED (optimized for memory/performance)")
+
     best_test_loss = 100000000
     best_test_acc = -10000.0
 
@@ -244,7 +252,8 @@ def train(args):
                                               init_hidden,
                                               epoch,
                                               ignore_times,
-                                              args.log_ce_tables)
+                                              args.log_ce_tables,
+                                              args.debugprint)
 
         print_memory_usage(f"After training epoch {epoch + 1}")
 
