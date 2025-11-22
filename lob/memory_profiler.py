@@ -194,6 +194,57 @@ class MemoryTracker:
             print(f"{'='*60}\n")
 
 
+def analyze_compilation_memory(train_step_fn, dummy_inputs, step_name="train_step"):
+    """
+    Analyze memory usage using jax.lower().compile().memory_analysis()
+
+    Args:
+        train_step_fn: The jitted function to analyze
+        dummy_inputs: Tuple of dummy inputs matching the function signature
+        step_name: Name for logging
+
+    Returns:
+        Memory analysis dictionary from JAX compilation
+    """
+    print(f"\n{'='*60}")
+    print(f"JAX Compilation Memory Analysis for {step_name}")
+    print(f"{'='*60}")
+
+    try:
+        # Lower and compile the function
+        lowered = jax.jit(train_step_fn).lower(*dummy_inputs)
+        compiled = lowered.compile()
+
+        # Get memory analysis
+        mem_analysis = compiled.memory_analysis()
+
+        print(f"[jax.lower().compile()] Compilation Memory Analysis:")
+
+        # Print key memory metrics
+        if hasattr(mem_analysis, 'temp_size_in_bytes'):
+            temp_gb = mem_analysis.temp_size_in_bytes / 1024**3
+            print(f"  Temp Memory:        {temp_gb:.3f} GB")
+
+        if hasattr(mem_analysis, 'argument_size_in_bytes'):
+            arg_gb = mem_analysis.argument_size_in_bytes / 1024**3
+            print(f"  Argument Size:      {arg_gb:.3f} GB")
+
+        if hasattr(mem_analysis, 'output_size_in_bytes'):
+            out_gb = mem_analysis.output_size_in_bytes / 1024**3
+            print(f"  Output Size:        {out_gb:.3f} GB")
+
+        # Print the full analysis object
+        print(f"\n[jax.lower().compile()] Full Analysis Object:")
+        print(f"{mem_analysis}")
+
+    except Exception as e:
+        print(f"[jax.lower().compile()] Error during compilation memory analysis: {e}")
+        mem_analysis = None
+
+    print(f"{'='*60}\n")
+    return mem_analysis
+
+
 def detailed_memory_breakdown(state, batch_size_per_gpu, seq_len, vocab_size, d_model, n_layers):
     """
     Calculate and display detailed memory breakdown for training
@@ -254,7 +305,7 @@ def detailed_memory_breakdown(state, batch_size_per_gpu, seq_len, vocab_size, d_
     gpu_stats = jax.local_devices()[0].memory_stats()
     if gpu_stats:
         actual_gb = gpu_stats['bytes_in_use'] / 1024**3
-        print(f"Actual GPU Usage:    {actual_gb:.2f} GB")
+        print(f"Actual GPU Usage:    {actual_gb:.2f} GB (from device.memory_stats())")
         print(f"Difference:          {actual_gb - total_gb:+.2f} GB")
         print(f"  (includes JAX overhead, buffers, fragmentation)")
 

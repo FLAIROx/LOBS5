@@ -249,6 +249,15 @@ if __name__ == "__main__":
 	print(f"[Chunking] Always enabled with n_chunks={n_chunks_actual}, chunk_size={chunk_size}")
 	print(f"[Chunking] Total sequence length: {total_seq_len} tokens ({args.msg_seq_len} orders × {MSG_LEN} tokens/order)")
 
+	# ========== TBPTT Gradient Chunking（固定 4 chunks）==========
+	TBPTT_N_GRAD_CHUNKS = 4  # 固定值：降低编译内存 67GB → ~4GB
+	grad_chunk_size = (args.msg_seq_len // TBPTT_N_GRAD_CHUNKS) * MSG_LEN  # 125 messages × 24 = 3000 tokens
+	print(f"[TBPTT] Gradient chunking固定启用:")
+	print(f"  - n_grad_chunks: {TBPTT_N_GRAD_CHUNKS} (固定)")
+	print(f"  - Chunk size: {grad_chunk_size} tokens ({args.msg_seq_len // TBPTT_N_GRAD_CHUNKS} messages)")
+	print(f"  - Expected compilation memory: ~{(grad_chunk_size / total_seq_len) ** 2 * 67:.1f} GB")
+	print(f"  ⚠️  Training speed will be ~{TBPTT_N_GRAD_CHUNKS}x slower")
+
 	import torch
 	torch.multiprocessing.set_start_method('spawn')
 

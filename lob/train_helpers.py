@@ -659,6 +659,93 @@ def repeat_book(msg,book,shift_start):
     #     book=np.concatenate([pad,book[:-1]])
     return (msg,book)
 
+
+# ============== TBPTT Gradient Chunking 辅助函数 ==============
+
+def split_sequence_for_tbptt(batch_inputs, batch_labels,
+                             batch_integration_timesteps,
+                             n_chunks=4, msg_len=24):
+    """
+    为 TBPTT 分块序列，在消息边界对齐
+
+    Args:
+        batch_inputs: (messages, books) tuple
+            messages: (BSZ, L) - message tokens
+            books: (BSZ, n_messages, book_dim) or similar - book states
+        batch_labels: (BSZ, L) - labels
+        batch_integration_timesteps: (msg_times, book_times) tuple
+        n_chunks: 分块数量（必须能整除 L/msg_len）
+        msg_len: 每条消息的 token 数（24）
+
+    Returns:
+        chunked_inputs: ((msgs_chunked, books_chunked), ...)
+            msgs_chunked: (n_chunks, BSZ, chunk_size)
+            books_chunked: (n_chunks, BSZ, msgs_per_chunk, book_dim)
+        chunked_labels: (n_chunks, BSZ, chunk_size)
+        chunked_times: ((msg_t_chunked, book_t_chunked), ...)
+    """
+    messages, books = batch_inputs
+    msg_times, book_times = batch_integration_timesteps
+
+    BSZ, L = messages.shape
+
+    # 验证消息边界对齐
+    n_messages = L // msg_len  # 500 for L=12000
+    assert n_messages % n_chunks == 0, \
+        f"n_chunks={n_chunks} must divide n_messages={n_messages}. "\
+        f"Valid values: {[i for i in range(1, n_messages+1) if n_messages % i == 0]}"
+
+    messages_per_chunk = n_messages // n_chunks  # 125 for n_chunks=4
+    chunk_size = messages_per_chunk * msg_len  # 3000
+
+    # ========== 分块 messages ==========
+    # (BSZ, L) → (BSZ, n_chunks, chunk_size) → (n_chunks, BSZ, chunk_size)
+    messages_chunked = messages.reshape(BSZ, n_chunks, chunk_size)
+    messages_chunked = messages_chunked.transpose(1, 0, 2)
+
+    # ========== 分块 labels ==========
+    labels_chunked = batch_labels.reshape(BSZ, n_chunks, chunk_size)
+    labels_chunked = labels_chunked.transpose(1, 0, 2)
+
+    # ========== 分块 message times ==========
+    msg_times_chunked = msg_times.reshape(BSZ, n_chunks, chunk_size)
+    msg_times_chunked = msg_times_chunked.transpose(1, 0, 2)
+
+    # ========== 分块 books ==========
+    # Books shape 可能是 (BSZ, n_messages, book_dim) 或其他
+    if len(books.shape) == 3 and books.shape[1] == n_messages:
+        # (BSZ, n_messages, book_dim) → (BSZ, n_chunks, msgs_per_chunk, book_dim)
+        books_chunked = books.reshape(BSZ, n_chunks, messages_per_chunk, -1)
+        books_chunked = books_chunked.transpose(1, 0, 2, 3)
+
+        # Book times 同样处理
+        if len(book_times.shape) == 3:
+            book_times_chunked = book_times.reshape(BSZ, n_chunks, messages_per_chunk, -1)
+            book_times_chunked = book_times_chunked.transpose(1, 0, 2, 3)
+        else:
+            # 如果 book_times 格式不同，简单 broadcast
+            book_times_chunked = np.broadcast_to(
+                book_times[None, :, :],
+                (n_chunks,) + book_times.shape
+            )
+    else:
+        # 其他 book 格式：简单 broadcast
+        books_chunked = np.broadcast_to(
+            books[None, :, :],
+            (n_chunks,) + books.shape
+        )
+        book_times_chunked = np.broadcast_to(
+            book_times[None, :, :],
+            (n_chunks,) + book_times.shape
+        )
+
+    return (
+        (messages_chunked, books_chunked),
+        labels_chunked,
+        (msg_times_chunked, book_times_chunked)
+    )
+
+
 @partial(
     jax.pmap,
     axis_name="batch_devices",
@@ -686,79 +773,163 @@ def train_step(
     batch_inputs=repeat_book(*batch_inputs,True)
     # batch_integration_timesteps=repeat_book(*batch_integration_timesteps)
 
-    def loss_fn(params):
-        # print('checking for compile in loss_fn')
+    # ============== TBPTT Chunking 模式（固定 4 chunks）==============
+    n_grad_chunks = 4  # 固定值：降低 XLA 编译内存 67GB → ~4GB
 
-        # === Memory Debugging: Print dimensions before forward pass ===
-        if debug_enabled:  # Python-level conditional - excluded from XLA when False
-            jax.debug.print("=== GPU Memory Debug ===")
-            jax.debug.print("Batch size (B): {}", batch_inputs[0].shape[0])
-            jax.debug.print("Sequence length (L): {}", batch_inputs[0].shape[1])
-            jax.debug.print("Input (messages) shape: {}", batch_inputs[0].shape)
-            if len(batch_inputs) > 1:
-                jax.debug.print("Input (book) shape: {}", batch_inputs[1].shape)
-            jax.debug.print("Labels shape: {}", batch_labels.shape)
+    if True:  # 总是使用 chunking
+        # ========== 1. 分块数据 ==========
+        chunked_data = split_sequence_for_tbptt(
+            batch_inputs,
+            batch_labels,
+            batch_integration_timesteps,
+            n_chunks=n_grad_chunks
+        )
 
-        if batchnorm:
-            logits, mod_vars = state.apply_fn(
-                {"params": params, "batch_stats": state.batch_stats},
-                *batch_inputs, *batch_integration_timesteps,
-                rngs={"dropout": rng},
-                mutable=["intermediates", "batch_stats"],
-                method='__call_ar__'
+        (messages_chunked, books_chunked), labels_chunked, (msg_times_chunked, book_times_chunked) = chunked_data
+
+        # ========== 2. 定义 Scan Body：单个 chunk 的梯度计算 ==========
+        def compute_chunk_gradient(carry, chunk_data):
+            """
+            计算单个 chunk 的梯度并累积
+
+            ⚠️ 关键：这个函数只处理 chunk_size (例如 3000) 的序列
+                    XLA 只编译这个大小的计算图！
+            """
+            grads_accum, loss_accum, rng_carry = carry
+
+            # 解包 chunk 数据
+            (msgs_chunk, books_chunk), labels_chunk, (msg_t_chunk, book_t_chunk), chunk_idx = chunk_data
+
+            # Split RNG for this chunk
+            rng_carry, rng_chunk = jax.random.split(rng_carry)
+
+            # ========== 定义这个 chunk 的 loss 函数 ==========
+            def loss_fn_chunk(params):
+                """
+                ⚠️ 关键：只处理 chunk_size=3000 的序列
+                XLA 编译的计算图大小 ∝ chunk_size²，不是 L²
+                """
+
+                # Debug 输出
+                if debug_enabled:
+                    jax.debug.print("=== TBPTT Chunk {} ===", chunk_idx)
+                    jax.debug.print("Messages chunk shape: {}", msgs_chunk.shape)
+                    jax.debug.print("Labels chunk shape: {}", labels_chunk.shape)
+
+                # Forward pass - 只处理这个 chunk
+                if batchnorm:
+                    logits_chunk, mod_vars_chunk = state.apply_fn(
+                        {"params": params, "batch_stats": state.batch_stats},
+                        msgs_chunk,      # (BSZ, chunk_size) ← 例如 (BSZ, 3000)
+                        books_chunk,     # (BSZ, msgs_per_chunk, book_dim)
+                        msg_t_chunk,     # (BSZ, chunk_size)
+                        book_t_chunk,    # (BSZ, msgs_per_chunk, ...)
+                        rngs={"dropout": rng_chunk},
+                        mutable=["intermediates", "batch_stats"],
+                        method='__call_ar__'
+                    )
+                else:
+                    logits_chunk, mod_vars_chunk = state.apply_fn(
+                        {"params": params},
+                        msgs_chunk,
+                        books_chunk,
+                        msg_t_chunk,
+                        book_t_chunk,
+                        rngs={"dropout": rng_chunk},
+                        mutable=["intermediates"],
+                        method='__call_ar__'
+                    )
+
+                # Cross-entropy loss
+                ce_chunk = cross_entropy_loss(logits_chunk, labels_chunk, z_loss=0.0001)
+
+                # 处理 ignore_times
+                if ignore_times:
+                    ce_chunk = ce_chunk.reshape(ce_chunk.shape[0], -1, Message_Tokenizer.MSG_LEN)
+                    ce_1 = ce_chunk[:, :, :TIME_START_I]
+                    ce_2 = ce_chunk[:, :, (TIME_END_I+1):]
+                    ce_chunk = np.concatenate([ce_1, ce_2], axis=2)
+                    ce_chunk = ce_chunk.reshape(ce_chunk.shape[0], -1)
+
+                # 平均 loss
+                ce_chunk = np.mean(ce_chunk, axis=0)
+                loss_chunk = np.mean(ce_chunk)
+
+                return loss_chunk, (mod_vars_chunk, logits_chunk, ce_chunk)
+
+            # ========== 计算这个 chunk 的梯度 ==========
+            # ⚠️ 关键：jax.value_and_grad 只编译 chunk_size 的计算图
+            (loss_chunk, (mod_vars_chunk, logits_chunk, ce_chunk)), grads_chunk = \
+                jax.value_and_grad(loss_fn_chunk, has_aux=True)(state.params)
+
+            # ========== 累积梯度 ==========
+            grads_accum = jax.tree_util.tree_map(
+                lambda a, g: a + g,
+                grads_accum,
+                grads_chunk
             )
-        else:
-            logits, mod_vars = state.apply_fn(
-                {"params": params},
-                *batch_inputs, *batch_integration_timesteps,
-                rngs={"dropout": rng},
-                mutable=["intermediates"],
-                method='__call_ar__'
-            )
+            loss_accum = loss_accum + loss_chunk
 
+            # 准备输出
+            aux_outputs = (logits_chunk, ce_chunk)
 
-        # === Memory Debugging: Print logits dimensions and memory ===
-        if debug_enabled:  # Python-level conditional - excluded from XLA when False
-            jax.debug.print("Logits shape: {}", logits.shape)
-            jax.debug.print("Logits dtype: {}", logits.dtype)
-            # Calculate approximate memory usage (shape[0] * shape[1] * shape[2] * bytes_per_element)
-            jax.debug.print("Logits memory (MB): {}",
-                            logits.shape[0] * logits.shape[1] * logits.shape[2] * 4 / (1024**2))
-            jax.debug.print("Labels shape: {}", batch_labels.shape)
+            new_carry = (grads_accum, loss_accum, rng_carry)
+            return new_carry, aux_outputs
 
+        # ========== 3. 准备 Scan 输入数据 ==========
+        chunk_indices = np.arange(n_grad_chunks)
+        scan_data = (
+            (messages_chunked, books_chunked),
+            labels_chunked,
+            (msg_times_chunked, book_times_chunked),
+            chunk_indices
+        )
 
-        ce=cross_entropy_loss(logits, batch_labels)
-        if debug_enabled:  # Python-level conditional - excluded from XLA when False
-            jax.debug.print("CE shape (before reshape): {}", ce.shape)
-        if ignore_times:
-            ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
-            ce_1=ce[:,:,:TIME_START_I]
-            ce_2=ce[:,:,(TIME_END_I+1):]
-            ce=np.concatenate([ce_1,ce_2],axis=2)
-            ce=ce.reshape(ce.shape[0],-1)
+        # 初始化累积器
+        init_grads = jax.tree_util.tree_map(np.zeros_like, state.params)
+        init_loss = np.array(0.0)
+        init_carry = (init_grads, init_loss, rng)
 
-        ce=np.mean(ce,axis=0)
-        # jax.debug.print("Shape of CE: {}", ce.shape)
-        # average cross-ent loss
-        loss = np.mean(ce)
-        # jax.debug.print("Shape of loss: {}", loss.shape)
-        return loss, (mod_vars, logits,ce)
+        # ========== 4. 执行 Scan（关键！）==========
+        # ⚠️ jax.lax.scan 生成 while loop，不展开
+        # XLA 只编译 scan body（处理一个 chunk）
+        # 编译内存：O(chunk_size²) 而不是 O(L²)
+        (final_grads, final_loss, _), (logits_chunks, ce_chunks) = jax.lax.scan(
+            compute_chunk_gradient,
+            init_carry,
+            scan_data,
+            length=n_grad_chunks
+        )
 
-    (loss, (mod_vars, logits,ce)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
+        # ========== 5. 平均梯度和 loss ==========
+        grads = jax.tree_util.tree_map(lambda g: g / n_grad_chunks, final_grads)
+        loss = final_loss / n_grad_chunks
 
+        # ========== 6. 重组输出 ==========
+        # logits_chunks: (n_chunks, BSZ, chunk_size, vocab_size)
+        # 需要 reshape 成: (BSZ, L, vocab_size)
+        logits = logits_chunks.transpose(1, 0, 2, 3).reshape(
+            logits_chunks.shape[1],  # BSZ
+            -1,                      # L = n_chunks * chunk_size
+            logits_chunks.shape[-1]  # vocab_size
+        )
 
+        # ce_chunks: (n_chunks, chunk_size)
+        # 需要 reshape 成: (L,)
+        ce = ce_chunks.reshape(-1)
 
-    # UPDATE
+        # mod_vars 在 chunking 模式下设为 None（简化处理）
+        mod_vars = None
+
+    # ============== 同步和更新 ==============
     # calculate means over device dimension (first)
     loss = jax.lax.pmean(loss, axis_name="batch_devices")
     grads = jax.lax.pmean(grads, axis_name="batch_devices")
     ce=jax.lax.pmean(ce,axis_name="batch_devices")
 
-    if batchnorm:
-        mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
-        state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
-    else:
-        state = state.apply_gradients(grads=grads)
+    # 更新参数（TBPTT chunking 模式：不更新 batch_stats）
+    # 因为每个 chunk 有独立的 batch_stats，合并策略不明确
+    state = state.apply_gradients(grads=grads)
 
     #return loss, mod_vars, grads, state
     return state, loss, ce, logits
