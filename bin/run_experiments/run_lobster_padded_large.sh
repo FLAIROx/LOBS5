@@ -49,7 +49,7 @@ python3 -u -B run_train.py \
         --num_devices=4 --n_data_workers=0 \
         --debug_loading=False \
         --enable_profiler=False \
-        --debugprint=True \
+        --debugprint=False \
         --random_offsets_train=True \
         --shuffle_train=True \
         --debug_overfit=False \

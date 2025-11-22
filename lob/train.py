@@ -173,9 +173,6 @@ def train(args):
     print("Running jax.lower().compile() Memory Analysis...")
     print("="*60)
     try:
-        # Import train_step from train_helpers
-        from lob.train_helpers import train_step
-
         # Create dummy inputs matching train_step signature (single device, not pmapped)
         dummy_batch_inputs = (
             jnp.ones((batch_per_gpu, seq_len), dtype=jnp.int32),  # messages
@@ -189,43 +186,69 @@ def train(args):
         dummy_rng = random.PRNGKey(0)
 
         # Extract single-device state (train_step is pmapped, so we need unreplicated state)
-        from flax.training import train_state as ts
-        single_device_state = jax.tree_util.tree_map(lambda x: x[0] if hasattr(x, '__getitem__') and len(x.shape) > 0 else x, state)
+        single_device_state = jax.tree_util.tree_map(
+            lambda x: x[0] if hasattr(x, '__getitem__') and len(x.shape) > 0 else x,
+            state
+        )
 
-        # Create a jitted (non-pmapped) version of the loss function for analysis
-        def loss_fn_for_analysis(params):
-            if batchnorm:
-                logits, mod_vars = single_device_state.apply_fn(
-                    {"params": params, "batch_stats": single_device_state.batch_stats},
-                    *dummy_batch_inputs, *dummy_timesteps,
-                    rngs={"dropout": dummy_rng},
-                    mutable=["intermediates", "batch_stats"],
-                    method='__call_ar__'
-                )
-            else:
-                logits, mod_vars = single_device_state.apply_fn(
-                    {"params": params},
-                    *dummy_batch_inputs, *dummy_timesteps,
-                    rngs={"dropout": dummy_rng},
-                    mutable=["intermediates"],
-                    method='__call_ar__'
-                )
-            # Simple loss for memory analysis
-            loss = jnp.mean(logits)
-            return loss, (mod_vars, logits)
+        # Capture values to avoid closure issues
+        use_batchnorm = args.batchnorm
+        apply_fn = single_device_state.apply_fn
+        batch_stats = single_device_state.batch_stats if use_batchnorm else None
+
+        # Create a standalone loss function that doesn't rely on closures
+        def create_forward_fn(apply_fn, batch_inputs, timesteps, rng, use_bn, bn_stats):
+            """Factory function to create forward pass without closures"""
+            def forward_fn(params):
+                if use_bn:
+                    logits, mod_vars = apply_fn(
+                        {"params": params, "batch_stats": bn_stats},
+                        *batch_inputs, *timesteps,
+                        rngs={"dropout": rng},
+                        mutable=["intermediates", "batch_stats"],
+                        method='__call_ar__'
+                    )
+                else:
+                    logits, mod_vars = apply_fn(
+                        {"params": params},
+                        *batch_inputs, *timesteps,
+                        rngs={"dropout": rng},
+                        mutable=["intermediates"],
+                        method='__call_ar__'
+                    )
+                # Simple loss for memory analysis
+                loss = jnp.mean(logits)
+                return loss, (mod_vars, logits)
+            return forward_fn
+
+        # Create the forward function with all values bound
+        forward_fn = create_forward_fn(
+            apply_fn,
+            dummy_batch_inputs,
+            dummy_timesteps,
+            dummy_rng,
+            use_batchnorm,
+            batch_stats
+        )
 
         # Analyze forward pass
         print("\n[Forward Pass Analysis]")
         analyze_compilation_memory(
-            lambda: loss_fn_for_analysis(single_device_state.params),
+            lambda: forward_fn(single_device_state.params),
             (),
             step_name="forward_pass"
         )
 
         # Analyze forward + backward (gradient computation)
         print("\n[Forward + Backward Pass Analysis]")
+        def grad_fn():
+            return jax.value_and_grad(
+                lambda p: forward_fn(p)[0],
+                has_aux=False
+            )(single_device_state.params)
+
         analyze_compilation_memory(
-            lambda: jax.value_and_grad(lambda p: loss_fn_for_analysis(p)[0], has_aux=False)(single_device_state.params),
+            grad_fn,
             (),
             step_name="forward_backward_pass"
         )
