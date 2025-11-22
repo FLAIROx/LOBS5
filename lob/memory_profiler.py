@@ -210,6 +210,10 @@ def analyze_compilation_memory(train_step_fn, dummy_inputs, step_name="train_ste
     print(f"JAX Compilation Memory Analysis for {step_name}")
     print(f"{'='*60}")
 
+    def bytes_to_gb(bytes_val):
+        """Convert bytes to GB"""
+        return bytes_val / (1024**3)
+
     try:
         # Lower and compile the function
         lowered = jax.jit(train_step_fn).lower(*dummy_inputs)
@@ -218,27 +222,69 @@ def analyze_compilation_memory(train_step_fn, dummy_inputs, step_name="train_ste
         # Get memory analysis
         mem_analysis = compiled.memory_analysis()
 
-        print(f"[jax.lower().compile()] Compilation Memory Analysis:")
+        print(f"\n[jax.lower().compile()] Compilation Memory Analysis:\n")
 
-        # Print key memory metrics
-        if hasattr(mem_analysis, 'temp_size_in_bytes'):
-            temp_gb = mem_analysis.temp_size_in_bytes / 1024**3
-            print(f"  Temp Memory:        {temp_gb:.3f} GB")
+        # Device Memory (GPU)
+        print("Device Memory (GPU):")
+        if hasattr(mem_analysis, 'generated_code_size_in_bytes'):
+            code_gb = bytes_to_gb(mem_analysis.generated_code_size_in_bytes)
+            print(f"  Generated Code:     {code_gb:>8.3f} GB  ({mem_analysis.generated_code_size_in_bytes:,} bytes)")
 
         if hasattr(mem_analysis, 'argument_size_in_bytes'):
-            arg_gb = mem_analysis.argument_size_in_bytes / 1024**3
-            print(f"  Argument Size:      {arg_gb:.3f} GB")
+            arg_gb = bytes_to_gb(mem_analysis.argument_size_in_bytes)
+            print(f"  Arguments:          {arg_gb:>8.3f} GB  ({mem_analysis.argument_size_in_bytes:,} bytes)")
 
         if hasattr(mem_analysis, 'output_size_in_bytes'):
-            out_gb = mem_analysis.output_size_in_bytes / 1024**3
-            print(f"  Output Size:        {out_gb:.3f} GB")
+            out_gb = bytes_to_gb(mem_analysis.output_size_in_bytes)
+            print(f"  Outputs:            {out_gb:>8.3f} GB  ({mem_analysis.output_size_in_bytes:,} bytes)")
 
-        # Print the full analysis object
-        print(f"\n[jax.lower().compile()] Full Analysis Object:")
-        print(f"{mem_analysis}")
+        if hasattr(mem_analysis, 'temp_size_in_bytes'):
+            temp_gb = bytes_to_gb(mem_analysis.temp_size_in_bytes)
+            print(f"  Temp/Scratch:       {temp_gb:>8.3f} GB  ({mem_analysis.temp_size_in_bytes:,} bytes)  ← Peak memory during execution")
+
+        if hasattr(mem_analysis, 'alias_size_in_bytes'):
+            alias_gb = bytes_to_gb(mem_analysis.alias_size_in_bytes)
+            print(f"  Aliases:            {alias_gb:>8.3f} GB  ({mem_analysis.alias_size_in_bytes:,} bytes)")
+
+        # Host Memory (CPU)
+        print("\nHost Memory (CPU):")
+        if hasattr(mem_analysis, 'host_generated_code_size_in_bytes'):
+            host_code_gb = bytes_to_gb(mem_analysis.host_generated_code_size_in_bytes)
+            print(f"  Generated Code:     {host_code_gb:>8.3f} GB  ({mem_analysis.host_generated_code_size_in_bytes:,} bytes)")
+
+        if hasattr(mem_analysis, 'host_argument_size_in_bytes'):
+            host_arg_gb = bytes_to_gb(mem_analysis.host_argument_size_in_bytes)
+            print(f"  Arguments:          {host_arg_gb:>8.3f} GB  ({mem_analysis.host_argument_size_in_bytes:,} bytes)")
+
+        if hasattr(mem_analysis, 'host_output_size_in_bytes'):
+            host_out_gb = bytes_to_gb(mem_analysis.host_output_size_in_bytes)
+            print(f"  Outputs:            {host_out_gb:>8.3f} GB  ({mem_analysis.host_output_size_in_bytes:,} bytes)")
+
+        if hasattr(mem_analysis, 'host_temp_size_in_bytes'):
+            host_temp_gb = bytes_to_gb(mem_analysis.host_temp_size_in_bytes)
+            print(f"  Temp/Scratch:       {host_temp_gb:>8.3f} GB  ({mem_analysis.host_temp_size_in_bytes:,} bytes)")
+
+        if hasattr(mem_analysis, 'host_alias_size_in_bytes'):
+            host_alias_gb = bytes_to_gb(mem_analysis.host_alias_size_in_bytes)
+            print(f"  Aliases:            {host_alias_gb:>8.3f} GB  ({mem_analysis.host_alias_size_in_bytes:,} bytes)")
+
+        # Calculate total peak GPU memory
+        print("\nSummary:")
+        total_peak_gpu = 0
+        if hasattr(mem_analysis, 'temp_size_in_bytes'):
+            total_peak_gpu += mem_analysis.temp_size_in_bytes
+        if hasattr(mem_analysis, 'output_size_in_bytes'):
+            total_peak_gpu += mem_analysis.output_size_in_bytes
+        if hasattr(mem_analysis, 'generated_code_size_in_bytes'):
+            total_peak_gpu += mem_analysis.generated_code_size_in_bytes
+
+        total_peak_gb = bytes_to_gb(total_peak_gpu)
+        print(f"  Total Peak GPU Memory: ~{total_peak_gb:.2f} GB (temp + output + code)")
+
+        print(f"\n[jax.lower().compile()] Raw Object: {mem_analysis}")
 
     except Exception as e:
-        print(f"[jax.lower().compile()] Error during compilation memory analysis: {e}")
+        print(f"\n[jax.lower().compile()] Error during compilation memory analysis: {e}")
         mem_analysis = None
 
     print(f"{'='*60}\n")
