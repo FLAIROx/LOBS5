@@ -30,26 +30,26 @@
 # -u: unbuffered output for real-time logging
 # -B don't write .pyc files
 
-# Optional: Override default chunking behavior (default n_chunks=5)
-# export JAX_N_CHUNKS=5  # Number of chunks for sequence processing
-# export JAX_DEBUG_PRINT=true  # Enable debug logging
+# Chunking configuration
+export JAX_N_CHUNKS=10
+export JAX_DEBUG_PRINT=true
 
 python3 -u -B run_train.py \
         --C_init=trunc_standard_normal --prenorm=True --batchnorm=False --bidirectional=False \
-        --blocks=16 --bsz=64 --d_model=1024 --dataset=lobster-prediction --merging=padded \
+        --blocks=16 --bsz=96 --d_model=1024 --dataset=lobster-prediction --merging=padded \
         --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG2016TO2021' \
         --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/tokenized_lobs5_v2' \
         --data_mode='preproc' \
          --clip_eigs=True --activation_fn=half_glu1 \
         --dt_global=False --epochs=5 --jax_seed=42 --lr_factor=1 --n_layers=12 \
         --opt_config=standard --p_dropout=0.0 --ssm_lr_base=0.0003 --ssm_size_base=1024 \
-        --warmup_end=1 --weight_decay=0.05 --msg_seq_len=500 \
+        --warmup_end=1 --weight_decay=0.05 --msg_seq_len=250 \
         --use_book_data=True --use_simple_book=False --book_transform=True  \
         --masking=none \
         --num_devices=4 --n_data_workers=0 \
         --debug_loading=False \
         --enable_profiler=False \
-        --debugprint=False \
+        --debugprint=True \
         --random_offsets_train=True \
         --shuffle_train=True \
         --debug_overfit=False \

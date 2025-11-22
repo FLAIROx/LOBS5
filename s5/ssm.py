@@ -201,6 +201,12 @@ def apply_ssm_chunked(Lambda_bar, B_bar, C_tilde, input_sequence,
     n_chunks = L // chunk_size
     chunks = input_sequence.reshape(n_chunks, chunk_size, H)
 
+    # Debug output at entry
+    debug_enabled = os.environ.get('JAX_DEBUG_PRINT', '').lower() == 'true'
+    if debug_enabled:
+        jax.debug.print("🔹 apply_ssm_chunked: L={}, chunk_size={}, n_chunks={}, using jax.lax.scan",
+                       L, chunk_size, n_chunks)
+
     def scan_chunk_forward(carry_state, chunk):
         """Process single chunk (forward direction)."""
         # Compute Lambda and Bu for this chunk only (not full sequence!)
@@ -371,6 +377,13 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
 
     # ✅ ALWAYS call chunked version (NO conditional branching!)
     # This ensures only ONE version is compiled by XLA
+
+    # Debug: Print to confirm chunking is being used
+    debug_enabled = os.environ.get('JAX_DEBUG_PRINT', '').lower() == 'true'
+    if debug_enabled:
+        jax.debug.print("🔷 apply_ssm: calling chunked version, L={}, chunk_size={}",
+                       L, chunk_size)
+
     return apply_ssm_chunked(Lambda_bar, B_bar, C_tilde,
                             input_sequence, conj_sym, bidirectional,
                             chunk_size)
