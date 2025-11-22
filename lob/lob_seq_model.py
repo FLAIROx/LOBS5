@@ -367,73 +367,61 @@ class PaddedLobPredModel(nn.Module):
         """
         Initializes the S5 stacked encoder and a linear decoder.
         """
-        # ========== #6: Message Encoder with Checkpoint ==========
-        self.message_encoder = nn.checkpoint(
-            StackedEncoderModel(
-                ssm=self.ssm,
-                d_model=self.d_model,
-                n_layers=self.n_message_layers,
-                activation=self.activation,
-                dropout=self.dropout,
-                training=self.training,
-                prenorm=self.prenorm,
-                batchnorm=self.batchnorm,
-                bn_momentum=self.bn_momentum,
-                step_rescale=self.step_rescale,
-                use_embed_layer=True,
-                vocab_size=self.d_output,
-            ),
-            policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable
+        # Message Encoder (checkpoint applied in __call_ar__)
+        self.message_encoder = StackedEncoderModel(
+            ssm=self.ssm,
+            d_model=self.d_model,
+            n_layers=self.n_message_layers,
+            activation=self.activation,
+            dropout=self.dropout,
+            training=self.training,
+            prenorm=self.prenorm,
+            batchnorm=self.batchnorm,
+            bn_momentum=self.bn_momentum,
+            step_rescale=self.step_rescale,
+            use_embed_layer=True,
+            vocab_size=self.d_output,
         )
 
         # applied to transposed message output to get seq len for fusion
         #self.message_out_proj = nn.Dense(self.d_model)
 
-        # ========== #7: Book Encoder with Checkpoint ==========
-        self.book_encoder = nn.checkpoint(
-            LobBookModel(
-                ssm=self.ssm,
-                d_book=self.d_book,
-                d_model=self.d_model,
-                n_pre_layers=self.n_book_pre_layers,
-                n_post_layers=self.n_book_post_layers,
-                activation=self.activation,
-                dropout=self.dropout,
-                training=self.training,
-                prenorm=self.prenorm,
-                batchnorm=self.batchnorm,
-                bn_momentum=self.bn_momentum,
-                step_rescale=self.step_rescale,
-            ),
-            policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable
+        # Book Encoder (checkpoint applied in __call_ar__)
+        self.book_encoder = LobBookModel(
+            ssm=self.ssm,
+            d_book=self.d_book,
+            d_model=self.d_model,
+            n_pre_layers=self.n_book_pre_layers,
+            n_post_layers=self.n_book_post_layers,
+            activation=self.activation,
+            dropout=self.dropout,
+            training=self.training,
+            prenorm=self.prenorm,
+            batchnorm=self.batchnorm,
+            bn_momentum=self.bn_momentum,
+            step_rescale=self.step_rescale,
         )
 
 
         # applied to transposed book output to get seq len for fusion
         #self.book_out_proj = nn.Dense(self.d_model)
 
-        # ========== #8: Fused S5 with Checkpoint ==========
-        self.fused_s5 = nn.checkpoint(
-            StackedEncoderModel(
-                ssm=self.ssm,
-                d_model=self.d_model,
-                n_layers=self.n_fused_layers,
-                activation=self.activation,
-                dropout=self.dropout,
-                training=self.training,
-                prenorm=self.prenorm,
-                batchnorm=self.batchnorm,
-                bn_momentum=self.bn_momentum,
-                step_rescale=self.step_rescale,
-            ),
-            policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable
+        # Fused S5 (checkpoint applied in __call_ar__)
+        self.fused_s5 = StackedEncoderModel(
+            ssm=self.ssm,
+            d_model=self.d_model,
+            n_layers=self.n_fused_layers,
+            activation=self.activation,
+            dropout=self.dropout,
+            training=self.training,
+            prenorm=self.prenorm,
+            batchnorm=self.batchnorm,
+            bn_momentum=self.bn_momentum,
+            step_rescale=self.step_rescale,
         )
 
-        # ========== #9: Decoder with Checkpoint ==========
-        self.decoder = nn.checkpoint(
-            nn.Dense(self.d_output),
-            policy=jax.checkpoint_policies.nothing_saveable
-        )
+        # Decoder (checkpoint applied in __call_ar__)
+        self.decoder = nn.Dense(self.d_output)
 
     def __call__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):
         """
@@ -548,20 +536,36 @@ class PaddedLobPredModel(nn.Module):
         (L_m x d_input, L_b x [P+1]) input sequence tuple,
         combining message and book inputs.
         Args:
-             x_m: message input sequence (L_m x d_input, 
+             x_m: message input sequence (L_m x d_input,
              x_b: book state (volume series) (L_b x [P+1])
         Returns:
             output (float32): (d_output)
         """
-        #Uncomment to debug if no longer working in data-loader. 
+        #Uncomment to debug if no longer working in data-loader.
 
-        x_m = self.message_encoder(x_m, message_integration_timesteps)
-        x_b = self.book_encoder(x_b, book_integration_timesteps)
+        # ========== Component-level Checkpointing ==========
+        # #6: Message encoder with checkpoint
+        @jax.checkpoint(policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable)
+        def message_encode(x_m, times):
+            return self.message_encoder(x_m, times)
 
-        #Works because book already repeated when loading data. 
+        # #7: Book encoder with checkpoint
+        @jax.checkpoint(policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable)
+        def book_encode(x_b, times):
+            return self.book_encoder(x_b, times)
+
+        # #8: Fused S5 with checkpoint
+        @jax.checkpoint(policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable)
+        def fused_encode(x, times):
+            return self.fused_s5(x, times)
+
+        x_m = message_encode(x_m, message_integration_timesteps)
+        x_b = book_encode(x_b, book_integration_timesteps)
+
+        #Works because book already repeated when loading data.
         x = jnp.concatenate([x_m, x_b], axis=1)
         # TODO: again, check integration time steps make sense here
-        x = self.fused_s5(x, jnp.ones(x.shape[0]))
+        x = fused_encode(x, jnp.ones(x.shape[0]))
 
         #Removed the pooling to enable each token to be a target,
         #  not just a random one in the last message. 
@@ -579,12 +583,18 @@ class PaddedLobPredModel(nn.Module):
             #FIXME: Provide the ntoks argument for averaging as an arg.
         else:
             raise NotImplementedError("Mode must be in ['pool', 'last','none','ema']")
-        
+
         # jax.debug.print("x output shape after pool/last/ema/none shape {}, 1st five: \n {}",x.shape,x[:5,:5])
-        x = self.decoder(x)
+
+        # #9: Decoder with checkpoint
+        @jax.checkpoint(policy=jax.checkpoint_policies.nothing_saveable)
+        def decode(x):
+            return self.decoder(x)
+
+        x = decode(x)
         # jax.debug.print("x output shape after decoder {}, 1st five: \n {}",x.shape,x[:5,:5])
 
-        
+
         x=nn.log_softmax(x, axis=-1)
         return x
     
