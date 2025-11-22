@@ -712,32 +712,27 @@ def split_sequence_for_tbptt(batch_inputs, batch_labels,
     msg_times_chunked = msg_times_chunked.transpose(1, 0, 2)
 
     # ========== 分块 books ==========
-    # Books shape 可能是 (BSZ, n_messages, book_dim) 或其他
-    if len(books.shape) == 3 and books.shape[1] == n_messages:
-        # (BSZ, n_messages, book_dim) → (BSZ, n_chunks, msgs_per_chunk, book_dim)
-        books_chunked = books.reshape(BSZ, n_chunks, messages_per_chunk, -1)
+    # repeat_book 后，books 是 (BSZ, L, book_dim) 格式（三维）
+    if len(books.shape) == 3:
+    # (BSZ, L, book_dim) → (BSZ, n_chunks, chunk_size, book_dim) → (n_chunks, BSZ, chunk_size, book_dim)
+        book_dim = books.shape[2]
+        books_chunked = books.reshape(BSZ, n_chunks, chunk_size, book_dim)
         books_chunked = books_chunked.transpose(1, 0, 2, 3)
-
-        # Book times 同样处理
-        if len(book_times.shape) == 3:
-            book_times_chunked = book_times.reshape(BSZ, n_chunks, messages_per_chunk, -1)
-            book_times_chunked = book_times_chunked.transpose(1, 0, 2, 3)
-        else:
-            # 如果 book_times 格式不同，简单 broadcast
-            book_times_chunked = np.broadcast_to(
-                book_times[None, :, :],
-                (n_chunks,) + book_times.shape
-            )
     else:
-        # 其他 book 格式：简单 broadcast
-        books_chunked = np.broadcast_to(
-            books[None, :, :],
-            (n_chunks,) + books.shape
-        )
-        book_times_chunked = np.broadcast_to(
-            book_times[None, :, :],
-            (n_chunks,) + book_times.shape
-        )
+        # 如果是二维 (BSZ, L)
+        books_chunked = books.reshape(BSZ, n_chunks, chunk_size)
+        books_chunked = books_chunked.transpose(1, 0, 2)
+
+    # ========== 分块 book times ==========
+    # book_times 可能是二维或三维
+    if len(book_times.shape) == 3:
+        book_time_dim = book_times.shape[2]
+        book_times_chunked = book_times.reshape(BSZ, n_chunks, chunk_size, book_time_dim)
+        book_times_chunked = book_times_chunked.transpose(1, 0, 2, 3)
+    else:
+        # 二维 (BSZ, L)
+        book_times_chunked = book_times.reshape(BSZ, n_chunks, chunk_size)
+        book_times_chunked = book_times_chunked.transpose(1, 0, 2)
 
     return (
         (messages_chunked, books_chunked),
