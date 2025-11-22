@@ -54,7 +54,8 @@ class SequenceLayer(nn.Module):
             deterministic=not self.training,
         )
 
-    @partial(nn.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
+    # Checkpoint removed - now controlled at component level in PaddedLobPredModel.setup()
+    # @partial(nn.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
     def __call__(self, x):
         """
         Compute the LxH output of S5 layer given an LxH input.
