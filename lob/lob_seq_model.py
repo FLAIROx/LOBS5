@@ -545,27 +545,26 @@ class PaddedLobPredModel(nn.Module):
 
         # ========== Component-level Checkpointing ==========
         # #6: Message encoder with checkpoint
-        @jax.checkpoint(policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable)
-        def message_encode(x_m, times):
-            return self.message_encoder(x_m, times)
+        x_m = jax.checkpoint(
+            self.message_encoder,
+            policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable
+        )(x_m, message_integration_timesteps)
 
         # #7: Book encoder with checkpoint
-        @jax.checkpoint(policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable)
-        def book_encode(x_b, times):
-            return self.book_encoder(x_b, times)
-
-        # #8: Fused S5 with checkpoint
-        @jax.checkpoint(policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable)
-        def fused_encode(x, times):
-            return self.fused_s5(x, times)
-
-        x_m = message_encode(x_m, message_integration_timesteps)
-        x_b = book_encode(x_b, book_integration_timesteps)
+        x_b = jax.checkpoint(
+            self.book_encoder,
+            policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable
+        )(x_b, book_integration_timesteps)
 
         #Works because book already repeated when loading data.
         x = jnp.concatenate([x_m, x_b], axis=1)
         # TODO: again, check integration time steps make sense here
-        x = fused_encode(x, jnp.ones(x.shape[0]))
+
+        # #8: Fused S5 with checkpoint
+        x = jax.checkpoint(
+            self.fused_s5,
+            policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable
+        )(x, jnp.ones(x.shape[0]))
 
         #Removed the pooling to enable each token to be a target,
         #  not just a random one in the last message. 
@@ -587,11 +586,10 @@ class PaddedLobPredModel(nn.Module):
         # jax.debug.print("x output shape after pool/last/ema/none shape {}, 1st five: \n {}",x.shape,x[:5,:5])
 
         # #9: Decoder with checkpoint
-        @jax.checkpoint(policy=jax.checkpoint_policies.nothing_saveable)
-        def decode(x):
-            return self.decoder(x)
-
-        x = decode(x)
+        x = jax.checkpoint(
+            self.decoder,
+            policy=jax.checkpoint_policies.nothing_saveable
+        )(x)
         # jax.debug.print("x output shape after decoder {}, 1st five: \n {}",x.shape,x[:5,:5])
 
 
