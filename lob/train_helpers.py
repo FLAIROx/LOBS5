@@ -482,13 +482,13 @@ def print_memory_usage(step_name=""):
     
     
     print(f"CPU Memory: {process.memory_info().rss / 1024 ** 3:.2f} GB")
-    
-    # JAX device memory
+
+    # JAX device memory (from device.memory_stats())
     for device in jax.local_devices()[:1]:
         try:
             stats = device.memory_stats()
             if stats:
-                print(f"Device {device} Used: {stats['bytes_in_use'] / 1024**2:.2f} MB / {stats['bytes_limit'] / 1024**3:.2f} GB")
+                print(f"[device.memory_stats()] Device {device} Used: {stats['bytes_in_use'] / 1024**2:.2f} MB / {stats['bytes_limit'] / 1024**3:.2f} GB")
         except:
             pass
 

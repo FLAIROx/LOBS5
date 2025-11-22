@@ -22,7 +22,7 @@ from lob.dataloading import create_lobster_prediction_dataset, create_lobster_tr
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import reduce_lr_on_plateau, linear_warmup, \
     cosine_annealing, constant_lr, train_epoch, validate
-from lob.memory_profiler import print_memory_usage, detailed_memory_breakdown
+from lob.memory_profiler import print_memory_usage, detailed_memory_breakdown, analyze_compilation_memory
 
 
 
@@ -167,6 +167,73 @@ def train(args):
         d_model=args.d_model,
         n_layers=args.n_layers
     )
+
+    # === JAX Compilation Memory Analysis ===
+    print("\n" + "="*60)
+    print("Running jax.lower().compile() Memory Analysis...")
+    print("="*60)
+    try:
+        # Import train_step from train_helpers
+        from lob.train_helpers import train_step
+
+        # Create dummy inputs matching train_step signature (single device, not pmapped)
+        dummy_batch_inputs = (
+            jnp.ones((batch_per_gpu, seq_len), dtype=jnp.int32),  # messages
+            jnp.ones((batch_per_gpu, seq_len, book_dim)),  # books
+        )
+        dummy_labels = jnp.ones((batch_per_gpu, seq_len), dtype=jnp.int32)
+        dummy_timesteps = (
+            jnp.ones((batch_per_gpu, seq_len)),
+            jnp.ones((batch_per_gpu, seq_len)),
+        )
+        dummy_rng = random.PRNGKey(0)
+
+        # Extract single-device state (train_step is pmapped, so we need unreplicated state)
+        from flax.training import train_state as ts
+        single_device_state = jax.tree_util.tree_map(lambda x: x[0] if hasattr(x, '__getitem__') and len(x.shape) > 0 else x, state)
+
+        # Create a jitted (non-pmapped) version of the loss function for analysis
+        def loss_fn_for_analysis(params):
+            if batchnorm:
+                logits, mod_vars = single_device_state.apply_fn(
+                    {"params": params, "batch_stats": single_device_state.batch_stats},
+                    *dummy_batch_inputs, *dummy_timesteps,
+                    rngs={"dropout": dummy_rng},
+                    mutable=["intermediates", "batch_stats"],
+                    method='__call_ar__'
+                )
+            else:
+                logits, mod_vars = single_device_state.apply_fn(
+                    {"params": params},
+                    *dummy_batch_inputs, *dummy_timesteps,
+                    rngs={"dropout": dummy_rng},
+                    mutable=["intermediates"],
+                    method='__call_ar__'
+                )
+            # Simple loss for memory analysis
+            loss = jnp.mean(logits)
+            return loss, (mod_vars, logits)
+
+        # Analyze forward pass
+        print("\n[Forward Pass Analysis]")
+        analyze_compilation_memory(
+            lambda: loss_fn_for_analysis(single_device_state.params),
+            (),
+            step_name="forward_pass"
+        )
+
+        # Analyze forward + backward (gradient computation)
+        print("\n[Forward + Backward Pass Analysis]")
+        analyze_compilation_memory(
+            lambda: jax.value_and_grad(lambda p: loss_fn_for_analysis(p)[0], has_aux=False)(single_device_state.params),
+            (),
+            step_name="forward_backward_pass"
+        )
+
+    except Exception as e:
+        print(f"[WARNING] Could not run jax.lower().compile() analysis: {e}")
+        import traceback
+        traceback.print_exc()
 
     # Training Loop over epochs
     best_loss, best_acc, best_epoch = 100000000, -100000000.0, 0  # This best loss is val_loss
