@@ -367,58 +367,73 @@ class PaddedLobPredModel(nn.Module):
         """
         Initializes the S5 stacked encoder and a linear decoder.
         """
-        # nn.checkpoint()
-        self.message_encoder = StackedEncoderModel(
-            ssm=self.ssm,
-            d_model=self.d_model,
-            n_layers=self.n_message_layers,
-            activation=self.activation,
-            dropout=self.dropout,
-            training=self.training,
-            prenorm=self.prenorm,
-            batchnorm=self.batchnorm,
-            bn_momentum=self.bn_momentum,
-            step_rescale=self.step_rescale,
-            use_embed_layer=True,
-            vocab_size=self.d_output,
+        # ========== #6: Message Encoder with Checkpoint ==========
+        self.message_encoder = nn.checkpoint(
+            StackedEncoderModel(
+                ssm=self.ssm,
+                d_model=self.d_model,
+                n_layers=self.n_message_layers,
+                activation=self.activation,
+                dropout=self.dropout,
+                training=self.training,
+                prenorm=self.prenorm,
+                batchnorm=self.batchnorm,
+                bn_momentum=self.bn_momentum,
+                step_rescale=self.step_rescale,
+                use_embed_layer=True,
+                vocab_size=self.d_output,
+            ),
+            policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable
         )
 
         # applied to transposed message output to get seq len for fusion
-        #self.message_out_proj = nn.Dense(self.d_model)  
-        # nn.checkpoint()
-        self.book_encoder = LobBookModel(
-            ssm=self.ssm,
-            d_book=self.d_book,
-            d_model=self.d_model,
-            n_pre_layers=self.n_book_pre_layers,
-            n_post_layers=self.n_book_post_layers,
-            activation=self.activation,
-            dropout=self.dropout,
-            training=self.training,
-            prenorm=self.prenorm,
-            batchnorm=self.batchnorm,
-            bn_momentum=self.bn_momentum,
-            step_rescale=self.step_rescale,
+        #self.message_out_proj = nn.Dense(self.d_model)
+
+        # ========== #7: Book Encoder with Checkpoint ==========
+        self.book_encoder = nn.checkpoint(
+            LobBookModel(
+                ssm=self.ssm,
+                d_book=self.d_book,
+                d_model=self.d_model,
+                n_pre_layers=self.n_book_pre_layers,
+                n_post_layers=self.n_book_post_layers,
+                activation=self.activation,
+                dropout=self.dropout,
+                training=self.training,
+                prenorm=self.prenorm,
+                batchnorm=self.batchnorm,
+                bn_momentum=self.bn_momentum,
+                step_rescale=self.step_rescale,
+            ),
+            policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable
         )
 
 
         # applied to transposed book output to get seq len for fusion
         #self.book_out_proj = nn.Dense(self.d_model)
-        # nn.checkpoint()
 
-        self.fused_s5 = StackedEncoderModel(
-            ssm=self.ssm,
-            d_model=self.d_model,
-            n_layers=self.n_fused_layers,
-            activation=self.activation,
-            dropout=self.dropout,
-            training=self.training,
-            prenorm=self.prenorm,
-            batchnorm=self.batchnorm,
-            bn_momentum=self.bn_momentum,
-            step_rescale=self.step_rescale,
+        # ========== #8: Fused S5 with Checkpoint ==========
+        self.fused_s5 = nn.checkpoint(
+            StackedEncoderModel(
+                ssm=self.ssm,
+                d_model=self.d_model,
+                n_layers=self.n_fused_layers,
+                activation=self.activation,
+                dropout=self.dropout,
+                training=self.training,
+                prenorm=self.prenorm,
+                batchnorm=self.batchnorm,
+                bn_momentum=self.bn_momentum,
+                step_rescale=self.step_rescale,
+            ),
+            policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable
         )
-        self.decoder = nn.Dense(self.d_output)
+
+        # ========== #9: Decoder with Checkpoint ==========
+        self.decoder = nn.checkpoint(
+            nn.Dense(self.d_output),
+            policy=jax.checkpoint_policies.nothing_saveable
+        )
 
     def __call__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):
         """

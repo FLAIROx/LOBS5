@@ -254,8 +254,15 @@ if __name__ == "__main__":
 
 	from lob.train import train
 	#import tensorflow as tf
-	# import jax	
+	import jax
 	# import cProfile
+
+	# ========================================
+	# JAX Compilation Optimization
+	# ========================================
+	# Enable JAX automatic rematerialization pass
+	# This automatically optimizes memory usage during compilation
+	jax.config.update('jax_compiler_enable_remat_pass', True)
 
 	#with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
 	train(args)
