@@ -575,6 +575,50 @@ def repeat_book(msg,book,shift_start):
     #     book=np.concatenate([pad,book[:-1]])
     return (msg,book)
 
+
+def split_sequence_for_tbptt(batch_inputs, batch_labels,
+                             batch_integration_timesteps,
+                             n_chunks=4, msg_len=24):
+    """Split sequences into chunks for TBPTT."""
+    messages, books = batch_inputs
+    msg_times, book_times = batch_integration_timesteps
+
+    BSZ, L = messages.shape
+
+    # Calculate chunk size
+    n_messages = L // msg_len
+    assert n_messages % n_chunks == 0, \
+        f"n_chunks={n_chunks} must divide n_messages={n_messages}"
+
+    messages_per_chunk = n_messages // n_chunks
+    chunk_size = messages_per_chunk * msg_len
+
+    # Chunk messages: (BSZ, L) → (n_chunks, BSZ, chunk_size)
+    messages_chunked = messages.reshape(BSZ, n_chunks, chunk_size).transpose(1, 0, 2)
+    labels_chunked = batch_labels.reshape(BSZ, n_chunks, chunk_size).transpose(1, 0, 2)
+    msg_times_chunked = msg_times.reshape(BSZ, n_chunks, chunk_size).transpose(1, 0, 2)
+
+    # Chunk books (handle 2D or 3D)
+    if len(books.shape) == 3:
+        book_dim = books.shape[2]
+        books_chunked = books.reshape(BSZ, n_chunks, chunk_size, book_dim).transpose(1, 0, 2, 3)
+    else:
+        books_chunked = books.reshape(BSZ, n_chunks, chunk_size).transpose(1, 0, 2)
+
+    # Chunk book times (handle 2D or 3D)
+    if len(book_times.shape) == 3:
+        book_time_dim = book_times.shape[2]
+        book_times_chunked = book_times.reshape(BSZ, n_chunks, chunk_size, book_time_dim).transpose(1, 0, 2, 3)
+    else:
+        book_times_chunked = book_times.reshape(BSZ, n_chunks, chunk_size).transpose(1, 0, 2)
+
+    return (
+        (messages_chunked, books_chunked),
+        labels_chunked,
+        (msg_times_chunked, book_times_chunked)
+    )
+
+
 @partial(
     jax.pmap,
     axis_name="batch_devices",
@@ -595,23 +639,20 @@ def train_step(
 
     batch_inputs=repeat_book(*batch_inputs,True)
 
-    # TBPTT: Fixed 4 chunks
+    # TBPTT: Split into 4 chunks
     n_chunks = 4
-    bsz = batch_inputs[0].shape[0]
-    seq_len = batch_inputs[0].shape[1]
-    chunk_size = seq_len // n_chunks
-
-    # Pre-split all data into chunks (avoid dynamic slicing in scan)
-    # Shape: (BSZ, L) -> (n_chunks, BSZ, chunk_size)
-    msgs_chunked = batch_inputs[0].reshape(bsz, n_chunks, chunk_size).transpose(1, 0, 2)
-    books_chunked = batch_inputs[1].reshape(bsz, n_chunks, chunk_size).transpose(1, 0, 2)
-    labels_chunked = batch_labels.reshape(bsz, n_chunks, chunk_size).transpose(1, 0, 2)
-    msg_times_chunked = batch_integration_timesteps[0].reshape(bsz, n_chunks, chunk_size).transpose(1, 0, 2)
-    book_times_chunked = batch_integration_timesteps[1].reshape(bsz, n_chunks, chunk_size).transpose(1, 0, 2)
+    chunked_data = split_sequence_for_tbptt(
+        batch_inputs,
+        batch_labels,
+        batch_integration_timesteps,
+        n_chunks=n_chunks,
+        msg_len=24
+    )
+    (messages_chunked, books_chunked), labels_chunked, (msg_times_chunked, book_times_chunked) = chunked_data
 
     def compute_chunk_gradient(carry, chunk_data):
         """Compute gradient for one chunk and accumulate."""
-        grads_accum, loss_accum, ce_accum, rng_carry = carry
+        grads_accum, loss_accum, rng_carry = carry
 
         # Unpack pre-split chunk data
         msgs_chunk, books_chunk, labels_chunk, msg_t_chunk, book_t_chunk = chunk_data
@@ -641,7 +682,7 @@ def train_step(
                     method='__call_ar__'
                 )
 
-            ce=cross_entropy_loss(logits, chunk_labels)
+            ce=cross_entropy_loss(logits, labels_chunk)
             if ignore_times:
                 ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
                 ce_1=ce[:,:,:TIME_START_I]
@@ -660,38 +701,40 @@ def train_step(
         grads_accum = jax.tree_util.tree_map(lambda a, g: a + g, grads_accum, chunk_grads)
         loss_accum = loss_accum + chunk_loss
 
-        # Accumulate ce
-        if ce_accum is None:
-            ce_accum = chunk_ce
-        else:
-            ce_accum = ce_accum + chunk_ce
+        # Prepare outputs
+        new_carry = (grads_accum, loss_accum, rng_carry)
+        aux_outputs = (chunk_logits, chunk_ce)
+        return new_carry, aux_outputs
 
-        new_carry = (grads_accum, loss_accum, ce_accum, rng_carry)
-        return new_carry, (chunk_logits, mod_vars)
-
-    # Initialize accumulators
+    # Initialize accumulators (no ce_accum!)
     init_grads = jax.tree_util.tree_map(np.zeros_like, state.params)
     init_loss = np.array(0.0)
-    init_ce = None
-    init_carry = (init_grads, init_loss, init_ce, rng)
+    init_carry = (init_grads, init_loss, rng)
 
     # Pack chunked data for scan
-    chunked_data = (msgs_chunked, books_chunked, labels_chunked, msg_times_chunked, book_times_chunked)
+    scan_data = (messages_chunked, books_chunked, labels_chunked, msg_times_chunked, book_times_chunked)
 
     # Execute scan - only compiles ONE chunk size!
-    (final_grads, final_loss, final_ce, _), (logits_chunks, mod_vars) = jax.lax.scan(
+    (final_grads, final_loss, _), (logits_chunks, ce_chunks) = jax.lax.scan(
         compute_chunk_gradient,
         init_carry,
-        chunked_data
+        scan_data
     )
 
     # Average gradients and loss
     grads = jax.tree_util.tree_map(lambda g: g / n_chunks, final_grads)
     loss = final_loss / n_chunks
-    ce = final_ce / n_chunks
 
-    # Concatenate logits
-    logits = np.concatenate([logits_chunks[i] for i in range(n_chunks)], axis=1)
+    # Reshape outputs
+    # logits_chunks: (n_chunks, BSZ, chunk_size, vocab_size) → (BSZ, L, vocab_size)
+    logits = logits_chunks.transpose(1, 0, 2, 3).reshape(
+        logits_chunks.shape[1],  # BSZ
+        -1,  # L = n_chunks * chunk_size
+        logits_chunks.shape[-1]  # vocab_size
+    )
+
+    # ce_chunks: (n_chunks, chunk_size) → (L,)
+    ce = ce_chunks.reshape(-1)
 
     # UPDATE
     # calculate means over device dimension (first)
