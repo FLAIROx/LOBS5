@@ -189,6 +189,9 @@ if __name__ == "__main__":
 	import torch
 	torch.multiprocessing.set_start_method('spawn')
 
+	import jax
+	jax.config.update('jax_compiler_enable_remat_pass', True)
+
 	from lob.train import train
 	#import tensorflow as tf
 	# import jax	

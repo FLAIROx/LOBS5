@@ -32,6 +32,7 @@ find /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 -type d -name '__pycache
 
 # clear JAX compile cache
 export XLA_FLAGS="--xla_force_host_platform_device_count=4"
+export XLA_PYTHON_CLIENT_PREALLOCATE="false"
 rm -rf ~/.cache/jax_cache
 rm -rf /tmp/__pycache__/jax*
 # clear Python cache

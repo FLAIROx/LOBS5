@@ -366,8 +366,10 @@ class PaddedLobPredModel(nn.Module):
         """
         Initializes the S5 stacked encoder and a linear decoder.
         """
-        # nn.checkpoint()
-        self.message_encoder = StackedEncoderModel(
+        self.message_encoder = nn.remat(
+            StackedEncoderModel,
+            policy=jax.checkpoint_policies.nothing_saveable
+        )(
             ssm=self.ssm,
             d_model=self.d_model,
             n_layers=self.n_message_layers,
@@ -383,9 +385,11 @@ class PaddedLobPredModel(nn.Module):
         )
 
         # applied to transposed message output to get seq len for fusion
-        #self.message_out_proj = nn.Dense(self.d_model)  
-        # nn.checkpoint()
-        self.book_encoder = LobBookModel(
+        #self.message_out_proj = nn.Dense(self.d_model)
+        self.book_encoder = nn.remat(
+            LobBookModel,
+            policy=jax.checkpoint_policies.nothing_saveable
+        )(
             ssm=self.ssm,
             d_book=self.d_book,
             d_model=self.d_model,
@@ -403,9 +407,11 @@ class PaddedLobPredModel(nn.Module):
 
         # applied to transposed book output to get seq len for fusion
         #self.book_out_proj = nn.Dense(self.d_model)
-        # nn.checkpoint()
 
-        self.fused_s5 = StackedEncoderModel(
+        self.fused_s5 = nn.remat(
+            StackedEncoderModel,
+            policy=jax.checkpoint_policies.nothing_saveable
+        )(
             ssm=self.ssm,
             d_model=self.d_model,
             n_layers=self.n_fused_layers,
@@ -417,7 +423,10 @@ class PaddedLobPredModel(nn.Module):
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
         )
-        self.decoder = nn.Dense(self.d_output)
+        self.decoder = nn.remat(
+            nn.Dense,
+            policy=jax.checkpoint_policies.nothing_saveable
+        )(self.d_output)
 
     def __call__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):
         """
