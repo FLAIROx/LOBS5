@@ -233,6 +233,8 @@ if __name__ == "__main__":
 				help="Logs the CE values on a per token level to wandb. Memory intensive.")
 	parser.add_argument("--memory_profile", type=str2bool, default=False,
 				help="Enable JAX compilation memory profiling (may consume extra memory)")
+	parser.add_argument("--memory_usage", type=str2bool, default=False,
+				help="Enable runtime memory usage logging at epoch/batch level")
 
 	args = parser.parse_args()
 

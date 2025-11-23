@@ -302,11 +302,13 @@ def train(args):
     batchnorm=args.batchnorm
 
     # Log initial memory state
-    print_memory_usage("Initial")
+    if args.memory_usage:
+        print_memory_usage("Initial")
 
     for epoch in range(args.epochs):
         print(f"[*] Starting Training Epoch {epoch + 1}...")
-        print_memory_usage(f"Start of Epoch {epoch + 1}")
+        if args.memory_usage:
+            print_memory_usage(f"Start of Epoch {epoch + 1}")
         # jax.profiler.start_trace("./jax-traces")
 
         if epoch < args.warmup_end:
@@ -349,9 +351,11 @@ def train(args):
                                               epoch,
                                               ignore_times,
                                               args.log_ce_tables,
-                                              args.debugprint)
+                                              args.debugprint,
+                                              args.memory_usage)
 
-        print_memory_usage(f"After training epoch {epoch + 1}")
+        if args.memory_usage:
+            print_memory_usage(f"After training epoch {epoch + 1}")
 
         if args.random_offsets_train:
             # reinit training loader, so that sequences are initialised with

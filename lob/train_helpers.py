@@ -528,6 +528,7 @@ def train_epoch(
         ignore_times,
         log_ce_tables,
         debug_enabled=False,
+        memory_usage=False,
     ):
 
     """
@@ -551,8 +552,8 @@ def train_epoch(
             # print("train_epoch: Inputs 0:5:", inputs[0][0,0:5,:])
             rng, drop_rng = jax.random.split(rng)
 
-            # Print memory every 1000 steps
-            if batch_idx % 10 == 0:
+            # Print memory every 10 steps (if enabled)
+            if batch_idx % 10 == 0 and memory_usage:
                 print(f"\n=== Epoch {epoch}, Batch {batch_idx} ===")
                 print_memory_usage()
             
@@ -568,7 +569,7 @@ def train_epoch(
             # print("Gets to train")
 
             # === Memory Profiling: Only on first batch ===
-            if batch_idx == 0:
+            if batch_idx == 0 and memory_usage:
                 print_memory_usage("Before train_step")
 
             state, loss, ce, logits = train_step(
@@ -585,7 +586,7 @@ def train_epoch(
                 loss.block_until_ready()
 
             # === Memory Profiling: After train_step ===
-            if batch_idx == 0:
+            if batch_idx == 0 and memory_usage:
                 # Block to ensure computation is complete before measuring
                 loss.block_until_ready()
                 print_memory_usage("After train_step")
@@ -617,7 +618,7 @@ def train_epoch(
             state, step = update_learning_rate_per_step(lr_params, state)
 
             # === Memory Profiling: After optimizer update ===
-            if batch_idx == 0:
+            if batch_idx == 0 and memory_usage:
                 print_memory_usage("After LR update (gradients should be freed)")
             if (step>20) & (step<=21) & debug_profiler:
                 jax.profiler.stop_trace()
@@ -627,7 +628,7 @@ def train_epoch(
                 break
 
             # === Memory Profiling: End of first batch ===
-            if batch_idx == 0:
+            if batch_idx == 0 and memory_usage:
                 print_memory_usage("End of batch 0 (all operations complete)")
 
         else:

@@ -53,6 +53,7 @@ python3 -u -B run_train.py \
         --enable_profiler=False \
         --debugprint=False \
         --memory_profile=False \
+        --memory_usage=False \
         --random_offsets_train=True \
         --shuffle_train=True \
         --debug_overfit=False \
