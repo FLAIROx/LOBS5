@@ -152,7 +152,7 @@ def create_train_state(model_cls,
         if use_book_data:
             dummy_input = (
                 # np.ones((bsz, seq_len, in_dim), dtype=np.int32),  # messages
-                np.ones((bsz, seq_len, ), dtype=np.int32),  # messages
+                np.ones((bsz, seq_len, ), dtype=np.int16),  # messages
                 np.ones((bsz, seq_len, book_dim)),  # books
             )
             integration_timesteps = (
@@ -161,7 +161,7 @@ def create_train_state(model_cls,
             )
         else:
             # dummy_input = (np.ones((bsz, seq_len, in_dim), dtype=np.int32) , )
-            dummy_input = (np.ones((bsz, seq_len, ), dtype=np.int32) , )
+            dummy_input = (np.ones((bsz, seq_len, ), dtype=np.int16) , )
             integration_timesteps = (np.ones((bsz, seq_len, )), )
 
     model = model_cls(training=True)
@@ -436,14 +436,14 @@ def _prep_batch_par(
 
     if book_data is not None:
         #book_data = jax.device_put(book_data, jax.devices()[0])
-        full_inputs = (inputs.astype(np.int32), book_data)
+        full_inputs = (inputs.astype(np.int16), book_data)
         if timestep_book is not None:
             #timestep_book = jax.device_put(timestep_book, jax.devices()[0])
             integration_timesteps += (np.diff(timestep_book), )
         else:
             integration_timesteps += (np.ones((len(inputs), seq_len)), )
     else:
-        full_inputs = (inputs.astype(np.int32), )
+        full_inputs = (inputs.astype(np.int16), )
 
     # CAVE: squeeze very important for training!
     return full_inputs, np.squeeze(targets.astype(np.int32)), integration_timesteps
