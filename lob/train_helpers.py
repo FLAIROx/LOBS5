@@ -173,8 +173,6 @@ def create_train_state(model_cls,
     model = model_cls(training=True)
     init_rng, dropout_rng = jax.random.split(rng, num=2)
 
-    if debug_enabled:  # Python-level conditional - excluded from XLA when False
-        jax.debug.print("Dummy input shapes (msg,book) ({}, \n {})",dummy_input[0].shape,dummy_input[1].shape)
     #RNN mode and initialisation needs to go in here if we need it. 
 
     variables = model.init({"params": init_rng,
@@ -774,12 +772,6 @@ def train_step(
                 ⚠️ 关键：只处理 chunk_size=3000 的序列
                 XLA 编译的计算图大小 ∝ chunk_size²，不是 L²
                 """
-
-                # Debug 输出
-                if debug_enabled:
-                    jax.debug.print("=== TBPTT Chunk {} ===", chunk_idx)
-                    jax.debug.print("Messages chunk shape: {}", msgs_chunk.shape)
-                    jax.debug.print("Labels chunk shape: {}", labels_chunk.shape)
 
                 # Forward pass - 只处理这个 chunk
                 if batchnorm:
