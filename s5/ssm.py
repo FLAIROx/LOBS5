@@ -75,6 +75,74 @@ def binary_operator_reset(q_i, q_j):
     )
 
 
+def apply_ssm_chunked(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional, chunk_size):
+    """TBPTT: Process sequence in chunks using jax.lax.scan to truncate gradients.
+
+    Args:
+        Lambda_bar (complex64): discretized diagonal state matrix (P,)
+        B_bar (complex64): discretized input matrix (P, H)
+        C_tilde (complex64): output matrix (H, P)
+        input_sequence (float32): input sequence (L, H)
+        conj_sym (bool): whether conjugate symmetry is enforced
+        bidirectional (bool): whether bidirectional (not supported for chunked)
+        chunk_size (int): size of each chunk
+
+    Returns:
+        ys, Bu_elements, Lambda_elements, xs
+    """
+    if bidirectional:
+        raise NotImplementedError("Bidirectional not supported in chunked mode")
+
+    L, H = input_sequence.shape
+    P = Lambda_bar.shape[0]
+
+    n_chunks = L // chunk_size
+    chunks = input_sequence.reshape(n_chunks, chunk_size, H)
+
+    def scan_chunk(carry_state, chunk):
+        """Process one chunk with associative_scan."""
+        # Compute Lambda and Bu for this chunk
+        Lambda_elements = Lambda_bar * np.ones((chunk_size, P))
+        Bu_elements = jax.vmap(lambda u: B_bar @ u)(chunk)
+
+        # Prepend carry state (hidden state from previous chunk)
+        Lambda_with_carry = np.concatenate([
+            np.ones((1, P), dtype=Lambda_elements.dtype),
+            Lambda_elements
+        ], axis=0)
+
+        Bu_with_carry = np.concatenate([
+            carry_state[np.newaxis, :],
+            Bu_elements
+        ], axis=0)
+
+        # Associative scan within this chunk
+        _, Bu_cum = jax.lax.associative_scan(binary_operator, (Lambda_with_carry, Bu_with_carry))
+
+        # Extract results
+        xs = Bu_cum[1:]  # Hidden states for this chunk
+        new_carry = Bu_cum[-1]  # Last state becomes carry for next chunk
+
+        return new_carry, (xs, Lambda_elements, Bu_elements)
+
+    # Run scan over chunks - gradients truncated at chunk boundaries!
+    init_carry = np.zeros(P, dtype=np.complex64)
+    _, (xs_chunks, Lambda_chunks, Bu_chunks) = jax.lax.scan(scan_chunk, init_carry, chunks)
+
+    # Reshape back to original dimensions
+    xs = xs_chunks.reshape(L, P)
+    Lambda_elements = Lambda_chunks.reshape(L, P)
+    Bu_elements = Bu_chunks.reshape(L, P)
+
+    # Output projection
+    if conj_sym:
+        ys = jax.vmap(lambda x: 2*(C_tilde @ x).real)(xs)
+    else:
+        ys = jax.vmap(lambda x: (C_tilde @ x).real)(xs)
+
+    return ys, Bu_elements, Lambda_elements, xs
+
+
 def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional):
     """ Compute the LxH output of discretized SSM given an LxH input.
         Args:
@@ -88,28 +156,38 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
         Returns:
             ys (float32): the SSM outputs (S5 layer preactivations)      (L, H)
     """
+    import os
 
+    L = input_sequence.shape[0]
 
-    Lambda_elements = Lambda_bar * np.ones((input_sequence.shape[0],
-                                            Lambda_bar.shape[0]))
+    # Read JAX_N_CHUNKS from environment (default: 4)
+    n_chunks = int(os.environ.get('JAX_N_CHUNKS', '4'))
 
-
-    Bu_elements = jax.vmap(lambda u: B_bar @ u)(input_sequence)
-
-
-    _, xs = jax.lax.associative_scan(binary_operator, (Lambda_elements, Bu_elements))
-    
-
-    if bidirectional:
-        _, xs2 = jax.lax.associative_scan(binary_operator,
-                                          (Lambda_elements, Bu_elements),
-                                          reverse=True)
-        xs = np.concatenate((xs, xs2), axis=-1)
-
-    if conj_sym:
-        return jax.vmap(lambda x: 2*(C_tilde @ x).real)(xs),Bu_elements,Lambda_elements,xs
+    # Calculate chunk_size
+    if L % n_chunks == 0:
+        chunk_size = L // n_chunks
+        # Always use chunked version for TBPTT
+        return apply_ssm_chunked(Lambda_bar, B_bar, C_tilde, input_sequence,
+                                conj_sym, bidirectional, chunk_size)
     else:
-        return jax.vmap(lambda x: (C_tilde @ x).real)(xs),Bu_elements,Lambda_elements,xs
+        # Fallback to original if L not divisible by n_chunks
+        Lambda_elements = Lambda_bar * np.ones((input_sequence.shape[0],
+                                                Lambda_bar.shape[0]))
+
+        Bu_elements = jax.vmap(lambda u: B_bar @ u)(input_sequence)
+
+        _, xs = jax.lax.associative_scan(binary_operator, (Lambda_elements, Bu_elements))
+
+        if bidirectional:
+            _, xs2 = jax.lax.associative_scan(binary_operator,
+                                              (Lambda_elements, Bu_elements),
+                                              reverse=True)
+            xs = np.concatenate((xs, xs2), axis=-1)
+
+        if conj_sym:
+            return jax.vmap(lambda x: 2*(C_tilde @ x).real)(xs),Bu_elements,Lambda_elements,xs
+        else:
+            return jax.vmap(lambda x: (C_tilde @ x).real)(xs),Bu_elements,Lambda_elements,xs
     
 def apply_ssm_rnn(Lambda_bar, B_bar, C_tilde,hidden, input_sequence,resets, conj_sym, bidirectional):
     """ Compute the LxH output of discretized SSM given an LxH input.

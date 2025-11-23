@@ -593,35 +593,34 @@ def train_step(
         ignore_times:bool, #6
     ):
 
-    # TBPTT with 4 chunks
     batch_inputs=repeat_book(*batch_inputs,True)
 
-    # Split sequence into 4 chunks
+    # TBPTT: Fixed 4 chunks
     n_chunks = 4
+    bsz = batch_inputs[0].shape[0]
     seq_len = batch_inputs[0].shape[1]
     chunk_size = seq_len // n_chunks
 
-    # Initialize accumulators
-    total_loss = 0.0
-    total_ce = None
-    accumulated_grads = None
-    all_logits = []
+    # Pre-split all data into chunks (avoid dynamic slicing in scan)
+    # Shape: (BSZ, L) -> (n_chunks, BSZ, chunk_size)
+    msgs_chunked = batch_inputs[0].reshape(bsz, n_chunks, chunk_size).transpose(1, 0, 2)
+    books_chunked = batch_inputs[1].reshape(bsz, n_chunks, chunk_size).transpose(1, 0, 2)
+    labels_chunked = batch_labels.reshape(bsz, n_chunks, chunk_size).transpose(1, 0, 2)
+    msg_times_chunked = batch_integration_timesteps[0].reshape(bsz, n_chunks, chunk_size).transpose(1, 0, 2)
+    book_times_chunked = batch_integration_timesteps[1].reshape(bsz, n_chunks, chunk_size).transpose(1, 0, 2)
 
-    # Process each chunk
-    for chunk_idx in range(n_chunks):
-        chunk_start = chunk_idx * chunk_size
-        chunk_end = (chunk_idx + 1) * chunk_size
+    def compute_chunk_gradient(carry, chunk_data):
+        """Compute gradient for one chunk and accumulate."""
+        grads_accum, loss_accum, ce_accum, rng_carry = carry
 
-        # Extract chunk
-        chunk_inputs = (
-            batch_inputs[0][:, chunk_start:chunk_end],
-            batch_inputs[1][:, chunk_start:chunk_end]
-        )
-        chunk_labels = batch_labels[:, chunk_start:chunk_end]
-        chunk_timesteps = (
-            batch_integration_timesteps[0][:, chunk_start:chunk_end],
-            batch_integration_timesteps[1][:, chunk_start:chunk_end]
-        )
+        # Unpack pre-split chunk data
+        msgs_chunk, books_chunk, labels_chunk, msg_t_chunk, book_t_chunk = chunk_data
+
+        # Split RNG for this chunk
+        rng_carry, rng_chunk = jax.random.split(rng_carry)
+
+        chunk_inputs = (msgs_chunk, books_chunk)
+        chunk_timesteps = (msg_t_chunk, book_t_chunk)
 
         # Define loss for this chunk
         def loss_fn_chunk(params):
@@ -629,7 +628,7 @@ def train_step(
                 logits, mod_vars = state.apply_fn(
                     {"params": params, "batch_stats": state.batch_stats},
                     *chunk_inputs, *chunk_timesteps,
-                    rngs={"dropout": rng},
+                    rngs={"dropout": rng_chunk},
                     mutable=["intermediates", "batch_stats"],
                     method='__call_ar__'
                 )
@@ -637,7 +636,7 @@ def train_step(
                 logits, mod_vars = state.apply_fn(
                     {"params": params},
                     *chunk_inputs, *chunk_timesteps,
-                    rngs={"dropout": rng},
+                    rngs={"dropout": rng_chunk},
                     mutable=["intermediates"],
                     method='__call_ar__'
                 )
@@ -657,31 +656,48 @@ def train_step(
         # Compute gradients for this chunk
         (chunk_loss, (mod_vars, chunk_logits, chunk_ce)), chunk_grads = jax.value_and_grad(loss_fn_chunk, has_aux=True)(state.params)
 
-        # Accumulate
-        total_loss += chunk_loss / n_chunks
-        all_logits.append(chunk_logits)
+        # Accumulate gradients
+        grads_accum = jax.tree_util.tree_map(lambda a, g: a + g, grads_accum, chunk_grads)
+        loss_accum = loss_accum + chunk_loss
 
-        if total_ce is None:
-            total_ce = chunk_ce / n_chunks
+        # Accumulate ce
+        if ce_accum is None:
+            ce_accum = chunk_ce
         else:
-            total_ce = total_ce + chunk_ce / n_chunks
+            ce_accum = ce_accum + chunk_ce
 
-        if accumulated_grads is None:
-            accumulated_grads = chunk_grads
-        else:
-            accumulated_grads = jax.tree_util.tree_map(lambda a, b: a + b, accumulated_grads, chunk_grads)
+        new_carry = (grads_accum, loss_accum, ce_accum, rng_carry)
+        return new_carry, (chunk_logits, mod_vars)
 
-    # Concatenate all logits
-    logits = np.concatenate(all_logits, axis=1)
+    # Initialize accumulators
+    init_grads = jax.tree_util.tree_map(np.zeros_like, state.params)
+    init_loss = np.array(0.0)
+    init_ce = None
+    init_carry = (init_grads, init_loss, init_ce, rng)
 
-    # Average gradients
-    grads = jax.tree_util.tree_map(lambda g: g / n_chunks, accumulated_grads)
+    # Pack chunked data for scan
+    chunked_data = (msgs_chunked, books_chunked, labels_chunked, msg_times_chunked, book_times_chunked)
+
+    # Execute scan - only compiles ONE chunk size!
+    (final_grads, final_loss, final_ce, _), (logits_chunks, mod_vars) = jax.lax.scan(
+        compute_chunk_gradient,
+        init_carry,
+        chunked_data
+    )
+
+    # Average gradients and loss
+    grads = jax.tree_util.tree_map(lambda g: g / n_chunks, final_grads)
+    loss = final_loss / n_chunks
+    ce = final_ce / n_chunks
+
+    # Concatenate logits
+    logits = np.concatenate([logits_chunks[i] for i in range(n_chunks)], axis=1)
 
     # UPDATE
     # calculate means over device dimension (first)
-    loss = jax.lax.pmean(total_loss, axis_name="batch_devices")
+    loss = jax.lax.pmean(loss, axis_name="batch_devices")
     grads = jax.lax.pmean(grads, axis_name="batch_devices")
-    ce = jax.lax.pmean(total_ce, axis_name="batch_devices")
+    ce = jax.lax.pmean(ce, axis_name="batch_devices")
 
     if batchnorm:
         mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
@@ -689,7 +705,6 @@ def train_step(
     else:
         state = state.apply_gradients(grads=grads)
 
-    #return loss, mod_vars, grads, state
     return state, loss, ce, logits
 
 @partial(
