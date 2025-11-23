@@ -593,62 +593,95 @@ def train_step(
         ignore_times:bool, #6
     ):
 
-    # Print hash values of static arguments
-    # print(f"batchnorm hash: {batchnorm.__hash__()}")
-    # print(f"ignore_times hash: {ignore_times.__hash__()}")
-    # print('checking for compile in train_step')
-
+    # TBPTT with 4 chunks
     batch_inputs=repeat_book(*batch_inputs,True)
-    # batch_integration_timesteps=repeat_book(*batch_integration_timesteps)
 
-    def loss_fn(params):
-        # print('checking for compile in loss_fn')
-        if batchnorm:
-            logits, mod_vars = state.apply_fn( 
-                {"params": params, "batch_stats": state.batch_stats},
-                *batch_inputs, *batch_integration_timesteps,
-                rngs={"dropout": rng},
-                mutable=["intermediates", "batch_stats"],
-                method='__call_ar__'
-            )
+    # Split sequence into 4 chunks
+    n_chunks = 4
+    seq_len = batch_inputs[0].shape[1]
+    chunk_size = seq_len // n_chunks
+
+    # Initialize accumulators
+    total_loss = 0.0
+    total_ce = None
+    accumulated_grads = None
+    all_logits = []
+
+    # Process each chunk
+    for chunk_idx in range(n_chunks):
+        chunk_start = chunk_idx * chunk_size
+        chunk_end = (chunk_idx + 1) * chunk_size
+
+        # Extract chunk
+        chunk_inputs = (
+            batch_inputs[0][:, chunk_start:chunk_end],
+            batch_inputs[1][:, chunk_start:chunk_end]
+        )
+        chunk_labels = batch_labels[:, chunk_start:chunk_end]
+        chunk_timesteps = (
+            batch_integration_timesteps[0][:, chunk_start:chunk_end],
+            batch_integration_timesteps[1][:, chunk_start:chunk_end]
+        )
+
+        # Define loss for this chunk
+        def loss_fn_chunk(params):
+            if batchnorm:
+                logits, mod_vars = state.apply_fn(
+                    {"params": params, "batch_stats": state.batch_stats},
+                    *chunk_inputs, *chunk_timesteps,
+                    rngs={"dropout": rng},
+                    mutable=["intermediates", "batch_stats"],
+                    method='__call_ar__'
+                )
+            else:
+                logits, mod_vars = state.apply_fn(
+                    {"params": params},
+                    *chunk_inputs, *chunk_timesteps,
+                    rngs={"dropout": rng},
+                    mutable=["intermediates"],
+                    method='__call_ar__'
+                )
+
+            ce=cross_entropy_loss(logits, chunk_labels)
+            if ignore_times:
+                ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
+                ce_1=ce[:,:,:TIME_START_I]
+                ce_2=ce[:,:,(TIME_END_I+1):]
+                ce=np.concatenate([ce_1,ce_2],axis=2)
+                ce=ce.reshape(ce.shape[0],-1)
+
+            ce=np.mean(ce,axis=0)
+            loss = np.mean(ce)
+            return loss, (mod_vars, logits, ce)
+
+        # Compute gradients for this chunk
+        (chunk_loss, (mod_vars, chunk_logits, chunk_ce)), chunk_grads = jax.value_and_grad(loss_fn_chunk, has_aux=True)(state.params)
+
+        # Accumulate
+        total_loss += chunk_loss / n_chunks
+        all_logits.append(chunk_logits)
+
+        if total_ce is None:
+            total_ce = chunk_ce / n_chunks
         else:
-            logits, mod_vars = state.apply_fn(
-                {"params": params},
-                *batch_inputs, *batch_integration_timesteps,
-                rngs={"dropout": rng},
-                mutable=["intermediates"],
-                method='__call_ar__'
-            )
+            total_ce = total_ce + chunk_ce / n_chunks
 
+        if accumulated_grads is None:
+            accumulated_grads = chunk_grads
+        else:
+            accumulated_grads = jax.tree_util.tree_map(lambda a, b: a + b, accumulated_grads, chunk_grads)
 
-        # jax.debug.print("Shape of Logits: {}",logits.shape)
-        # jax.debug.print("Shape of Labels: {}", batch_labels.shape)
+    # Concatenate all logits
+    logits = np.concatenate(all_logits, axis=1)
 
-        
-        ce=cross_entropy_loss(logits, batch_labels)
-        if ignore_times:
-            ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
-            ce_1=ce[:,:,:TIME_START_I]
-            ce_2=ce[:,:,(TIME_END_I+1):]
-            ce=np.concatenate([ce_1,ce_2],axis=2)
-            ce=ce.reshape(ce.shape[0],-1)
-
-        ce=np.mean(ce,axis=0)
-        # jax.debug.print("Shape of CE: {}", ce.shape)
-        # average cross-ent loss
-        loss = np.mean(ce)
-        # jax.debug.print("Shape of loss: {}", loss.shape)
-        return loss, (mod_vars, logits,ce)
-
-    (loss, (mod_vars, logits,ce)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
-
-
+    # Average gradients
+    grads = jax.tree_util.tree_map(lambda g: g / n_chunks, accumulated_grads)
 
     # UPDATE
     # calculate means over device dimension (first)
-    loss = jax.lax.pmean(loss, axis_name="batch_devices")
+    loss = jax.lax.pmean(total_loss, axis_name="batch_devices")
     grads = jax.lax.pmean(grads, axis_name="batch_devices")
-    ce=jax.lax.pmean(ce,axis_name="batch_devices")
+    ce = jax.lax.pmean(total_ce, axis_name="batch_devices")
 
     if batchnorm:
         mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
