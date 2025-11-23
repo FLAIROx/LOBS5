@@ -4,7 +4,6 @@ from jax import random
 import jax.numpy as jnp
 import flax
 import orbax.checkpoint as ocp
-import psutil  # For memory profiling
 
 
 
@@ -22,7 +21,6 @@ from lob.dataloading import create_lobster_prediction_dataset, create_lobster_tr
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import reduce_lr_on_plateau, linear_warmup, \
     cosine_annealing, constant_lr, train_epoch, validate
-from lob.memory_profiler import print_memory_usage, detailed_memory_breakdown
 
 
 
@@ -67,19 +65,6 @@ def train(args):
     print("[*] Setting Randomness...")
     key = random.PRNGKey(args.jax_seed)
     init_rng, train_rng = random.split(key, num=2)
-
-    # === DEBUG: Test memory_stats() directly in training script ===
-    print("\n[DEBUG] Testing memory_stats() in training context:")
-    test_devices = jax.local_devices()
-    print(f"[DEBUG] Found {len(test_devices)} devices")
-    for i, dev in enumerate(test_devices):
-        test_stats = dev.memory_stats()
-        print(f"[DEBUG] Device {i}: stats type={type(test_stats)}, is_none={test_stats is None}, bool={bool(test_stats)}")
-        if test_stats:
-            print(f"[DEBUG]   Has data! bytes_in_use={test_stats.get('bytes_in_use', 'N/A')}")
-        else:
-            print(f"[DEBUG]   Stats is None or empty!")
-    print("[DEBUG] End of memory_stats() test\n")
 
     # Get dataset creation function
     ds = 'lobster-prediction'
@@ -153,20 +138,6 @@ def train(args):
                                                 n_book_post_layers=args.n_book_post_layers,
                                                 n_fused_layers=args.n_layers,
                                                 h_size_ema=ssm_size)
-    
-    # === Detailed Memory Breakdown ===
-    print("\n" + "="*60)
-    print("Analyzing Memory Composition...")
-    print("="*60)
-    batch_per_gpu = args.bsz // args.num_devices
-    detailed_memory_breakdown(
-        state=state,
-        batch_size_per_gpu=batch_per_gpu,
-        seq_len=seq_len,
-        vocab_size=n_classes,  # d_output
-        d_model=args.d_model,
-        n_layers=args.n_layers
-    )
 
     # Training Loop over epochs
     best_loss, best_acc, best_epoch = 100000000, -100000000.0, 0  # This best loss is val_loss
@@ -205,12 +176,8 @@ def train(args):
     ignore_times=args.ignore_times
     batchnorm=args.batchnorm
 
-    # Log initial memory state
-    print_memory_usage("Initial")
-
     for epoch in range(args.epochs):
         print(f"[*] Starting Training Epoch {epoch + 1}...")
-        print_memory_usage(f"Start of Epoch {epoch + 1}")
         # jax.profiler.start_trace("./jax-traces")
 
         if epoch < args.warmup_end:
@@ -254,8 +221,6 @@ def train(args):
                                               ignore_times,
                                               args.log_ce_tables,
                                               args.debugprint)
-
-        print_memory_usage(f"After training epoch {epoch + 1}")
 
         if args.random_offsets_train:
             # reinit training loader, so that sequences are initialised with

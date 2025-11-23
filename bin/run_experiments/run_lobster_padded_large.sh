@@ -32,7 +32,7 @@
 
 # Chunking configuration
 export JAX_N_CHUNKS=10
-export JAX_DEBUG_PRINT=true
+export JAX_DEBUG_PRINT=false
 
 python3 -u -B run_train.py \
         --C_init=trunc_standard_normal --prenorm=True --batchnorm=False --bidirectional=False \

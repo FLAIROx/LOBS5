@@ -551,11 +551,6 @@ def train_epoch(
             # print("train_epoch: Inputs 0:5:", inputs[0][0,0:5,:])
             rng, drop_rng = jax.random.split(rng)
 
-            # Print memory every 1000 steps
-            if batch_idx % 10 == 0:
-                print(f"\n=== Epoch {epoch}, Batch {batch_idx} ===")
-                print_memory_usage()
-            
             # state,loss=train_step_rnn(                
             #     state,
             #     drop_rng,
@@ -566,10 +561,6 @@ def train_epoch(
             #     init_hiddens)
 
             # print("Gets to train")
-
-            # === Memory Profiling: Only on first batch ===
-            if batch_idx == 0:
-                print_memory_usage("Before train_step")
 
             state, loss, ce, logits = train_step(
                 state,
@@ -584,20 +575,6 @@ def train_epoch(
             if debug_profiler:
                 loss.block_until_ready()
 
-            # === Memory Profiling: After train_step ===
-            if batch_idx == 0:
-                # Block to ensure computation is complete before measuring
-                loss.block_until_ready()
-                print_memory_usage("After train_step")
-
-                # Log tensor sizes
-                print("\n=== Tensor Sizes ===")
-                print(f"Logits shape: {logits.shape}")
-                print(f"Loss shape: {loss.shape}")
-                print(f"CE shape: {ce.shape}")
-                logits_mb = logits[0].size * logits[0].itemsize / (1024**2)
-                print(f"Logits memory per device: {logits_mb:.2f} MB")
-                print("="*60 + "\n")
             # print("completes train step")
             # if (batch_idx==0) & (epoch%100==0):
             #     np.set_printoptions(threshold=sys.maxsize)
@@ -616,19 +593,12 @@ def train_epoch(
             lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
             state, step = update_learning_rate_per_step(lr_params, state)
 
-            # === Memory Profiling: After optimizer update ===
-            if batch_idx == 0:
-                print_memory_usage("After LR update (gradients should be freed)")
             if (step>20) & (step<=21) & debug_profiler:
                 jax.profiler.stop_trace()
                 break
             if (curtail_epochs is not None) and (batch_idx>=curtail_epochs):
                 print("Ending epoch early due to curtail_epochs being ",curtail_epochs)
                 break
-
-            # === Memory Profiling: End of first batch ===
-            if batch_idx == 0:
-                print_memory_usage("End of batch 0 (all operations complete)")
 
         else:
             continue
