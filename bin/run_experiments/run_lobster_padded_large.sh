@@ -31,8 +31,10 @@
 # -B don't write .pyc files
 
 # Chunking configuration
-export JAX_N_CHUNKS=10
-export JAX_DEBUG_PRINT=true
+export JAX_N_CHUNKS=4
+export JAX_DEBUG_PRINT=false
+# export JAX_N_CHUNKS=10
+# export JAX_DEBUG_PRINT=true
 
 python3 -u -B run_train.py \
         --C_init=trunc_standard_normal --prenorm=True --batchnorm=False --bidirectional=False \
@@ -50,6 +52,7 @@ python3 -u -B run_train.py \
         --debug_loading=False \
         --enable_profiler=False \
         --debugprint=False \
+        --memory_profile=False \
         --random_offsets_train=True \
         --shuffle_train=True \
         --debug_overfit=False \

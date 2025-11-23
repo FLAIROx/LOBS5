@@ -198,13 +198,24 @@ def analyze_compilation_memory(train_step_fn, dummy_inputs, step_name="train_ste
     """
     Analyze memory usage using jax.lower().compile().memory_analysis()
 
+    IMPORTANT: This provides COMPILE-TIME MEMORY ESTIMATES from XLA compiler analysis,
+    NOT runtime actual memory usage. These estimates:
+    - Are based on static analysis of the computation graph
+    - May differ from actual runtime memory usage
+    - Are useful for comparing relative memory costs of different approaches
+    - Should be validated against device.memory_stats() for actual runtime usage
+
     Args:
         train_step_fn: The jitted function to analyze
         dummy_inputs: Tuple of dummy inputs matching the function signature
         step_name: Name for logging
 
     Returns:
-        Memory analysis dictionary from JAX compilation
+        CompiledMemoryStats object from JAX compilation (None if unavailable)
+
+    References:
+        - JAX AOT docs: https://docs.jax.dev/en/latest/aot.html
+        - Device memory profiling: https://docs.jax.dev/en/latest/device_memory_profiling.html
     """
     print(f"\n{'='*60}")
     print(f"JAX Compilation Memory Analysis for {step_name}")
@@ -222,7 +233,8 @@ def analyze_compilation_memory(train_step_fn, dummy_inputs, step_name="train_ste
         # Get memory analysis
         mem_analysis = compiled.memory_analysis()
 
-        print(f"\n[jax.lower().compile()] Compilation Memory Analysis:\n")
+        print(f"\n[jax.lower().compile()] COMPILE-TIME MEMORY ESTIMATES:")
+        print(f"(Note: These are XLA compiler predictions, not runtime actual usage)\n")
 
         # Device Memory (GPU)
         print("Device Memory (GPU):")
@@ -279,7 +291,28 @@ def analyze_compilation_memory(train_step_fn, dummy_inputs, step_name="train_ste
             total_peak_gpu += mem_analysis.generated_code_size_in_bytes
 
         total_peak_gb = bytes_to_gb(total_peak_gpu)
-        print(f"  Total Peak GPU Memory: ~{total_peak_gb:.2f} GB (temp + output + code)")
+        print(f"  Estimated Peak GPU Memory: ~{total_peak_gb:.2f} GB (temp + output + code)")
+
+        print(f"\n{'─'*60}")
+        print(f"⚠️  IMPORTANT NOTE:")
+        print(f"{'─'*60}")
+        print(f"These are COMPILE-TIME ESTIMATES from XLA compiler analysis.")
+        print(f"For ACTUAL RUNTIME memory usage, refer to device.memory_stats() output.")
+        print(f"")
+        print(f"Estimates may differ from actual usage due to:")
+        print(f"  • Runtime optimizations (fusion, buffer reuse)")
+        print(f"  • Memory fragmentation")
+        print(f"  • JAX internal buffers and overhead")
+        print(f"  • Dynamic memory allocation patterns")
+        print(f"")
+        print(f"Use this for:")
+        print(f"  ✓ Comparing relative memory costs of different implementations")
+        print(f"  ✓ Understanding memory composition breakdown")
+        print(f"  ✓ Identifying memory bottlenecks in computation graph")
+        print(f"")
+        print(f"Validate against:")
+        print(f"  → device.memory_stats()['bytes_in_use'] for actual runtime usage")
+        print(f"{'─'*60}")
 
         print(f"\n[jax.lower().compile()] Raw Object: {mem_analysis}")
 
