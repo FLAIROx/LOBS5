@@ -229,16 +229,17 @@ if __name__ == "__main__":
 	process_count = jax.process_count()
 
 	if args.num_processes > 1:
-		# Multi-node mode: device_count() returns process count
+		# Multi-node mode
 		total_gpus = local_device_count * process_count
+		expected_total = args.num_devices * args.num_processes
 		print(f"Multi-node device configuration:")
 		print(f"  Local devices per process: {local_device_count}")
 		print(f"  Number of processes: {process_count}")
 		print(f"  Total GPUs across all nodes: {total_gpus}")
-		print(f"  Expected total GPUs: {args.num_devices}")
+		print(f"  Expected total GPUs: {expected_total} ({args.num_devices} per process × {args.num_processes} processes)")
 
-		if total_gpus != args.num_devices:
-			print(f"  WARNING: Total GPU mismatch! Expected {args.num_devices}, got {total_gpus}")
+		if total_gpus != expected_total:
+			print(f"  WARNING: Total GPU mismatch! Expected {expected_total}, got {total_gpus}")
 	else:
 		# Single-node mode: device_count() returns actual GPU count
 		print(f"Single-node device configuration:")

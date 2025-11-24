@@ -2,19 +2,40 @@
 
 # ============================================
 # LOBS5 Multi-Node Training Launcher
+# (Scheme B: 1 process per node, 4 GPUs via pmap)
 # ============================================
 
-# Calculate total GPUs (dynamic based on node count)
-TOTAL_GPUS=$((SLURM_NNODES * 4))
+# Per-process (per-node) GPU count from Slurm
+LOCAL_GPUS=${SLURM_GPUS_PER_TASK:-4}
+
+# Processes = number of nodes in this job
+PROCS=${SLURM_NTASKS:-$SLURM_NNODES}
+
+# Global effective batch size (across all processes)
+GLOBAL_BSZ=${GLOBAL_BSZ:-520}
+
+if [ $((GLOBAL_BSZ % PROCS)) -ne 0 ]; then
+  echo "[WARN] GLOBAL_BSZ ($GLOBAL_BSZ) not divisible by num processes ($PROCS). Rounding down per-process batch."
+fi
+LOCAL_BSZ=$(( GLOBAL_BSZ / PROCS ))
 
 echo "============================================"
 echo "Starting training on node $(hostname)"
 echo "SLURM_PROCID: $SLURM_PROCID (Global Rank)"
 echo "SLURM_LOCALID: $SLURM_LOCALID (Local Rank)"
 echo "SLURM_NODEID: $SLURM_NODEID (Node ID)"
-echo "Total GPUs: $TOTAL_GPUS"
+echo "Local GPUs (per process): $LOCAL_GPUS"
+echo "Processes (num nodes): $PROCS"
+echo "Global batch size: $GLOBAL_BSZ"
+echo "Local batch size (per process): $LOCAL_BSZ"
 echo "Coordinator: ${MASTER_ADDR}:${MASTER_PORT}"
 echo "============================================"
+
+# Show which GPUs are visible to this process
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi -L || true
+fi
 
 
 # ============================================
@@ -57,7 +78,7 @@ echo "============================================"
 # -B: don't write .pyc files
 python3 -u -B run_train.py \
         --C_init=trunc_standard_normal --prenorm=True --batchnorm=False --bidirectional=False \
-        --blocks=16 --bsz=520 --d_model=1024 --dataset=lobster-prediction --merging=padded \
+        --blocks=16 --bsz=${LOCAL_BSZ} --d_model=1024 --dataset=lobster-prediction --merging=padded \
         --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG2016TO2021' \
         --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/tokenized_lobs5_v2' \
         --data_mode='preproc' \
@@ -67,7 +88,7 @@ python3 -u -B run_train.py \
         --warmup_end=1 --weight_decay=0.05 --msg_seq_len=500 \
         --use_book_data=True --use_simple_book=False --book_transform=True  \
         --masking=none \
-        --num_devices=$TOTAL_GPUS --n_data_workers=40 \
+        --num_devices=${LOCAL_GPUS} --n_data_workers=4 \
         --debug_loading=False \
         --enable_profiler=False \
         --random_offsets_train=True \
@@ -76,7 +97,7 @@ python3 -u -B run_train.py \
         --lr_patience=5 \
         --coordinator_address="${MASTER_ADDR}:${MASTER_PORT}" \
         --process_id=$SLURM_PROCID \
-        --num_processes=$SLURM_NTASKS \
+        --num_processes=${PROCS} \
         --USE_WANDB=True \
         --wandb_project=lobs5-10node-distributed \
         --wandb_entity=kang-oxford \
