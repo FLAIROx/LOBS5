@@ -65,10 +65,10 @@ def train(args):
                 print(f"[Rank {process_id}] Using WandB offline mode (no metrics upload)")
             run = wandb.init(mode='offline', name=checkpoint_name)
 
-        # Override run name/id with consistent values for checkpointing
+        # Override run name for consistency; keep a separate run_id for checkpointing
         run.name = checkpoint_name
-        run.id = slurm_job_id
-        print(f"[Rank {process_id}] Checkpoint directory: checkpoints/{run.name}_{run.id}/")
+        run_id = slurm_job_id
+        print(f"[Rank {process_id}] Checkpoint directory: checkpoints/{run.name}_{run_id}/")
 
     ssm_size = args.ssm_size_base
     ssm_lr = args.ssm_lr_base
@@ -176,7 +176,7 @@ def train(args):
         # enable_async_checkpointing=False,
     )
     ckpt_mgr = ocp.CheckpointManager(
-        os.path.abspath(f'checkpoints/{run.name}_{run.id}/'),
+        os.path.abspath(f'checkpoints/{run.name}_{run_id}/'),
         # ocp.Checkpointer(ocp.PyTreeCheckpointHandler()),
         # ocp.Checkpointer(ocp.StandardCheckpointHandler()),
         item_names=('state', 'metadata'),

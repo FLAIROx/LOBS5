@@ -5,11 +5,11 @@
 # (Scheme B: 1 process per node, 4 GPUs via pmap)
 # ============================================
 
-# Per-process (per-node) GPU count from Slurm
-LOCAL_GPUS=${SLURM_GPUS_PER_TASK:-4}
+# Per-process GPU count from Slurm (Scheme A: 1 GPU per process)
+LOCAL_GPUS=${SLURM_GPUS_PER_TASK:-1}
 
-# Processes = number of nodes in this job
-PROCS=${SLURM_NTASKS:-$SLURM_NNODES}
+# Total processes across all nodes
+PROCS=${SLURM_NTASKS:-$((SLURM_NNODES*4))}
 
 # Global effective batch size (across all processes)
 GLOBAL_BSZ=${GLOBAL_BSZ:-520}
@@ -25,13 +25,13 @@ echo "SLURM_PROCID: $SLURM_PROCID (Global Rank)"
 echo "SLURM_LOCALID: $SLURM_LOCALID (Local Rank)"
 echo "SLURM_NODEID: $SLURM_NODEID (Node ID)"
 echo "Local GPUs (per process): $LOCAL_GPUS"
-echo "Processes (num nodes): $PROCS"
+echo "Total processes: $PROCS"
 echo "Global batch size: $GLOBAL_BSZ"
 echo "Local batch size (per process): $LOCAL_BSZ"
 echo "Coordinator: ${MASTER_ADDR}:${MASTER_PORT}"
 echo "============================================"
 
-# Show which GPUs are visible to this process
+# Show which GPU is visible to this process
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi -L || true
