@@ -182,8 +182,71 @@ if __name__ == "__main__":
 				help="Runs the training loop in overfit mode on a single batch of data. Validation and testing are from the same set. ")
 	parser.add_argument("--log_ce_tables", type=str2bool, default=False,
 				help="Logs the CE values on a per token level to wandb. Memory intensive.")
-	
+
+	# JAX Distributed Training Arguments
+	parser.add_argument("--coordinator_address", type=str, default=None,
+				help="JAX distributed coordinator address (e.g., 'node001:12345')")
+	parser.add_argument("--process_id", type=int, default=0,
+				help="Process ID for distributed training (from SLURM_PROCID)")
+	parser.add_argument("--num_processes", type=int, default=1,
+				help="Total number of processes (from SLURM_NTASKS)")
+
 	args = parser.parse_args()
+
+
+	# ============================================
+	# JAX Distributed Initialization
+	# ============================================
+	import jax
+
+	if args.coordinator_address is not None and args.num_processes > 1:
+		print(f"[Rank {args.process_id}] Initializing JAX distributed training...")
+		print(f"  Coordinator: {args.coordinator_address}")
+		print(f"  Process ID: {args.process_id}/{args.num_processes}")
+		print(f"  Node: {os.environ.get('HOSTNAME', 'unknown')}")
+
+		jax.distributed.initialize(
+			coordinator_address=args.coordinator_address,
+			num_processes=args.num_processes,
+			process_id=args.process_id,
+		)
+
+		print(f"[Rank {args.process_id}] JAX distributed initialized successfully!")
+		print(f"  Local devices: {jax.local_devices()}")
+		print(f"  Global device count: {jax.device_count()}")
+	else:
+		print("Running in single-node mode (no distributed coordination)")
+		print(f"  Local devices: {jax.local_devices()}")
+
+	# Verify device count matches expected
+	# In JAX distributed training:
+	#   - jax.local_device_count() = GPUs per process (e.g., 4)
+	#   - jax.device_count() = number of processes in distributed mode (e.g., 10)
+	#   - Total GPUs = jax.local_device_count() * jax.process_count()
+
+	local_device_count = jax.local_device_count()
+	global_device_count = jax.device_count()
+	process_count = jax.process_count()
+
+	if args.num_processes > 1:
+		# Multi-node mode: device_count() returns process count
+		total_gpus = local_device_count * process_count
+		print(f"Multi-node device configuration:")
+		print(f"  Local devices per process: {local_device_count}")
+		print(f"  Number of processes: {process_count}")
+		print(f"  Total GPUs across all nodes: {total_gpus}")
+		print(f"  Expected total GPUs: {args.num_devices}")
+
+		if total_gpus != args.num_devices:
+			print(f"  WARNING: Total GPU mismatch! Expected {args.num_devices}, got {total_gpus}")
+	else:
+		# Single-node mode: device_count() returns actual GPU count
+		print(f"Single-node device configuration:")
+		print(f"  Local devices: {global_device_count}")
+		print(f"  Expected devices: {args.num_devices}")
+
+		if global_device_count != args.num_devices:
+			print(f"  WARNING: Device mismatch! Expected {args.num_devices}, got {global_device_count}")
 
 
 	import torch
@@ -191,7 +254,7 @@ if __name__ == "__main__":
 
 	from lob.train import train
 	#import tensorflow as tf
-	# import jax	
+	# import jax
 	# import cProfile
 
 	#with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):

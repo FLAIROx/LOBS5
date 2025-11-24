@@ -37,11 +37,38 @@ def train(args):
     if args is None:
         args = wandb.config
     else:
-        if args.USE_WANDB:
-            # Make wandb config dictionary
-            run = wandb.init(project=args.wandb_project, job_type='model_training', config=vars(args), entity=args.wandb_entity)
+        # ============================================
+        # WandB Initialization - Only on Rank 0
+        # ============================================
+        import jax
+        process_id = jax.process_index()  # Get current process rank
+
+        # Generate consistent checkpoint name using SLURM_JOB_ID
+        # This ensures all processes use the same checkpoint directory
+        slurm_job_id = os.environ.get('SLURM_JOB_ID', 'local')
+        checkpoint_name = f"lobs5_job{slurm_job_id}"
+
+        if args.USE_WANDB and process_id == 0:
+            # Only rank 0 initializes real WandB
+            print(f"[Rank {process_id}] Initializing WandB (uploading metrics)...")
+            run = wandb.init(
+                project=args.wandb_project,
+                job_type='model_training',
+                config=vars(args),
+                entity=args.wandb_entity,
+                name=checkpoint_name  # Use consistent name
+            )
+            print(f"[Rank {process_id}] WandB run: {run.name} (ID: {run.id})")
         else:
-            run = wandb.init(mode='offline')
+            # Other ranks use offline mode (no upload)
+            if process_id != 0:
+                print(f"[Rank {process_id}] Using WandB offline mode (no metrics upload)")
+            run = wandb.init(mode='offline', name=checkpoint_name)
+
+        # Override run name/id with consistent values for checkpointing
+        run.name = checkpoint_name
+        run.id = slurm_job_id
+        print(f"[Rank {process_id}] Checkpoint directory: checkpoints/{run.name}_{run.id}/")
 
     ssm_size = args.ssm_size_base
     ssm_lr = args.ssm_lr_base
