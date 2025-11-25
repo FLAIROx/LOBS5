@@ -1,8 +1,3 @@
-# Force workers to use CPU (must be before any JAX import)
-import os
-os.environ.setdefault('JAX_PLATFORMS', 'cpu')
-os.environ.setdefault('CUDA_VISIBLE_DEVICES', '-1')
-
 """ Datasets for core experimental results """
 from pathlib import Path
 import random
@@ -23,7 +18,9 @@ from glob import glob
 # Global flag to set a specific platform, must be used at startup.
 # jax.config.update('jax_platform_name', 'cpu')
 
-from lob.encoding import Vocab, Message_Tokenizer,encode_msgs
+# Import JAX-free constants for worker processes (avoids CUDA init errors)
+from lob.encoding_constants import VocabConstants as Vocab, Message_Tokenizer
+# encode_msgs is imported lazily only when needed (preproc mode)
 from preproc import transform_L2_state,transform_L2_state_numpy
 from s5.dataloaders.base import default_data_path, SequenceDataset
 from s5.utils import permutations
@@ -391,7 +388,7 @@ class LOBSTER_Dataset(Dataset):
 
         self.n_cache_files = n_cache_files
         self._message_cache = OrderedDict()
-        self.vocab = Vocab()
+        self.vocab = None  # Not needed for encoded mode
         self.mask_fn = mask_fn
         if self.mask_fn==LOBSTER_Dataset.no_mask or self.mask_fn==LOBSTER_Dataset.inference_mask:
             self.seq_len=self.n_messages* Message_Tokenizer.MSG_LEN
@@ -486,11 +483,7 @@ class LOBSTER_Dataset(Dataset):
                     f"Use data_mode='preproc' for raw data."
                 )
         else:  # data_mode == 'preproc'
-            # Data is raw (shape: N, 14), need to encode
-            X_raw = np.array(X[seq_start: seq_end])
-            # print(X_raw[0])
-            # encode message
-            X = encode_msgs(X_raw, self.vocab.ENCODING)
+            raise NotImplementedError("preproc mode is disabled. Use data_mode='encoded' with pre-encoded data.")
         # print(f"lobster_dataloader.py: First loaded message from batch is \n  {X_raw[0]}\n which is \n {X[0]}\nafter encoding.")
 
         

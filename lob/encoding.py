@@ -5,13 +5,11 @@ import jax
 import jax.numpy as jnp
 from functools import partial
 
-
-
-
-NA_VAL = -9999
-HIDDEN_VAL = -20000
-MASK_VAL = -10000
-START_VAL=-30000
+# Import constants from the JAX-free module (for backward compatibility)
+from lob.encoding_constants import (
+    NA_VAL, HIDDEN_VAL, MASK_VAL, START_VAL,
+    VocabConstants, Message_Tokenizer
+)
 
 
 @jax.jit
@@ -235,12 +233,8 @@ def repr_raw_msg(msg):
         out += name + ":\t" + str(val) + "\n"
     return out
 
-class Vocab:
-
-    MASK_TOK = 0
-    HIDDEN_TOK = 1
-    NA_TOK = 2
-    START_TOK= 3
+class Vocab(VocabConstants):
+    """Vocab class that inherits constants from VocabConstants."""
 
     def __init__(self) -> None:
         self.counter = 4  # 0: MSK, 1: HID, 2: NAN, 3: START
