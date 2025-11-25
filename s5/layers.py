@@ -90,23 +90,20 @@ class SequenceLayer(nn.Module):
         elif self.activation in ["gelu"]:
             x = self.drop(nn.gelu(x))
 
-        # NEW: Transformer-style MLP activations
+        # NEW: Transformer-style MLP activations (no dropout, like modern LLMs)
         elif self.activation in ["swiglu"]:
             # SwiGLU: silu(gate) * value, then down-project
             # Like LLaMA/Qwen: x = down(silu(gate(x)) * up(x))
             gate = jax.nn.silu(self.up_gate(x))  # D -> d_ff, with SiLU
             value = self.up_proj(x)              # D -> d_ff
-            x = self.drop(gate * value)          # element-wise gating
+            x = gate * value                     # element-wise gating
             x = self.down_proj(x)                # d_ff -> D
-            x = self.drop(x)
 
         elif self.activation in ["mlp_gelu"]:
             # Standard Transformer MLP: up -> gelu -> down
             x = self.up_proj(x)      # D -> d_ff
             x = nn.gelu(x)
-            x = self.drop(x)
             x = self.down_proj(x)    # d_ff -> D
-            x = self.drop(x)
 
         else:
             raise NotImplementedError(
