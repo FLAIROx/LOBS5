@@ -1,3 +1,8 @@
+# Force workers to use CPU (must be before any JAX import)
+import os
+os.environ.setdefault('JAX_PLATFORMS', 'cpu')
+os.environ.setdefault('CUDA_VISIBLE_DEVICES', '-1')
+
 """ Datasets for core experimental results """
 from pathlib import Path
 import random

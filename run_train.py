@@ -11,17 +11,6 @@ import os
 # os.environ["TF_CPP_MIN_LOG_LEVEL"]="0"
 # os.environ["NCCL_DEBUG"]="INFO"
 
-#os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-# os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".99"
-if __name__ == "__main__":
-	pass
-else:
-	# Forces all generated worker processes to not run on GPU.
-	#  Required at this high level, because the init func in the 
-	# worker spawn interface happens after init. of the CUDA process. 
-	os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-	os.environ["JAX_PLATFORMS"] = "cpu"
-
 from lob.dataloading import Datasets
 
 if __name__ == "__main__":
