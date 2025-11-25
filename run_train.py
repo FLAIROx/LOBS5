@@ -108,7 +108,9 @@ if __name__ == "__main__":
 							 "last: take last element \\" \
 							 "ema : take exponential moving avg across all")
 	parser.add_argument("--activation_fn", default="half_glu1", type=str,
-						choices=["full_glu", "half_glu1", "half_glu2", "gelu"])
+						choices=["full_glu", "half_glu1", "half_glu2", "gelu", "swiglu", "mlp_gelu"])
+	parser.add_argument("--mlp_ratio", type=float, default=4.0,
+						help="MLP expansion ratio for swiglu/mlp_gelu activations (d_ff = mlp_ratio * d_model)")
 	parser.add_argument("--conj_sym", type=str2bool, default=True,
 						help="whether to enforce conjugate symmetry")
 	parser.add_argument("--clip_eigs", type=str2bool, default=False,

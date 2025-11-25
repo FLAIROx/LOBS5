@@ -20,6 +20,7 @@ class StackedEncoderModel(nn.Module):
             step_rescale  (float32):  allows for uniformly changing the timescale parameter,
                                     e.g. after training on a different resolution for
                                     the speech commands benchmark
+            mlp_ratio   (float32):  expansion ratio for MLP block (d_ff = mlp_ratio * d_model)
     """
     ssm: nn.Module
     d_model: int
@@ -33,6 +34,7 @@ class StackedEncoderModel(nn.Module):
     step_rescale: float = 1.0
     use_embed_layer: bool = False
     vocab_size: int = -1  # only used if use_encode_layer is True
+    mlp_ratio: float = 4.0  # Transformer-style MLP expansion ratio
 
     def setup(self):
         """
@@ -43,7 +45,7 @@ class StackedEncoderModel(nn.Module):
         else:
             self.encoder = nn.Dense(self.d_model)
 
-        #NOTE:  popjaxrl S5 doesn't have an encoding layer, tbd if this makes a differnce. 
+        #NOTE:  popjaxrl S5 doesn't have an encoding layer, tbd if this makes a differnce.
 
         self.layers = [
             SequenceLayer(
@@ -56,6 +58,7 @@ class StackedEncoderModel(nn.Module):
                 batchnorm=self.batchnorm,
                 bn_momentum=self.bn_momentum,
                 step_rescale=self.step_rescale,
+                mlp_ratio=self.mlp_ratio,
             )
             for _ in range(self.n_layers)
         ]
@@ -164,6 +167,7 @@ class ClassificationModel(nn.Module):
             step_rescale  (float32):  allows for uniformly changing the timescale parameter,
                                     e.g. after training on a different resolution for
                                     the speech commands benchmark
+            mlp_ratio   (float32):  expansion ratio for MLP block
     """
     ssm: nn.Module
     d_output: int
@@ -178,6 +182,7 @@ class ClassificationModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    mlp_ratio: float = 4.0
 
     def setup(self):
         """
@@ -194,6 +199,7 @@ class ClassificationModel(nn.Module):
                             batchnorm=self.batchnorm,
                             bn_momentum=self.bn_momentum,
                             step_rescale=self.step_rescale,
+                            mlp_ratio=self.mlp_ratio,
                                         )
         self.decoder = nn.Dense(self.d_output)
 
@@ -295,6 +301,7 @@ class RetrievalModel(nn.Module):
             prenorm     (bool):     apply prenorm if true or postnorm if false
             batchnorm   (bool):     apply batchnorm if true or layernorm if false
             bn_momentum (float32):  the batchnorm momentum if batchnorm is used
+            mlp_ratio   (float32):  expansion ratio for MLP block
     """
     ssm: nn.Module
     d_output: int
@@ -308,6 +315,7 @@ class RetrievalModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    mlp_ratio: float = 4.0
 
     def setup(self):
         """
@@ -334,6 +342,7 @@ class RetrievalModel(nn.Module):
                             batchnorm=self.batchnorm,
                             bn_momentum=self.bn_momentum,
                             step_rescale=self.step_rescale,
+                            mlp_ratio=self.mlp_ratio,
                                         )
         BatchRetrievalDecoder = nn.vmap(
             RetrievalDecoder,

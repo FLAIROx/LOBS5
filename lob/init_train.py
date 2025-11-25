@@ -249,6 +249,7 @@ def init_train_state(
                 prenorm=args.prenorm,
                 batchnorm=args.batchnorm,
                 bn_momentum=args.bn_momentum,
+                mlp_ratio=args.mlp_ratio,
             )
         elif args.merging == 'padded': #i.e. 'padded'
             model_cls = partial(
@@ -269,7 +270,8 @@ def init_train_state(
                 prenorm=args.prenorm,
                 batchnorm=args.batchnorm,
                 bn_momentum=args.bn_momentum,
-                #args not adding to partial: training & rescale. 
+                mlp_ratio=args.mlp_ratio,
+                #args not adding to partial: training & rescale.
             )
         else:
             raise ValueError("Merge method: " + args.merging + " is not valid (check spelling)")
@@ -291,6 +293,7 @@ def init_train_state(
             prenorm=args.prenorm,
             batchnorm=args.batchnorm,
             bn_momentum=args.bn_momentum,
+            mlp_ratio=args.mlp_ratio,
         )
 
     # initialize training state

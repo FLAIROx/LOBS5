@@ -29,6 +29,7 @@ class LobPredModel(nn.Module):
             step_rescale  (float32):  allows for uniformly changing the timescale parameter,
                                     e.g. after training on a different resolution for
                                     the speech commands benchmark
+            mlp_ratio   (float32):  expansion ratio for MLP block
     """
     ssm: nn.Module
     d_output: int
@@ -43,6 +44,7 @@ class LobPredModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    mlp_ratio: float = 4.0
 
     def setup(self):
         """
@@ -59,6 +61,7 @@ class LobPredModel(nn.Module):
                             batchnorm=self.batchnorm,
                             bn_momentum=self.bn_momentum,
                             step_rescale=self.step_rescale,
+                            mlp_ratio=self.mlp_ratio,
                                         )
         self.decoder = nn.Dense(self.d_output)
 
@@ -149,6 +152,7 @@ class LobBookModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    mlp_ratio: float = 4.0
 
     def setup(self):
         """
@@ -166,6 +170,7 @@ class LobBookModel(nn.Module):
                 batchnorm=self.batchnorm,
                 bn_momentum=self.bn_momentum,
                 step_rescale=self.step_rescale,
+                mlp_ratio=self.mlp_ratio,
             ) for _ in range(self.n_pre_layers))
         self.projection = nn.Dense(self.d_model)  # project to d_model
         self.post_layers = tuple(
@@ -179,6 +184,7 @@ class LobBookModel(nn.Module):
                 batchnorm=self.batchnorm,
                 bn_momentum=self.bn_momentum,
                 step_rescale=self.step_rescale,
+                mlp_ratio=self.mlp_ratio,
             )
             for _ in range(self.n_post_layers)
         )
@@ -248,6 +254,7 @@ class FullLobPredModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    mlp_ratio: float = 4.0
 
     def setup(self):
         """
@@ -266,9 +273,10 @@ class FullLobPredModel(nn.Module):
             step_rescale=self.step_rescale,
             use_embed_layer=True,
             vocab_size=self.d_output,
+            mlp_ratio=self.mlp_ratio,
         )
         # applied to transposed message output to get seq len for fusion
-        self.message_out_proj = nn.Dense(self.d_model)  
+        self.message_out_proj = nn.Dense(self.d_model)
         self.book_encoder = LobBookModel(
             ssm=self.ssm,
             d_book=self.d_book,
@@ -282,6 +290,7 @@ class FullLobPredModel(nn.Module):
             batchnorm=self.batchnorm,
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
+            mlp_ratio=self.mlp_ratio,
         )
         # applied to transposed book output to get seq len for fusion
         self.book_out_proj = nn.Dense(self.d_model)
@@ -296,6 +305,7 @@ class FullLobPredModel(nn.Module):
             batchnorm=self.batchnorm,
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
+            mlp_ratio=self.mlp_ratio,
         )
         self.decoder = nn.Dense(self.d_output)
 
@@ -361,6 +371,7 @@ class PaddedLobPredModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    mlp_ratio: float = 4.0
 
     def setup(self):
         """
@@ -380,10 +391,11 @@ class PaddedLobPredModel(nn.Module):
             step_rescale=self.step_rescale,
             use_embed_layer=True,
             vocab_size=self.d_output,
+            mlp_ratio=self.mlp_ratio,
         )
 
         # applied to transposed message output to get seq len for fusion
-        #self.message_out_proj = nn.Dense(self.d_model)  
+        #self.message_out_proj = nn.Dense(self.d_model)
         # nn.checkpoint()
         self.book_encoder = LobBookModel(
             ssm=self.ssm,
@@ -398,6 +410,7 @@ class PaddedLobPredModel(nn.Module):
             batchnorm=self.batchnorm,
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
+            mlp_ratio=self.mlp_ratio,
         )
 
 
@@ -416,6 +429,7 @@ class PaddedLobPredModel(nn.Module):
             batchnorm=self.batchnorm,
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
+            mlp_ratio=self.mlp_ratio,
         )
         self.decoder = nn.Dense(self.d_output)
 
