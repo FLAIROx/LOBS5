@@ -83,13 +83,13 @@ nvidia-smi --list-gpus | head -4
 # -B: don't write .pyc files
 python -u -B run_train.py \
         --C_init=trunc_standard_normal --prenorm=True --batchnorm=False --bidirectional=False \
-        --blocks=48 --per_gpu_bsz=1 --d_model=3072 --dataset=lobster-prediction --merging=padded \
-        --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG2016TO2021_encoded24' \
-        --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/tokenized_lobs5_v2_encoded24' \
+        --blocks=56 --per_gpu_bsz=1 --d_model=3584 --dataset=lobster-prediction --merging=padded \
+        --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded' \
+        --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_encoded' \
         --data_mode='encoded' \
          --clip_eigs=True --activation_fn=half_glu1 \
-        --dt_global=False --epochs=5 --jax_seed=42 --lr_factor=1 --n_layers=28 \
-        --opt_config=standard --p_dropout=0.0 --ssm_lr_base=0.00005 --ssm_size_base=3072 \
+        --dt_global=False --epochs=5 --jax_seed=42 --lr_factor=1 --n_layers=32 \
+        --opt_config=standard --p_dropout=0.0 --ssm_lr_base=0.00005 --ssm_size_base=3584 \
         --warmup_end=1 --weight_decay=0.05 --msg_seq_len=500 \
         --use_book_data=True --use_simple_book=False --book_transform=True  \
         --masking=none \
@@ -101,7 +101,7 @@ python -u -B run_train.py \
         --debug_overfit=False \
         --lr_patience=5 \
         --USE_WANDB=True \
-        --wandb_project=lobs5-3072x28-tok24 \
+        --wandb_project=lobs5-3584x32-tok24 \
         --wandb_entity=kang-oxford
 
 
@@ -117,3 +117,19 @@ python -u -B run_train.py \
         # --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/tokenized_lobs5_v2_encoded24' \
         # --data_mode='encoded' \
         # ============= Data choices =================
+
+        # /lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_csv
+        #     - GOOG
+        #         - 2016
+        #         - 2017
+        #         ..... 
+        #     - GOOGL
+        #         - 2016
+        #         - 2017
+        #         ......
+        # /lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc
+        # /lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded
+
+
+        # /lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc
+        # /lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_encoded

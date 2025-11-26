@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=lobs5_3072x28
-#SBATCH --output=logs_lobs5_3072x28/lobs5_%j.out
-#SBATCH --error=logs_lobs5_3072x28/lobs5_%j.err
+#SBATCH --job-name=lobs5_3584x32
+#SBATCH --output=logs_lobs5_3584x32/lobs5_%j.out
+#SBATCH --error=logs_lobs5_3584x32/lobs5_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
@@ -28,7 +28,7 @@ echo "============================================"
 echo ""
 
 # Create logs directory
-mkdir -p logs_lobs5_3072x28
+mkdir -p logs_lobs5_3584x32
 
 # Change to working directory
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
@@ -72,7 +72,7 @@ echo ""
 if [ $NNODES -eq 1 ]; then
     # Single-node: use wrapper script for environment setup
     bash /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/bin/run_experiments/run_lobster_padded_large.sh \
-        2>&1 | tee logs_lobs5_3072x28/training_${SLURM_JOB_ID}.log
+        2>&1 | tee logs_lobs5_3584x32/training_${SLURM_JOB_ID}.log
 else
     # Multi-node: use srun with wrapper script
     srun --nodes=$NNODES \
@@ -80,7 +80,7 @@ else
          --ntasks-per-node=1 \
          --gres=gpu:$GPUS_PER_NODE \
          --gpu-bind=map_gpu:0,1,2,3 \
-         --output=logs_lobs5_3072x28/training_${SLURM_JOB_ID}_node%n.log \
+         --output=logs_lobs5_3584x32/training_${SLURM_JOB_ID}_node%n.log \
          --export=ALL \
          bash /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/bin/run_experiments/run_lobster_padded_large.sh
 fi
