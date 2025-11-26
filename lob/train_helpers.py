@@ -310,14 +310,13 @@ def create_train_state(model_cls,
     else:
         state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
     
-    # BF16 Mixed Precision: Convert parameters to BF16 once at initialization
-    # This avoids repeated tree_map in every forward pass
-    params_bf16 = jax.tree_util.tree_map(
-        lambda x: x.astype(np.bfloat16) if x.dtype == np.float32 else x,
-        state.params
-    )
-    state = state.replace(params=params_bf16)
-    print(f"[*] Parameters converted to BF16 for mixed precision training")
+    # BF16 Mixed Precision: DISABLED - causes NaN on some hardware
+    # params_bf16 = jax.tree_util.tree_map(
+    #     lambda x: x.astype(np.bfloat16) if x.dtype == np.float32 else x,
+    #     state.params
+    # )
+    # state = state.replace(params=params_bf16)
+    print(f"[*] Parameters kept in FP32 (BF16 disabled)")
 
     # keep copy of state on each device
     print(state.params['message_encoder']['encoder']['embedding'].shape)

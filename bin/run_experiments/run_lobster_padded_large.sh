@@ -116,6 +116,8 @@ python -u -B run_train.py \
         --USE_WANDB=False \
         --wandb_project=lobs5-test-resume \
         --wandb_entity=kang-oxford
+        # --restore='checkpoints/offline_1619158_1619158' \
+        # --restore_step=10
 
         # ============= 原始大模型配置 (3072x32) =================
         # --blocks=48 --d_model=3072 --n_layers=32 --ssm_size_base=3072 \

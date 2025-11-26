@@ -1,8 +1,10 @@
 import os
+from typing import Any
 import jax
 from jax import random
 import jax.numpy as jnp
 import flax
+from flax import jax_utils
 import orbax.checkpoint as ocp
 from orbax.checkpoint.checkpoint_manager import MultiprocessingOptions
 
@@ -215,15 +217,21 @@ def train(args):
             multiprocessing_options=MultiprocessingOptions(primary_host=0, active_processes={0})
         )
         print(f"[DEBUG] Process 0: Options created, initializing CheckpointManager...")
+        # Use restore path if specified, otherwise create new checkpoint directory
+        if hasattr(args, 'restore') and args.restore is not None and args.restore != '':
+            ckpt_dir = os.path.abspath(args.restore)
+            print(f"[*] Using restore path for checkpoint manager: {ckpt_dir}")
+        else:
+            ckpt_dir = os.path.abspath(f'checkpoints/{run.name}_{run.id}/')
+            print(f"[*] Creating new checkpoint directory: {ckpt_dir}")
+
         ckpt_mgr = ocp.CheckpointManager(
-            os.path.abspath(f'checkpoints/{run.name}_{run.id}/'),
-            # ocp.Checkpointer(ocp.PyTreeCheckpointHandler()),
-            # ocp.Checkpointer(ocp.StandardCheckpointHandler()),
+            ckpt_dir,
             item_names=('state', 'metadata'),
             options=mgr_options,
             metadata=vars(args)
         )
-        print(f"[*] Checkpoint manager created: checkpoints/{run.name}_{run.id}/")
+        print(f"[*] Checkpoint manager created: {ckpt_dir}")
     else:
         ckpt_mgr = None
         print(f"[*] Process {args.process_index}: Skipping checkpoint manager (only process 0 saves)")
@@ -267,14 +275,26 @@ def train(args):
     resume_dataloader_seed = None  # Will be set if resuming with random_offsets
 
     if ckpt_mgr is not None and ckpt_mgr.latest_step() is not None:
-        latest_step = ckpt_mgr.latest_step()
+        # Use restore_step if specified, otherwise use latest_step
+        if hasattr(args, 'restore_step') and args.restore_step is not None:
+            latest_step = args.restore_step
+            print(f"[*] Using specified restore_step={latest_step} (latest available: {ckpt_mgr.latest_step()})")
+        else:
+            latest_step = ckpt_mgr.latest_step()
         print(f"[*] Found checkpoint at step {latest_step}, attempting to load...")
 
         try:
             # Load checkpoint metadata to get resume info
-            restored = ckpt_mgr.restore(latest_step)
-            if restored is not None and 'resume_info' in restored:
-                resume_info = restored['resume_info']
+            # Need to provide restore args for each item type
+            restored = ckpt_mgr.restore(
+                latest_step,
+                args=ocp.args.Composite(
+                    state=ocp.args.StandardRestore(),  # Restore raw pytree without target
+                    metadata=ocp.args.JsonRestore()
+                )
+            )
+            if restored is not None and 'resume_info' in restored.get('metadata', {}):
+                resume_info = restored['metadata']['resume_info']
                 start_epoch = resume_info['epoch']
                 start_segment = resume_info['segment_idx'] + 1  # Start from next segment
                 restored_step = resume_info['global_step']
@@ -297,8 +317,41 @@ def train(args):
                     else:
                         print(f"[*] Resuming from: epoch {start_epoch}, segment {start_segment}, global_step {restored_step}")
 
-                # Restore model state
-                state = restored['model']
+                # If --restore was specified, load_checkpoint already restored the state
+                # We only need the resume_info from the checkpoint, not the state again
+                # This avoids double-restoration and the TrainState reconstruction issue
+                if not (hasattr(args, 'restore') and args.restore is not None and args.restore != ''):
+                    # No --restore flag: restore state from intra-epoch checkpoint
+                    restored_state_dict = restored['state']
+                    # Convert numpy arrays to JAX arrays
+                    restored_state_dict = jax.tree.map(lambda x: jnp.asarray(x), restored_state_dict)
+
+                    # Reconstruct TrainState from the restored dict
+                    from flax.training import train_state as flax_train_state
+                    if args.batchnorm:
+                        class RestoredTrainState(flax_train_state.TrainState):
+                            batch_stats: Any
+                        restored_state = RestoredTrainState(
+                            step=restored_state_dict['step'],
+                            apply_fn=state.apply_fn,
+                            params=restored_state_dict['params'],
+                            tx=state.tx,
+                            opt_state=restored_state_dict['opt_state'],
+                            batch_stats=restored_state_dict.get('batch_stats', {}),
+                        )
+                    else:
+                        restored_state = flax_train_state.TrainState(
+                            step=restored_state_dict['step'],
+                            apply_fn=state.apply_fn,
+                            params=restored_state_dict['params'],
+                            tx=state.tx,
+                            opt_state=restored_state_dict['opt_state'],
+                        )
+                    state = jax_utils.replicate(restored_state)
+                else:
+                    # --restore already loaded the state, just use the step from resume_info
+                    print(f"[*] State already loaded via --restore, using existing state")
+
                 step = restored_step
                 resume_from_checkpoint = True
 

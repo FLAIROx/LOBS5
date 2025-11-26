@@ -64,8 +64,9 @@ def save_checkpoint(
         epoch: int,
     ) -> bool:
     """
+    Save checkpoint synchronously (waits for completion).
     """
-    return ckpt_mgr.save(
+    result = ckpt_mgr.save(
         epoch,
         # args=ocp.args.PyTreeSave(ckpt)
         args=ocp.args.Composite(
@@ -75,6 +76,11 @@ def save_checkpoint(
             metadata=ocp.args.JsonSave({k: v for k, v in ckpt.items() if k != 'model'}),
         )
     )
+    # Wait for checkpoint to be fully written before continuing
+    # This is critical for multi-node synchronization - prevents deadlock
+    # where one process continues while another is still waiting for save
+    ckpt_mgr.wait_until_finished()
+    return result
 
 
 # def load_checkpoint(
@@ -135,22 +141,61 @@ def load_checkpoint(
     if step is None:
         step = mngr.latest_step()
 
-    loaded = mngr.restore(
-        step,
-        args=ocp.args.Composite(
-            state=ocp.args.StandardRestore(
-                # only stored trainstate from a single device (as they are all the same)
-                deduplicate_trainstate(state)
-            ),
-            metadata=ocp.args.JsonRestore()
+    # Restore checkpoint and update template state with restored params
+    # This approach preserves the optimizer state structure from the template
+    # and only updates params (and batch_stats if present)
+    try:
+        loaded = mngr.restore(
+            step,
+            args=ocp.args.Composite(
+                state=ocp.args.StandardRestore(),  # No target - restore raw pytree
+                metadata=ocp.args.JsonRestore()
+            )
         )
-    )
+        restored_state_dict = loaded['state']
+
+        # Convert restored numpy arrays back to JAX arrays
+        restored_state_dict = jax.tree.map(lambda x: np.asarray(x), restored_state_dict)
+
+        # Get template state for structure preservation
+        template_state = deduplicate_trainstate(state)
+
+        # Update only params (and batch_stats if present) from checkpoint
+        # Keep optimizer state from template - it will be re-initialized
+        # This is safe because the optimizer state is just for continuing training
+        if 'batch_stats' in restored_state_dict:
+            restored_state = template_state.replace(
+                step=restored_state_dict['step'],
+                params=restored_state_dict['params'],
+                batch_stats=restored_state_dict['batch_stats'],
+            )
+        else:
+            restored_state = template_state.replace(
+                step=restored_state_dict['step'],
+                params=restored_state_dict['params'],
+            )
+        print(f"[*] Restored params from checkpoint (optimizer state re-initialized)")
+
+    except Exception as e:
+        print(f"[WARNING] Raw restore failed ({e}), trying with target structure...")
+        # Fallback: restore with target structure
+        loaded = mngr.restore(
+            step,
+            args=ocp.args.Composite(
+                state=ocp.args.StandardRestore(
+                    deduplicate_trainstate(state)
+                ),
+                metadata=ocp.args.JsonRestore()
+            )
+        )
+        restored_state = loaded['state']
+
     ckpt = loaded['metadata']
     # copy train state back to all devices
     if train:
-        ckpt['model'] = jax_utils.replicate(loaded['state'])
+        ckpt['model'] = jax_utils.replicate(restored_state)
     else:
-        ckpt['model'] = loaded['state']
+        ckpt['model'] = restored_state
     return ckpt
 
 
