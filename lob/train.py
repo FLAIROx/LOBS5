@@ -415,7 +415,8 @@ def train(args):
                 args.log_ce_tables,
                 use_wandb=args.USE_WANDB,
                 process_index=args.process_index,
-                max_batches=max_batches  # Limit batches for this segment
+                max_batches=max_batches,  # Limit batches for this segment
+                gradient_accumulation_steps=args.gradient_accumulation_steps,
             )
 
             # Update lr_params with new step count

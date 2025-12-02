@@ -494,6 +494,7 @@ def train_epoch(
         use_wandb=False,
         process_index=0,
         max_batches=None,  # New: limit number of batches to train (for intra-epoch evaluation)
+        gradient_accumulation_steps=1,  # Number of steps to accumulate gradients
     ):
 
     """
@@ -502,6 +503,8 @@ def train_epoch(
     Args:
         max_batches: If provided, stop training after processing this many batches.
                      Used for intra-epoch evaluation to train only a segment of the epoch.
+        gradient_accumulation_steps: Number of micro-batches to accumulate gradients over
+                                     before performing an optimizer step. Default is 1 (no accumulation).
     """
     # Store Metrics
     batch_losses = []
@@ -509,6 +512,13 @@ def train_epoch(
 
     decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min = lr_params
     batches_processed = 0  # Track how many batches we've processed in this call
+
+    # Gradient accumulation state
+    accumulated_grads = None
+    accumulated_loss = 0.0
+    accumulated_ce = None
+    accumulated_batch_stats = None
+    accum_count = 0
 
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     for batch_idx, batch in enumerate(tqdm(trainloader)):
@@ -523,8 +533,8 @@ def train_epoch(
             # print("train_epoch: Inputs 0:5:", inputs[0][0,0:5,:])
             rng, drop_rng = jax.random.split(rng)
 
-            
-            # state,loss=train_step_rnn(                
+
+            # state,loss=train_step_rnn(
             #     state,
             #     drop_rng,
             #     inputs,
@@ -533,48 +543,117 @@ def train_epoch(
             #     batchnorm,
             #     init_hiddens)
 
-            # print("Gets to train")
-            state, loss, ce, logits = train_step(
-                state,
-                drop_rng,
-                inputs,
-                labels,
-                integration_times,
-                batchnorm,
-                ignore_times,
-            )
-            if debug_profiler:
-                loss.block_until_ready()
-            # print("completes train step")
-            # if (batch_idx==0) & (epoch%100==0):
-            #     np.set_printoptions(threshold=sys.maxsize)
-            #     with open(f'/data1/sascha/data/losses/losses_batch_{batch_idx}_training.txt', 'w') as f:
-            #         print( ce, file=f)
-            #     print("Printing logits of shape ", logits.shape, " to file")
-            #     with open(f'/data1/sascha/data/losses/logits_batch_{batch_idx}_training.txt', 'w') as f:
-            #         print( logits[0,0,0:44,:], file=f)
-            #     np.set_printoptions()
-            #     print('Done Printing')
+            if gradient_accumulation_steps == 1:
+                # Original path: no accumulation, directly update
+                # print("Gets to train")
+                state, loss, ce, logits = train_step(
+                    state,
+                    drop_rng,
+                    inputs,
+                    labels,
+                    integration_times,
+                    batchnorm,
+                    ignore_times,
+                )
+                if debug_profiler:
+                    loss.block_until_ready()
+                # print("completes train step")
+                # if (batch_idx==0) & (epoch%100==0):
+                #     np.set_printoptions(threshold=sys.maxsize)
+                #     with open(f'/data1/sascha/data/losses/losses_batch_{batch_idx}_training.txt', 'w') as f:
+                #         print( ce, file=f)
+                #     print("Printing logits of shape ", logits.shape, " to file")
+                #     with open(f'/data1/sascha/data/losses/logits_batch_{batch_idx}_training.txt', 'w') as f:
+                #         print( logits[0,0,0:44,:], file=f)
+                #     np.set_printoptions()
+                #     print('Done Printing')
 
-            # losses are already averaged across devices (--> should be all the same here)
-            batch_losses.append(loss[0])
-            if log_ce_tables:
-                cross_entropies.append(ce)
+                # losses are already averaged across devices (--> should be all the same here)
+                batch_losses.append(loss[0])
+                if log_ce_tables:
+                    cross_entropies.append(ce)
 
-            # DISABLED: Per-step wandb logging causes ~10% slowdown even at 1000-step intervals
-            # Only using per-epoch logging in train.py instead
-            # if use_wandb and process_index == 0 and step % 1000 == 0:
-            #     import wandb
-            #     current_lr = decay_function(step, lr, end_step, lr_min)
-            #     wandb.log({
-            #         "train/loss_step": float(loss[0]),
-            #         "train/step": step,
-            #         "train/epoch": epoch,
-            #         "train/lr": float(current_lr),
-            #     })
+                # DISABLED: Per-step wandb logging causes ~10% slowdown even at 1000-step intervals
+                # Only using per-epoch logging in train.py instead
+                # if use_wandb and process_index == 0 and step % 1000 == 0:
+                #     import wandb
+                #     current_lr = decay_function(step, lr, end_step, lr_min)
+                #     wandb.log({
+                #         "train/loss_step": float(loss[0]),
+                #         "train/step": step,
+                #         "train/epoch": epoch,
+                #         "train/lr": float(current_lr),
+                #     })
 
-            lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
-            state, step = update_learning_rate_per_step(lr_params, state)
+                lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
+                state, step = update_learning_rate_per_step(lr_params, state)
+            else:
+                # Gradient accumulation path
+                grads, loss, ce, mod_vars = compute_gradients_step(
+                    state,
+                    drop_rng,
+                    inputs,
+                    labels,
+                    integration_times,
+                    batchnorm,
+                    ignore_times,
+                )
+
+                # Accumulate gradients
+                if accumulated_grads is None:
+                    accumulated_grads = grads
+                    accumulated_ce = ce if log_ce_tables else None
+                else:
+                    accumulated_grads = jax.tree_util.tree_map(
+                        lambda a, g: a + g, accumulated_grads, grads
+                    )
+                    if log_ce_tables and accumulated_ce is not None:
+                        accumulated_ce = accumulated_ce + ce
+
+                accumulated_loss += float(loss[0])
+                accum_count += 1
+
+                # Track batch_stats for batchnorm
+                if batchnorm and mod_vars is not None:
+                    if accumulated_batch_stats is None:
+                        accumulated_batch_stats = mod_vars["batch_stats"]
+                    else:
+                        accumulated_batch_stats = jax.tree_util.tree_map(
+                            lambda a, b: a + b, accumulated_batch_stats, mod_vars["batch_stats"]
+                        )
+
+                # Apply accumulated gradients when we've accumulated enough
+                if accum_count >= gradient_accumulation_steps:
+                    # Average the accumulated gradients
+                    averaged_grads = jax.tree_util.tree_map(
+                        lambda g: g / gradient_accumulation_steps, accumulated_grads
+                    )
+
+                    # Apply gradients
+                    if batchnorm and accumulated_batch_stats is not None:
+                        avg_batch_stats = jax.tree_util.tree_map(
+                            lambda s: s / gradient_accumulation_steps, accumulated_batch_stats
+                        )
+                        state = apply_grads_with_batchnorm(state, averaged_grads, avg_batch_stats)
+                    else:
+                        state = apply_grads_no_batchnorm(state, averaged_grads)
+
+                    # Record loss
+                    avg_loss = accumulated_loss / gradient_accumulation_steps
+                    batch_losses.append(avg_loss)
+                    if log_ce_tables and accumulated_ce is not None:
+                        cross_entropies.append(accumulated_ce / gradient_accumulation_steps)
+
+                    # Update learning rate (once per optimizer step)
+                    lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
+                    state, step = update_learning_rate_per_step(lr_params, state)
+
+                    # Reset accumulation state
+                    accumulated_grads = None
+                    accumulated_loss = 0.0
+                    accumulated_ce = None
+                    accumulated_batch_stats = None
+                    accum_count = 0
 
             # Increment batch counter
             batches_processed += 1
@@ -594,9 +673,9 @@ def train_epoch(
                 break
         else:
             continue
-        
-    
-        
+
+
+
     # Return average loss over batches
     if log_ce_tables:
         ce_means=np.mean(np.concatenate(cross_entropies,axis=0),axis=0)
@@ -791,6 +870,85 @@ def train_step(
 
     #return loss, mod_vars, grads, state
     return state, loss, ce, logits
+
+
+@partial(
+    jax.pmap,
+    axis_name="batch_devices",
+    static_broadcasted_argnums=(5,6),
+    in_axes=(0, None, 0, 0, 0, None, None),
+)
+def compute_gradients_step(
+        state: train_state.TrainState,
+        rng: jax.dtypes.prng_key,
+        batch_inputs: Tuple[jax.Array, jax.Array],
+        batch_labels: jax.Array,
+        batch_integration_timesteps: Tuple[jax.Array, jax.Array],
+        batchnorm: bool,
+        ignore_times: bool,
+    ):
+    """Compute gradients without updating state. Used for gradient accumulation."""
+
+    batch_inputs = repeat_book(*batch_inputs, True)
+
+    def loss_fn(params):
+        if batchnorm:
+            logits, mod_vars = state.apply_fn(
+                {"params": params, "batch_stats": state.batch_stats},
+                *batch_inputs, *batch_integration_timesteps,
+                rngs={"dropout": rng},
+                mutable=["intermediates", "batch_stats"],
+                method='__call_ar__'
+            )
+        else:
+            logits, mod_vars = state.apply_fn(
+                {"params": params},
+                *batch_inputs, *batch_integration_timesteps,
+                rngs={"dropout": rng},
+                mutable=["intermediates"],
+                method='__call_ar__'
+            )
+
+        logits = logits.astype(np.float32)
+        batch_labels_int = batch_labels.astype(np.int32)
+        ce = cross_entropy_loss(logits, batch_labels_int)
+
+        if ignore_times:
+            ce = ce.reshape(ce.shape[0], -1, Message_Tokenizer.MSG_LEN)
+            ce_1 = ce[:, :, :TIME_START_I]
+            ce_2 = ce[:, :, (TIME_END_I+1):]
+            ce = np.concatenate([ce_1, ce_2], axis=2)
+            ce = ce.reshape(ce.shape[0], -1)
+
+        ce = np.mean(ce, axis=0)
+        loss = np.mean(ce)
+        return loss, (mod_vars, ce)
+
+    (loss, (mod_vars, ce)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
+
+    # Average gradients across devices
+    loss = jax.lax.pmean(loss, axis_name="batch_devices")
+    grads = jax.lax.pmean(grads, axis_name="batch_devices")
+    ce = jax.lax.pmean(ce, axis_name="batch_devices")
+
+    if batchnorm:
+        mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
+        return grads, loss, ce, mod_vars
+    else:
+        return grads, loss, ce, None
+
+
+@partial(jax.pmap, axis_name="batch_devices", in_axes=(0, 0))
+def apply_grads_no_batchnorm(state, accumulated_grads):
+    """Apply accumulated gradients without batchnorm."""
+    return state.apply_gradients(grads=accumulated_grads)
+
+
+@partial(jax.pmap, axis_name="batch_devices", in_axes=(0, 0, 0))
+def apply_grads_with_batchnorm(state, accumulated_grads, batch_stats):
+    """Apply accumulated gradients with batchnorm."""
+    return state.apply_gradients(grads=accumulated_grads, batch_stats=batch_stats)
+
 
 @partial(
     jax.pmap,

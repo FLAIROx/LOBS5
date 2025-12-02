@@ -126,6 +126,7 @@ python -u -B run_train.py \
         --debug_overfit=False \
         --lr_patience=3 \
         --use_remat=True \
+        --gradient_accumulation_steps=4 \
         --USE_WANDB=True \
         --wandb_project=lobs5-3072x32-tok24 \
         --wandb_entity=kang-oxford
