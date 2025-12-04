@@ -238,3 +238,11 @@ LLM Regression ICAIF25 v2.pdf
 LLM_Embedding_for_Regression__ICAIF_ (7).pdf
 recommendations
 bin/run_experiments/record
+ALL_FIXES_SUMMARY.md
+DEPRECATION_NOTICE.md
+ENCODING_GUIDE.md
+FINAL_ENCODING_SOLUTION.md
+GPU_OOM_FIX.md
+QUICK_START_ENCODING.md
+package.json
+package-lock.json

@@ -136,7 +136,7 @@ python -u -B run_train.py \
         --wandb_entity=kang-oxford
 
 
-        # --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOGL' \
+        # --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG' \
         # --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_encoded' \
         # --data_mode='encoded' \
         # ························································

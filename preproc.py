@@ -15,6 +15,23 @@ from functools import partial
 from lob.encoding import Vocab, Message_Tokenizer
 
 
+################################################################################
+# ⚠️  WARNING: JAX VERSIONS DEPRECATED - USE transform_L2_state_numpy INSTEAD
+#
+# These JAX versions have been fixed but are complex and error-prone.
+# They are kept for reference but SHOULD NOT BE USED in production.
+#
+# Issues with JAX versions:
+# 1. Immutable arrays require careful assignment (arr = arr.at[].set())
+# 2. Type conversion must happen before normalization
+# 3. vmap decorator adds complexity
+#
+# ✅ RECOMMENDED: Use transform_L2_state_numpy (line 114-162)
+#    - Simple, reliable, validated in training
+#    - Used by pre_encode_data.py and data_mode='preproc'
+################################################################################
+
+# DEPRECATED: Use transform_L2_state_numpy instead
 @partial(jax.jit, static_argnums=(1, 2),backend='cpu')
 @partial(
     jax.vmap,
@@ -22,7 +39,7 @@ from lob.encoding import Vocab, Message_Tokenizer
     out_axes=0,
 )
 def transform_L2_state(
-        book: jax.Array, 
+        book: jax.Array,
         price_levels: int,
         tick_size: int = 100,
         #divide_by: int = 1,
@@ -46,22 +63,25 @@ def transform_L2_state(
     mybook = jnp.zeros(price_levels, dtype=jnp.int32)
     mybook = mybook.at[book[:, 0]].set(book[:, 1])
 
-    # Norm seconds to be in [0,1] representing percent of day. 
-    delta_p_mid_and_time.at[1].set((delta_p_mid_and_time[1]-34200)/23400)
+    # Convert to float32 BEFORE normalization (otherwise division results get truncated to int!)
+    delta_p_mid_and_time = delta_p_mid_and_time.astype(jnp.float32)
+    # Norm seconds to be in [0,1] representing percent of day.
+    delta_p_mid_and_time = delta_p_mid_and_time.at[1].set((delta_p_mid_and_time[1]-34200)/23400)
     # Norm nanoseconds to be fraction of a second
-    delta_p_mid_and_time.at[2].set(delta_p_mid_and_time[2]/1e9)
+    delta_p_mid_and_time = delta_p_mid_and_time.at[2].set(delta_p_mid_and_time[2]/1e9)
 
-    
+
     # set ask volume to negative (sell orders)
     mybook = mybook.at[price_levels // 2:].set(mybook[price_levels // 2:] * -1)
     mybook = jnp.concatenate((
-        delta_p_mid_and_time.astype(jnp.float32),
+        delta_p_mid_and_time,  # Already float32 from line 50
         mybook.astype(jnp.float32) / 1000
     ))
 
     # return mybook.astype(jnp.float32) #/ divide_by
     return mybook 
 
+# DEPRECATED: Use transform_L2_state_numpy instead
 @partial(jax.jit, static_argnums=(1, 2),backend='gpu')
 @partial(
     jax.vmap,
@@ -69,7 +89,7 @@ def transform_L2_state(
     out_axes=0,
 )
 def transform_L2_state_gpu(
-        book: jax.Array, 
+        book: jax.Array,
         price_levels: int,
         tick_size: int = 100,
         #divide_by: int = 1,
@@ -92,17 +112,17 @@ def transform_L2_state_gpu(
 
     mybook = jnp.zeros(price_levels, dtype=jnp.int32)
     mybook = mybook.at[book[:, 0]].set(book[:, 1])
-    
-    # Norm seconds to be in [0,1] representing percent of day. 
-    delta_p_mid_and_time=delta_p_mid_and_time.astype(jnp.float32)
-    delta_p_mid_and_time=delta_p_mid_and_time.at[1].set((delta_p_mid_and_time[1]-34200)/23400)
+
+    # Norm seconds to be in [0,1] representing percent of day.
+    delta_p_mid_and_time = delta_p_mid_and_time.astype(jnp.float32)
+    delta_p_mid_and_time = delta_p_mid_and_time.at[1].set((delta_p_mid_and_time[1]-34200)/23400)
     # Norm nanoseconds to be fraction of a second
-    delta_p_mid_and_time=delta_p_mid_and_time.at[2].set(delta_p_mid_and_time[2]/1e9)
+    delta_p_mid_and_time = delta_p_mid_and_time.at[2].set(delta_p_mid_and_time[2]/1e9)
 
     # set ask volume to negative (sell orders)
     mybook = mybook.at[price_levels // 2:].set(mybook[price_levels // 2:] * -1)
     mybook = jnp.concatenate((
-        delta_p_mid_and_time.astype(jnp.float32),
+        delta_p_mid_and_time,  # Already float32 from line 99
         mybook.astype(jnp.float32) / 1000
     ))
 
@@ -110,9 +130,21 @@ def transform_L2_state_gpu(
     return mybook
 
 
+################################################################################
+# ✅ RECOMMENDED: This is the production version - simple, reliable, validated
+#
+# This numpy version is:
+# - Used by pre_encode_data.py for encoding
+# - Used by lobster_dataloader.py in data_mode='preproc'
+# - Validated in training for years
+# - Simple and easy to understand
+#
+# DO NOT use the JAX versions above unless you know what you're doing.
+################################################################################
+
 @partial(np.vectorize,signature="(c),(),()->(d)")
 def transform_L2_state_numpy(
-        book: np.ndarray, 
+        book: np.ndarray,
         price_levels: int,
         tick_size: int = 100,
         #divide_by: int = 1,
