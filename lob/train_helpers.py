@@ -305,22 +305,40 @@ def create_train_state(model_cls,
     #print(f"[*] Trainable Parameters: {sum(jax.tree_leaves(param_sizes))}")
     print(f"[*] Trainable Parameters: {sum(jax.tree_util.tree_leaves(param_sizes))}")
 
+    # ============================================================================
+    # Full BF16 Training (Reference: OrderbookDiT implementation)
+    # ============================================================================
+    # Convert params to BF16 for storage (saves ~50% memory)
+    # Optimizer states (Adam m, v) automatically remain FP32 in optax
+    # Weight updates computed in FP32, then cast back to BF16
+    # ============================================================================
+    use_bf16 = os.environ.get('USE_BF16', '1') == '1'
+    if use_bf16:
+        def to_bf16(x):
+            """Convert float32 to bfloat16, keep other dtypes unchanged."""
+            if x.dtype == np.float32:
+                return x.astype(np.bfloat16)
+            return x
+        params = jax.tree_util.tree_map(to_bf16, params)
+        print(f"[*] Full BF16 Training: params=BF16 (storage), optimizer_states=FP32 (auto)")
+
+        # Print dtype distribution for verification
+        dtype_counts = {}
+        def count_dtype(x):
+            dtype_str = str(x.dtype)
+            dtype_counts[dtype_str] = dtype_counts.get(dtype_str, 0) + 1
+            return x
+        jax.tree_util.tree_map(count_dtype, params)
+        print(f"[*] Param dtypes: {dtype_counts}")
+    else:
+        print(f"[*] Full FP32 training (BF16 disabled via USE_BF16=0)")
+
     if batchnorm:
         class TrainState(train_state.TrainState):
             batch_stats: Any
         state = TrainState.create(apply_fn=model.apply, params=params, tx=tx, batch_stats=batch_stats)
     else:
         state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
-
-    # BF16 Mixed Precision: 正确实现
-    # Master weights (params) 保持 FP32，用于 optimizer 更新
-    # BF16 计算通过模型层的 dtype 参数控制 (在 forward pass 中)
-    # 这样 optimizer states (m, v) 也保持 FP32，避免 NaN
-    use_bf16 = os.environ.get('USE_BF16', '1') == '1'
-    if use_bf16:
-        print(f"[*] BF16 Mixed Precision enabled: params=FP32 (master), compute=BF16 (via model dtype)")
-    else:
-        print(f"[*] Full FP32 training (BF16 disabled via USE_BF16=0)")
 
     # keep copy of state on each device
     print(state.params['message_encoder']['encoder']['embedding'].shape)
