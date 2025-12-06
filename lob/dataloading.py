@@ -141,7 +141,7 @@ def create_lobster_prediction_dataset(
 			rank=process_rank,
 			shuffle=False,
 			seed=seed,
-			drop_last=False,
+			drop_last=True,
 		)
 		val_loader = make_data_loader(
 			dataset_obj.dataset_val,
@@ -160,7 +160,7 @@ def create_lobster_prediction_dataset(
 			rank=process_rank,
 			shuffle=False,
 			seed=seed,
-			drop_last=False,
+			drop_last=True,
 		)
 		tst_loader = make_data_loader(
 			dataset_obj.dataset_test,
