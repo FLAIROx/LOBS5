@@ -278,7 +278,8 @@ def init_train_state(
                 prenorm=args.prenorm,
                 batchnorm=args.batchnorm,
                 bn_momentum=args.bn_momentum,
-                use_remat=getattr(args, 'use_remat', False),
+                # DISABLED: use_remat arg removed from run_train.py, default False in model
+                # use_remat=getattr(args, 'use_remat', False),
             )
         elif args.merging == 'padded': #i.e. 'padded'
             model_cls = partial(
@@ -299,7 +300,8 @@ def init_train_state(
                 prenorm=args.prenorm,
                 batchnorm=args.batchnorm,
                 bn_momentum=args.bn_momentum,
-                use_remat=getattr(args, 'use_remat', False),
+                # DISABLED: use_remat arg removed from run_train.py, default False in model
+                # use_remat=getattr(args, 'use_remat', False),
             )
         else:
             raise ValueError("Merge method: " + args.merging + " is not valid (check spelling)")

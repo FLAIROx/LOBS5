@@ -38,6 +38,32 @@ if __name__ == "__main__":
 	#tf.config.experimental.set_memory_growth(physical_devices[0], True)
 	#tf.config.experimental.set_visible_devices([], "GPU")
 
+	# ============================================
+	# Model Presets: 预设模型配置
+	# ============================================
+	MODEL_PRESETS = {
+		"1.4B": {
+			"d_model": 3584, "n_layers": 32, "blocks": 56, "ssm_size_base": 3584, "per_gpu_bsz": 2,
+			"ssm_lr_base": 0.00005, "lr_factor": 1,
+			"wandb_project": "lobs5-1.4B-d3584", "log_dir": "logs_1.4B_d3584"
+		},
+		"1B": {
+			"d_model": 3072, "n_layers": 32, "blocks": 48, "ssm_size_base": 3072, "per_gpu_bsz": 2,
+			"ssm_lr_base": 0.0001, "lr_factor": 1,
+			"wandb_project": "lobs5-1B-d3072", "log_dir": "logs_1B_d3072"
+		},
+		"300M": {
+			"d_model": 2048, "n_layers": 24, "blocks": 32, "ssm_size_base": 2048, "per_gpu_bsz": 2,
+			"ssm_lr_base": 0.0002, "lr_factor": 1,
+			"wandb_project": "lobs5-300M-d2048", "log_dir": "logs_300M_d2048"
+		},
+		"55M": {
+			"d_model": 1024, "n_layers": 12, "blocks": 16, "ssm_size_base": 1024, "per_gpu_bsz": 13,
+			"ssm_lr_base": 0.0003, "lr_factor": 1,
+			"wandb_project": "lobs5-55M-d1024", "log_dir": "logs_55M_d1024"
+		},
+	}
+
 	parser = argparse.ArgumentParser()
 
 	parser.add_argument("--USE_WANDB", type=str2bool, default=True,
@@ -77,6 +103,13 @@ if __name__ == "__main__":
 						help="How many past messages to include in each sample")
 	parser.add_argument("--n_data_workers", type=int, default=0,
 		     			help="number of workers used in DataLoader")
+
+	# Model Preset (overrides individual model parameters if specified)
+	parser.add_argument("--model_preset", type=str, default=None,
+						choices=list(MODEL_PRESETS.keys()),
+						help="预设模型配置: 1.4B, 1B, 300M, 55M。覆盖 d_model, n_layers, blocks, ssm_size_base, per_gpu_bsz, ssm_lr_base, lr_factor, wandb_project, log_dir")
+	parser.add_argument("--log_dir", type=str, default="logs",
+						help="日志输出目录 (由 model_preset 自动设置)")
 
 	# Model Parameters
 	parser.add_argument("--n_message_layers", type=int, default=2,  # 2
@@ -186,14 +219,28 @@ if __name__ == "__main__":
 				help="Runs the training loop in overfit mode on a single batch of data. Validation and testing are from the same set. ")
 	parser.add_argument("--log_ce_tables", type=str2bool, default=False,
 				help="Logs the CE values on a per token level to wandb. Memory intensive.")
-	parser.add_argument("--use_remat", type=str2bool, default=False,
-				help="Use gradient checkpointing (rematerialization) to reduce runtime memory. "
-				     "Trades compute for memory by recomputing activations during backward pass.")
-	parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
-				help="Number of gradient accumulation steps. Default is 1 (no accumulation). "
-				     "Effective batch size = per_gpu_bsz * num_devices * gradient_accumulation_steps.")
+	# DISABLED: use_remat parameter defined but never implemented (no jax.checkpoint/remat calls in codebase)
+	# parser.add_argument("--use_remat", type=str2bool, default=False,
+	# 			help="Use gradient checkpointing (rematerialization) to reduce runtime memory. "
+	# 			     "Trades compute for memory by recomputing activations during backward pass.")
+	# DISABLED: gradient_accumulation_steps parameter defined but never implemented in train_step
+	# parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+	# 			help="Number of gradient accumulation steps. Default is 1 (no accumulation). "
+	# 			     "Effective batch size = per_gpu_bsz * num_devices * gradient_accumulation_steps.")
 
 	args = parser.parse_args()
+
+	# ============================================
+	# Apply Model Preset (if specified)
+	# ============================================
+	if args.model_preset is not None:
+		preset = MODEL_PRESETS[args.model_preset]
+		print(f"[*] Using model preset: {args.model_preset}")
+		for key, value in preset.items():
+			setattr(args, key, value)
+		print(f"    d_model={args.d_model}, n_layers={args.n_layers}, blocks={args.blocks}, ssm_size_base={args.ssm_size_base}")
+		print(f"    per_gpu_bsz={args.per_gpu_bsz}, ssm_lr_base={args.ssm_lr_base}, lr_factor={args.lr_factor}")
+		print(f"    wandb_project={args.wandb_project}, log_dir={args.log_dir}")
 
 	# ============================================
 	# Step 1: Detect execution environment (Slurm multi-node vs single machine)
@@ -346,13 +393,19 @@ if __name__ == "__main__":
 	print(f"    Per-GPU batch size: {args.per_gpu_bsz}")
 	print(f"    Devices per process: {args.num_devices}")
 	print(f"    Effective batch size (per process): {args.effective_bsz}")
-	print(f"    Gradient accumulation steps: {args.gradient_accumulation_steps}")
+	# DISABLED: gradient_accumulation_steps not implemented
+	# print(f"    Gradient accumulation steps: {args.gradient_accumulation_steps}")
 	if is_distributed:
-		global_effective_bsz = args.effective_bsz * args.process_count * args.gradient_accumulation_steps
-		print(f"    Global effective batch size: {global_effective_bsz} (across {args.process_count} processes, with {args.gradient_accumulation_steps} accumulation steps)")
+		# DISABLED: gradient_accumulation_steps not implemented
+		# global_effective_bsz = args.effective_bsz * args.process_count * args.gradient_accumulation_steps
+		# print(f"    Global effective batch size: {global_effective_bsz} (across {args.process_count} processes, with {args.gradient_accumulation_steps} accumulation steps)")
+		global_effective_bsz = args.effective_bsz * args.process_count
+		print(f"    Global effective batch size: {global_effective_bsz} (across {args.process_count} processes)")
 	else:
-		local_effective_bsz = args.effective_bsz * args.gradient_accumulation_steps
-		print(f"    Effective batch size (with accumulation): {local_effective_bsz}")
+		# DISABLED: gradient_accumulation_steps not implemented
+		# local_effective_bsz = args.effective_bsz * args.gradient_accumulation_steps
+		# print(f"    Effective batch size (with accumulation): {local_effective_bsz}")
+		pass
 	print()
 
 	from lob.train import train
