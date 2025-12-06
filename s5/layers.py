@@ -167,5 +167,12 @@ class SequenceLayer(nn.Module):
         return hidden, x
     @staticmethod
     def initialize_carry(batch_size, hidden_size):
-        # Use a dummy key since the default state init fn is just zeros.
-        return jax.numpy.zeros((batch_size,1, hidden_size), dtype=jax.numpy.complex64)
+        """Initialize hidden state as BF16 pair (real, imag) for Full BF16 training.
+
+        Returns:
+            (hidden_re, hidden_im): tuple of bfloat16 arrays, each (batch_size, 1, hidden_size)
+        """
+        # Full BF16: return (real, imag) pair instead of complex64
+        hidden_re = jax.numpy.zeros((batch_size, 1, hidden_size), dtype=jax.numpy.bfloat16)
+        hidden_im = jax.numpy.zeros((batch_size, 1, hidden_size), dtype=jax.numpy.bfloat16)
+        return (hidden_re, hidden_im)
