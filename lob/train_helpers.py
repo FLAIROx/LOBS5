@@ -671,12 +671,12 @@ def train_step(
         # No need for tree_map here - direct use saves 30-40% overhead
 
         # ===== NaN检测点1: 输入参数 =====
-        # params_has_nan = jax.tree_util.tree_reduce(
-        #     lambda a, b: a | b,
-        #     jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), params),
-        #     False
-        # )
-        # jax.debug.print("[NaN Check 1] Params has NaN: {}", params_has_nan)
+        params_has_nan = jax.tree_util.tree_reduce(  # mixed precision overflow debug
+            lambda a, b: a | b,  # mixed precision overflow debug
+            jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), params),  # mixed precision overflow debug
+            False  # mixed precision overflow debug
+        )  # mixed precision overflow debug
+        jax.debug.print("[NaN Check 1] Params has NaN: {}", params_has_nan)  # mixed precision overflow debug
 
         if batchnorm:
             logits, mod_vars = state.apply_fn(
@@ -696,8 +696,8 @@ def train_step(
             )
 
         # ===== NaN检测点2: Forward输出 =====
-        # logits_has_nan = np.any(np.isnan(logits))
-        # jax.debug.print("[NaN Check 2] Logits has NaN: {}, dtype: {}", logits_has_nan, logits.dtype)
+        logits_has_nan = np.any(np.isnan(logits))  # mixed precision overflow debug
+        jax.debug.print("[NaN Check 2] Logits has NaN: {}, dtype: {}", logits_has_nan, logits.dtype)  # mixed precision overflow debug
 
         # BF16 Mixed Precision: Cast logits back to FP32 for loss computation
         logits = logits.astype(np.float32)
@@ -721,62 +721,62 @@ def train_step(
         loss = np.mean(ce)
 
         # ===== NaN检测点3: Loss =====
-        # loss_has_nan = np.isnan(loss)
-        # jax.debug.print("[NaN Check 3] Loss has NaN: {}, value: {:.6f}", loss_has_nan, loss)
+        loss_has_nan = np.isnan(loss)  # mixed precision overflow debug
+        jax.debug.print("[NaN Check 3] Loss has NaN: {}, value: {:.6f}", loss_has_nan, loss)  # mixed precision overflow debug
 
         return loss, (mod_vars, logits,ce)
 
     (loss, (mod_vars, logits,ce)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
     # ===== NaN检测点4: 梯度 =====
-    # grads_has_nan = jax.tree_util.tree_reduce(
-    #     lambda a, b: a | b,
-    #     jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), grads),
-    #     False
-    # )
-    # jax.debug.print("[NaN Check 4] Grads has NaN: {}", grads_has_nan)
+    grads_has_nan = jax.tree_util.tree_reduce(  # mixed precision overflow debug
+        lambda a, b: a | b,  # mixed precision overflow debug
+        jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), grads),  # mixed precision overflow debug
+        False  # mixed precision overflow debug
+    )  # mixed precision overflow debug
+    jax.debug.print("[NaN Check 4] Grads has NaN: {}", grads_has_nan)  # mixed precision overflow debug
 
     # ===== NaN检测点5: 梯度范数 =====
-    # grad_norm = np.sqrt(jax.tree_util.tree_reduce(
-    #     lambda a, b: a + b,
-    #     jax.tree_util.tree_map(lambda x: np.sum(x.astype(np.float32) ** 2), grads),
-    #     0.0
-    # ))
-    # jax.debug.print("[NaN Check 5] Grad norm: {:.6f}", grad_norm)
+    grad_norm = np.sqrt(jax.tree_util.tree_reduce(  # mixed precision overflow debug
+        lambda a, b: a + b,  # mixed precision overflow debug
+        jax.tree_util.tree_map(lambda x: np.sum(x.astype(np.float32) ** 2), grads),  # mixed precision overflow debug
+        0.0  # mixed precision overflow debug
+    ))  # mixed precision overflow debug
+    jax.debug.print("[NaN Check 5] Grad norm: {:.6f}", grad_norm)  # mixed precision overflow debug
 
     # ===== 分层梯度统计 (写入JSON文件) =====
     # 计算每个叶子节点的梯度范数
-    # def compute_leaf_norm(grad):
-    #     return np.sqrt(np.sum(grad.astype(np.float32) ** 2))
+    def compute_leaf_norm(grad):  # mixed precision overflow debug
+        return np.sqrt(np.sum(grad.astype(np.float32) ** 2))  # mixed precision overflow debug
 
-    # leaf_norms = jax.tree_util.tree_map(compute_leaf_norm, grads)
-    # leaf_norms_with_path = jax.tree_util.tree_leaves_with_path(leaf_norms)
+    leaf_norms = jax.tree_util.tree_map(compute_leaf_norm, grads)  # mixed precision overflow debug
+    leaf_norms_with_path = jax.tree_util.tree_leaves_with_path(leaf_norms)  # mixed precision overflow debug
 
-    # # 构建记录并写入文件
-    # def write_grad_stats(step_val, global_norm_val, leaf_norms_with_path_val):
-    #     """在host端写入梯度统计到JSON文件"""
-    #     # 从环境变量获取精度模式
-    #     precision = os.environ.get('GRAD_STATS_PRECISION', 'bf16')
+    # 构建记录并写入文件
+    def write_grad_stats(step_val, global_norm_val, leaf_norms_with_path_val):  # mixed precision overflow debug
+        """在host端写入梯度统计到JSON文件"""  # mixed precision overflow debug
+        # 从环境变量获取精度模式
+        precision = os.environ.get('GRAD_STATS_PRECISION', 'bf16')  # mixed precision overflow debug
 
-    #     # 转换为dict: path -> norm
-    #     layer_norms_dict = {}
-    #     for path, norm in leaf_norms_with_path_val:
-    #         path_str = '/'.join(str(k.key) for k in path)
-    #         layer_norms_dict[path_str] = float(norm)
+        # 转换为dict: path -> norm
+        layer_norms_dict = {}  # mixed precision overflow debug
+        for path, norm in leaf_norms_with_path_val:  # mixed precision overflow debug
+            path_str = '/'.join(str(k.key) for k in path)  # mixed precision overflow debug
+            layer_norms_dict[path_str] = float(norm)  # mixed precision overflow debug
 
-    #     record = {
-    #         'step': int(step_val),
-    #         'precision': precision,
-    #         'global_norm': float(global_norm_val),
-    #         'layer_norms': layer_norms_dict,
-    #     }
+        record = {  # mixed precision overflow debug
+            'step': int(step_val),  # mixed precision overflow debug
+            'precision': precision,  # mixed precision overflow debug
+            'global_norm': float(global_norm_val),  # mixed precision overflow debug
+            'layer_norms': layer_norms_dict,  # mixed precision overflow debug
+        }  # mixed precision overflow debug
 
-    #     filepath = f"grad_stats_{precision}.jsonl"
-    #     with open(filepath, 'a') as f:
-    #         f.write(json.dumps(record) + '\n')
+        filepath = f"grad_stats_{precision}.jsonl"  # mixed precision overflow debug
+        with open(filepath, 'a') as f:  # mixed precision overflow debug
+            f.write(json.dumps(record) + '\n')  # mixed precision overflow debug
 
     # 使用callback在host端执行文件写入
-    # jax.debug.callback(write_grad_stats, state.step, grad_norm, leaf_norms_with_path)
+    jax.debug.callback(write_grad_stats, state.step, grad_norm, leaf_norms_with_path)  # mixed precision overflow debug
 
     # # ===== 梯度裁剪 (Gradient Clipping) =====
     # # 使用全局范数裁剪
@@ -800,12 +800,12 @@ def train_step(
         state = state.apply_gradients(grads=grads)
 
     # ===== NaN检测点6: 更新后参数 =====
-    # new_params_has_nan = jax.tree_util.tree_reduce(
-    #     lambda a, b: a | b,
-    #     jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), state.params),
-    #     False
-    # )
-    # jax.debug.print("[NaN Check 6] Updated params has NaN: {}", new_params_has_nan)
+    new_params_has_nan = jax.tree_util.tree_reduce(  # mixed precision overflow debug
+        lambda a, b: a | b,  # mixed precision overflow debug
+        jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), state.params),  # mixed precision overflow debug
+        False  # mixed precision overflow debug
+    )  # mixed precision overflow debug
+    jax.debug.print("[NaN Check 6] Updated params has NaN: {}", new_params_has_nan)  # mixed precision overflow debug
 
     #return loss, mod_vars, grads, state
     return state, loss, ce, logits
@@ -837,8 +837,8 @@ def train_step_rnn(
     
     def loss_fn(params):
         def single_elem_loss(carry,xs):
-            # shapes=jax.tree_util.tree_map(lambda x: x.shape,xs)
-            # print("Shapes before using:",shapes)  # DEBUG: commented out to reduce XLA compile memory
+            shapes=jax.tree_util.tree_map(lambda x: x.shape,xs)  # mixed precision overflow debug
+            print("Shapes before using:",shapes)  # mixed precision overflow debug
             batch_inputs,batch_integration_timesteps,batch_labels=xs
             dones=(np.zeros_like(batch_inputs[0],dtype=bool),)*len(hiddens)
             hiddens=carry
