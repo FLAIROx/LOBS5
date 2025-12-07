@@ -829,6 +829,20 @@ def train_step(
     grads = jax.lax.pmean(grads, axis_name="batch_devices")
     ce=jax.lax.pmean(ce,axis_name="batch_devices")
 
+    # [DEBUG BF16] Check grads before apply_gradients
+    grads_min = jax.tree_util.tree_reduce(lambda a, b: np.minimum(a, b), jax.tree_util.tree_map(lambda g: np.min(g), grads), np.inf)  # DEBUG BF16
+    grads_max = jax.tree_util.tree_reduce(lambda a, b: np.maximum(a, b), jax.tree_util.tree_map(lambda g: np.max(g), grads), -np.inf)  # DEBUG BF16
+    jax.debug.print("[Pre-Update] Grads range: [{}, {}]", grads_min, grads_max)  # DEBUG BF16
+
+    # [DEBUG BF16] Check params before apply_gradients
+    params_min = jax.tree_util.tree_reduce(lambda a, b: np.minimum(a, b), jax.tree_util.tree_map(lambda p: np.min(p), state.params), np.inf)  # DEBUG BF16
+    params_max = jax.tree_util.tree_reduce(lambda a, b: np.maximum(a, b), jax.tree_util.tree_map(lambda p: np.max(p), state.params), -np.inf)  # DEBUG BF16
+    jax.debug.print("[Pre-Update] Params range: [{}, {}]", params_min, params_max)  # DEBUG BF16
+
+    # [DEBUG BF16] Check optimizer state (Adam m, v) before update
+    # Adam states should be FP32 even if params are BF16
+    # jax.debug.print("[Pre-Update] Optimizer state structure: {}", type(state.opt_state))  # DEBUG BF16
+
     if batchnorm:
         mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
         state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
@@ -842,6 +856,14 @@ def train_step(
         False  # mixed precision overflow debug
     )  # mixed precision overflow debug
     jax.debug.print("[NaN Check 6] Updated params has NaN: {}", new_params_has_nan)  # mixed precision overflow debug
+
+    # [DEBUG BF16] If NaN, find which params
+    def check_and_report_nan(path, x):  # DEBUG BF16
+        if np.any(np.isnan(x)):  # DEBUG BF16
+            path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
+            jax.debug.print("[Post-Update NaN] {}: shape={}, dtype={}, min={}, max={}", path_str, x.shape, x.dtype, np.nanmin(x), np.nanmax(x))  # DEBUG BF16
+    if new_params_has_nan:  # DEBUG BF16
+        jax.tree_util.tree_map_with_path(lambda p, x: check_and_report_nan(p, x), state.params)  # DEBUG BF16
 
     #return loss, mod_vars, grads, state
     return state, loss, ce, logits
