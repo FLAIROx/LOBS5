@@ -312,6 +312,26 @@ def create_train_state(model_cls,
     # Optimizer states (Adam m, v) automatically remain FP32 in optax
     # Weight updates computed in FP32, then cast back to BF16
     # ============================================================================
+
+    # [DEBUG BF16] Check params BEFORE BF16 conversion
+    def check_nan(x):  # DEBUG BF16
+        return np.any(np.isnan(x))  # DEBUG BF16
+    has_nan_before = jax.tree_util.tree_reduce(  # DEBUG BF16
+        lambda a, b: a or b,  # DEBUG BF16
+        jax.tree_util.tree_map(check_nan, params),  # DEBUG BF16
+        False  # DEBUG BF16
+    )  # DEBUG BF16
+    if has_nan_before:  # DEBUG BF16
+        print(f"[ERROR] Params have NaN BEFORE BF16 conversion!")  # DEBUG BF16
+        # Find which params have NaN  # DEBUG BF16
+        def find_nan_params(path, x):  # DEBUG BF16
+            if np.any(np.isnan(x)):  # DEBUG BF16
+                path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
+                print(f"  NaN in {path_str}: shape={x.shape}, dtype={x.dtype}, min={np.nanmin(x)}, max={np.nanmax(x)}")  # DEBUG BF16
+        jax.tree_util.tree_map_with_path(lambda p, x: find_nan_params(p, x), params)  # DEBUG BF16
+    else:  # DEBUG BF16
+        print(f"[*] ✓ No NaN in params before BF16 conversion")  # DEBUG BF16
+
     use_bf16 = os.environ.get('USE_BF16', '1') == '1'
     if use_bf16:
         def to_bf16(x):
@@ -321,6 +341,22 @@ def create_train_state(model_cls,
             return x
         params = jax.tree_util.tree_map(to_bf16, params)
         print(f"[*] Full BF16 Training: params=BF16 (storage), optimizer_states=FP32 (auto)")
+
+        # [DEBUG BF16] Check params AFTER BF16 conversion
+        has_nan_after = jax.tree_util.tree_reduce(  # DEBUG BF16
+            lambda a, b: a or b,  # DEBUG BF16
+            jax.tree_util.tree_map(check_nan, params),  # DEBUG BF16
+            False  # DEBUG BF16
+        )  # DEBUG BF16
+        if has_nan_after:  # DEBUG BF16
+            print(f"[ERROR] Params have NaN AFTER BF16 conversion!")  # DEBUG BF16
+            def find_nan_params(path, x):  # DEBUG BF16
+                if np.any(np.isnan(x)):  # DEBUG BF16
+                    path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
+                    print(f"  NaN in {path_str}: shape={x.shape}, dtype={x.dtype}")  # DEBUG BF16
+            jax.tree_util.tree_map_with_path(lambda p, x: find_nan_params(p, x), params)  # DEBUG BF16
+        else:  # DEBUG BF16
+            print(f"[*] ✓ No NaN in params after BF16 conversion")  # DEBUG BF16
 
         # Print dtype distribution for verification
         dtype_counts = {}

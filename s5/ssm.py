@@ -283,11 +283,21 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
     """
     L = input_sequence.shape[0]
 
+    # [DEBUG BF16] Check inputs for NaN
+    jax.debug.print("[apply_ssm] Lambda_bar has NaN: {}, shape: {}", np.any(np.isnan(Lambda_bar)), Lambda_bar.shape)  # DEBUG BF16
+    jax.debug.print("[apply_ssm] B_bar has NaN: {}, shape: {}", np.any(np.isnan(B_bar)), B_bar.shape)  # DEBUG BF16
+    jax.debug.print("[apply_ssm] C_tilde has NaN: {}, shape: {}", np.any(np.isnan(C_tilde)), C_tilde.shape)  # DEBUG BF16
+    jax.debug.print("[apply_ssm] input_sequence has NaN: {}, shape: {}, dtype: {}", np.any(np.isnan(input_sequence)), input_sequence.shape, input_sequence.dtype)  # DEBUG BF16
+
     # Convert input to BF16
     input_bf16 = input_sequence.astype(np.bfloat16)
+    jax.debug.print("[apply_ssm] input_bf16 has NaN: {}", np.any(np.isnan(input_bf16)))  # DEBUG BF16
 
     # Convert Lambda_bar to BF16 pair and broadcast to (L, P)
     Lambda_re_bf, Lambda_im_bf = complex_to_bf16_pair(Lambda_bar)
+    jax.debug.print("[apply_ssm] Lambda_re_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(Lambda_re_bf)), np.min(Lambda_re_bf), np.max(Lambda_re_bf))  # DEBUG BF16
+    jax.debug.print("[apply_ssm] Lambda_im_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(Lambda_im_bf)), np.min(Lambda_im_bf), np.max(Lambda_im_bf))  # DEBUG BF16
+
     Lambda_re_elements = np.broadcast_to(Lambda_re_bf, (L, Lambda_re_bf.shape[0]))
     Lambda_im_elements = np.broadcast_to(Lambda_im_bf, (L, Lambda_im_bf.shape[0]))
 
@@ -296,12 +306,16 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
         return complex_matvec_bf16_real_x_bf16_out(B_bar, u_bf16)
 
     Bu_re_elements, Bu_im_elements = jax.vmap(compute_Bu)(input_bf16)
+    jax.debug.print("[apply_ssm] Bu_re_elements has NaN: {}, shape: {}", np.any(np.isnan(Bu_re_elements)), Bu_re_elements.shape)  # DEBUG BF16
+    jax.debug.print("[apply_ssm] Bu_im_elements has NaN: {}, shape: {}", np.any(np.isnan(Bu_im_elements)), Bu_im_elements.shape)  # DEBUG BF16
 
     # Run associative scan with BF16 binary operator
     (_, _), (xs_re, xs_im) = jax.lax.associative_scan(
         binary_operator_bf16,
         ((Lambda_re_elements, Lambda_im_elements), (Bu_re_elements, Bu_im_elements))
     )
+    jax.debug.print("[apply_ssm] After scan - xs_re has NaN: {}, range: [{}, {}]", np.any(np.isnan(xs_re)), np.min(xs_re), np.max(xs_re))  # DEBUG BF16
+    jax.debug.print("[apply_ssm] After scan - xs_im has NaN: {}, range: [{}, {}]", np.any(np.isnan(xs_im)), np.min(xs_im), np.max(xs_im))  # DEBUG BF16
 
     if bidirectional:
         (_, _), (xs2_re, xs2_im) = jax.lax.associative_scan(
@@ -322,6 +336,8 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
         ys = jax.vmap(lambda xr, xi: 2 * compute_Cx(xr, xi))(xs_re, xs_im)
     else:
         ys = jax.vmap(compute_Cx)(xs_re, xs_im)
+
+    jax.debug.print("[apply_ssm] Final ys has NaN: {}, range: [{}, {}]", np.any(np.isnan(ys)), np.min(ys), np.max(ys))  # DEBUG BF16
 
     return ys  # Returns BF16
     
@@ -551,6 +567,12 @@ class S5SSM(nn.Module):
         else:
             raise NotImplementedError("Discretization method {} not implemented".format(self.discretization))
 
+        # [DEBUG BF16] Check for NaN after discretization in setup()
+        jax.debug.print("[S5SSM.setup] After discretization - Lambda_bar has NaN: {}", np.any(np.isnan(self.Lambda_bar)))  # DEBUG BF16
+        jax.debug.print("[S5SSM.setup] After discretization - B_bar has NaN: {}", np.any(np.isnan(self.B_bar)))  # DEBUG BF16
+        jax.debug.print("[S5SSM.setup] After discretization - C_tilde has NaN: {}", np.any(np.isnan(self.C_tilde)))  # DEBUG BF16
+        jax.debug.print("[S5SSM.setup] After discretization - D has NaN: {}", np.any(np.isnan(self.D)))  # DEBUG BF16
+
     def __call__(self, input_sequence):
         """
         Compute the LxH output of the S5 SSM given an LxH input sequence
@@ -563,8 +585,15 @@ class S5SSM(nn.Module):
         Returns:
             output sequence (bfloat16): (L, H)
         """
+        # [DEBUG BF16] Check discretized params in setup()
+        jax.debug.print("[S5SSM.__call__] self.Lambda_bar has NaN: {}", np.any(np.isnan(self.Lambda_bar)))  # DEBUG BF16
+        jax.debug.print("[S5SSM.__call__] self.B_bar has NaN: {}", np.any(np.isnan(self.B_bar)))  # DEBUG BF16
+        jax.debug.print("[S5SSM.__call__] self.C_tilde has NaN: {}", np.any(np.isnan(self.C_tilde)))  # DEBUG BF16
+        jax.debug.print("[S5SSM.__call__] self.D has NaN: {}", np.any(np.isnan(self.D)))  # DEBUG BF16
+
         # Full BF16: convert input to BF16
         input_bf16 = input_sequence.astype(np.bfloat16)
+        jax.debug.print("[S5SSM.__call__] input_sequence dtype: {}, has NaN: {}", input_sequence.dtype, np.any(np.isnan(input_sequence)))  # DEBUG BF16
 
         # apply_ssm now returns BF16
         ys = apply_ssm(self.Lambda_bar,
@@ -574,10 +603,17 @@ class S5SSM(nn.Module):
                        self.conj_sym,
                        self.bidirectional)
 
+        jax.debug.print("[S5SSM.__call__] ys from apply_ssm has NaN: {}", np.any(np.isnan(ys)))  # DEBUG BF16
+
         # D feedthrough in BF16
         D_bf16 = self.D.astype(np.bfloat16)
+        jax.debug.print("[S5SSM.__call__] D_bf16 has NaN: {}", np.any(np.isnan(D_bf16)))  # DEBUG BF16
+
         Du = jax.vmap(lambda u: D_bf16 * u)(input_bf16)
+        jax.debug.print("[S5SSM.__call__] Du has NaN: {}", np.any(np.isnan(Du)))  # DEBUG BF16
+
         output = ys + Du
+        jax.debug.print("[S5SSM.__call__] Final output has NaN: {}, range: [{}, {}]", np.any(np.isnan(output)), np.min(output), np.max(output))  # DEBUG BF16
 
         # Return BF16 output
         return output
