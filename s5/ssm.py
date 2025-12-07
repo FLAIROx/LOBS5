@@ -193,11 +193,21 @@ def complex_matvec_bf16_real_x_bf16_out(A_complex, x_bf16):
     Returns:
         (y_real_bf16, y_imag_bf16): tuple of bfloat16 arrays (P,)
     """
+    # [DEBUG BF16] Check inputs
+    jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] A_complex has NaN: {}, shape: {}", np.any(np.isnan(A_complex)), A_complex.shape)  # DEBUG BF16
+    jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] x_bf16 has NaN: {}, shape: {}, dtype: {}", np.any(np.isnan(x_bf16)), x_bf16.shape, x_bf16.dtype)  # DEBUG BF16
+
     A_re_bf, A_im_bf = complex_to_bf16_pair(A_complex)
+
+    jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] A_re_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(A_re_bf)), np.min(A_re_bf), np.max(A_re_bf))  # DEBUG BF16
+    jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] A_im_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(A_im_bf)), np.min(A_im_bf), np.max(A_im_bf))  # DEBUG BF16
 
     # 2x BF16 matmuls (Tensor Core accelerated)
     real_bf = np.matmul(A_re_bf, x_bf16)
     imag_bf = np.matmul(A_im_bf, x_bf16)
+
+    jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] real_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(real_bf)), np.min(real_bf), np.max(real_bf))  # DEBUG BF16
+    jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] imag_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(imag_bf)), np.min(imag_bf), np.max(imag_bf))  # DEBUG BF16
 
     return real_bf, imag_bf
 

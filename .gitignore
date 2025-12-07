@@ -246,3 +246,8 @@ GPU_OOM_FIX.md
 QUICK_START_ENCODING.md
 package.json
 package-lock.json
+**.jsonl
+**.jsonl
+grad_stats_bf16.jsonl
+bf16_dataflow.md
+bf16_numerical_analysis.md
