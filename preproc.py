@@ -178,9 +178,23 @@ def transform_L2_state_numpy(
     
     delta_p_mid_and_time=delta_p_mid_and_time.astype(np.float32)
 
-    # ===== Normalize mid price and CLIP(mid price, volume) to SUPPORT BF16 =====
-    # Based on 2016-2021 statistics: 99th percentile = ±31 ticks
-    # Normalize to [-1, 1] and clip outliers (0.5% extreme values)
+    # ========================================================================
+    # Normalize mid price and CLIP(mid price, volume) to SUPPORT BF16
+    # ========================================================================
+    # ---------- Statistics from logs/data_analysis_1673370.out ----------
+    # Dataset: GOOG 2016-2021 (1499 files, 756,907,244 Ch0 samples)
+    #
+    # [Ch0] delta_mid_price - 99th percentile = ±31 ticks:
+    #   Year breakdown:
+    #     2016: [-11, 11],  2017: [-13, 13],  2018: [-15, 15]
+    #     2019: [-10, 11],  2020: [-18, 17],  2021: [-31, 31]
+    #   All years combined:
+    #     99.0%: [-22, 22],  99.5%: [-31, 31],  99.9%: [-53, 53]
+    #     Extreme outliers (0.1%): min=-27690, max=28980
+    #
+    # Normalization: divide by 31.0 (99.5th percentile)
+    # Result: 99% data in [-1, 1], clips 0.5% extreme outliers
+    # ---------------------------------------------------------------------
     delta_p_mid_and_time[0] = np.clip(delta_p_mid_and_time[0] / 31.0, -1.0, 1.0)  # Normalize mid price and CLIP to SUPPORT BF16
 
     # Norm seconds to be in [0,1] representing percent of day.
@@ -198,9 +212,23 @@ def transform_L2_state_numpy(
     #     mybook.astype(np.float32) / 1000
     # ))
 
-    # ===== NEW: Normalize volume and CLIP to SUPPORT BF16 =====
-    # Based on 2016-2021 statistics: 99th percentile (non-zero) = ±0.3 (after /1000)
-    # Keep /1000 normalization but clip to [-1, 1] to handle outliers
+    # ========================================================================
+    # Normalize volume and CLIP to SUPPORT BF16
+    # ========================================================================
+    # ---------- Statistics from logs/data_analysis_1673370.out ----------
+    # Dataset: GOOG 2016-2021 (1499 files, 14.7B volume samples, non-zero only)
+    #
+    # [Vol] volume image (after /1000) - 99th percentile statistics:
+    #   Year breakdown (99th percentile after /1000):
+    #     2016: [-0.53, 0.51],  2017: [-0.56, 0.50],  2018: [-0.38, 0.33]
+    #     2019: [-0.31, 0.40],  2020: [-0.25, 0.22],  2021: [-0.21, 0.30]
+    #   All years combined:
+    #     99.0%: [-0.20, 0.20],  99.5%: [-0.30, 0.30],  99.9%: [-0.50, 0.66]
+    #     Extreme outliers (0.1%): min=-56.67, max=54.94 (after /1000)
+    #
+    # Normalization: divide by 1000 (keep original)
+    # Clipping: [-1, 1] to handle rare extreme outliers
+    # ---------------------------------------------------------------------
     vol_normalized = mybook.astype(np.float32) / 1000  # Normalize volume (keep original divisor)
     vol_normalized = np.clip(vol_normalized, -1.0, 1.0)  # CLIP volume to SUPPORT BF16
     mybook = np.concatenate((
