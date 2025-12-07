@@ -151,92 +151,73 @@ def binary_operator_reset(q_i, q_j):
 
 
 # ============================================================================
-# Full BF16 Helpers for Complex Matrix-Vector Operations
+# DEPRECATED: Full BF16 Helpers (not used with FP32 scan)
 # ============================================================================
-# All operations stay in BF16 throughout the computation pipeline.
-# Only cast to FP32 at the very end for loss computation.
+# These helpers were for Full BF16 scan (all BF16 throughout pipeline).
+# DEPRECATED Reason: Numerical explosion in associative_scan over 12000 timesteps
+#   - BF16 precision: 7 bits mantissa → cumulative error (1+ε)^14 ≈ 1.15
+#   - Observed: xs_re ∈ [-3e8, 3e8] (vs expected O(1-100))
+#   - Result: Precision loss → NaN in downstream layers
+#   - Logs: bf16_debug_1673380.out, bf16_debug_1673381.out
+#   - Mathematical proof: bf16_numerical_analysis.md
 # ============================================================================
 
-def complex_to_bf16_pair(z_complex):
-    """Convert complex64 array to BF16 (real, imag) pair.
-
-    Args:
-        z_complex: complex64 array
-    Returns:
-        (real_bf16, imag_bf16): tuple of bfloat16 arrays
-    """
-    return z_complex.real.astype(np.bfloat16), z_complex.imag.astype(np.bfloat16)
+# def complex_to_bf16_pair(z_complex):
+#     """Convert complex64 array to BF16 (real, imag) pair.
+#     DEPRECATED: Used for Full BF16 scan, causes numerical explosion.
+#     """
+#     return z_complex.real.astype(np.bfloat16), z_complex.imag.astype(np.bfloat16)  # DEPRECATED
 
 
-def bf16_pair_to_complex(real_bf, imag_bf):
-    """Convert BF16 (real, imag) pair back to complex64.
-
-    Args:
-        real_bf: bfloat16 real part
-        imag_bf: bfloat16 imaginary part
-    Returns:
-        complex64 array
-    """
-    return real_bf.astype(np.float32) + 1j * imag_bf.astype(np.float32)
+# def bf16_pair_to_complex(real_bf, imag_bf):
+#     """Convert BF16 (real, imag) pair back to complex64.
+#     DEPRECATED: Used for Full BF16 scan, causes numerical explosion.
+#     """
+#     return real_bf.astype(np.float32) + 1j * imag_bf.astype(np.float32)  # DEPRECATED
 
 
-def complex_matvec_bf16_real_x_bf16_out(A_complex, x_bf16):
-    """Compute y = A_complex @ x_real, returning BF16 pair.
-
-    For complex matrix × real vector:
-        y_real = A_real @ x
-        y_imag = A_imag @ x
-
-    Args:
-        A_complex: complex64 matrix (P, H)
-        x_bf16: bfloat16 vector (H,)
-    Returns:
-        (y_real_bf16, y_imag_bf16): tuple of bfloat16 arrays (P,)
-    """
-    # [DEBUG BF16] Check inputs
-    jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] A_complex has NaN: {}, shape: {}", np.any(np.isnan(A_complex)), A_complex.shape)  # DEBUG BF16
-    jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] x_bf16 has NaN: {}, shape: {}, dtype: {}", np.any(np.isnan(x_bf16)), x_bf16.shape, x_bf16.dtype)  # DEBUG BF16
-
-    A_re_bf, A_im_bf = complex_to_bf16_pair(A_complex)
-
-    jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] A_re_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(A_re_bf)), np.min(A_re_bf), np.max(A_re_bf))  # DEBUG BF16
-    jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] A_im_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(A_im_bf)), np.min(A_im_bf), np.max(A_im_bf))  # DEBUG BF16
-
-    # 2x BF16 matmuls (Tensor Core accelerated)
-    real_bf = np.matmul(A_re_bf, x_bf16)
-    imag_bf = np.matmul(A_im_bf, x_bf16)
-
-    jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] real_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(real_bf)), np.min(real_bf), np.max(real_bf))  # DEBUG BF16
-    jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] imag_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(imag_bf)), np.min(imag_bf), np.max(imag_bf))  # DEBUG BF16
-
-    return real_bf, imag_bf
+# def complex_matvec_bf16_real_x_bf16_out(A_complex, x_bf16):
+#     """Compute y = A_complex @ x_real, returning BF16 pair.
+#     DEPRECATED: Returns BF16 pair for Full BF16 scan.
+#     Reason: BF16 scan numerically unstable, use complex_matvec_bf16_real_x (returns FP32) instead.
+#     """
+#     # [DEBUG BF16] Check inputs - DEPRECATED, kept for reference
+#     # jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] A_complex has NaN: {}, shape: {}", np.any(np.isnan(A_complex)), A_complex.shape)  # DEBUG BF16
+#     # jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] x_bf16 has NaN: {}, shape: {}, dtype: {}", np.any(np.isnan(x_bf16)), x_bf16.shape, x_bf16.dtype)  # DEBUG BF16
+#
+#     A_re_bf, A_im_bf = complex_to_bf16_pair(A_complex)  # DEPRECATED
+#
+#     # jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] A_re_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(A_re_bf)), np.min(A_re_bf), np.max(A_re_bf))  # DEBUG BF16
+#     # jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] A_im_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(A_im_bf)), np.min(A_im_bf), np.max(A_im_bf))  # DEBUG BF16
+#
+#     # 2x BF16 matmuls (Tensor Core accelerated)
+#     real_bf = np.matmul(A_re_bf, x_bf16)  # DEPRECATED
+#     imag_bf = np.matmul(A_im_bf, x_bf16)  # DEPRECATED
+#
+#     # jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] real_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(real_bf)), np.min(real_bf), np.max(real_bf))  # DEBUG BF16
+#     # jax.debug.print("[complex_matvec_bf16_real_x_bf16_out] imag_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(imag_bf)), np.min(imag_bf), np.max(imag_bf))  # DEBUG BF16
+#
+#     return real_bf, imag_bf  # DEPRECATED
 
 
-def complex_matvec_bf16_bf16_out(A_complex, x_re_bf, x_im_bf):
-    """Compute y = A_complex @ x_complex, all in BF16.
-
-    Complex multiplication: (a + jb)(c + jd) = (ac - bd) + j(ad + bc)
-
-    Args:
-        A_complex: complex64 matrix (H, P)
-        x_re_bf: bfloat16 real part (P,)
-        x_im_bf: bfloat16 imaginary part (P,)
-    Returns:
-        (y_real_bf16, y_imag_bf16): tuple of bfloat16 arrays (H,)
-    """
-    A_re_bf, A_im_bf = complex_to_bf16_pair(A_complex)
-
-    # 4x BF16 matmuls (Tensor Core accelerated)
-    rr = np.matmul(A_re_bf, x_re_bf)
-    ii = np.matmul(A_im_bf, x_im_bf)
-    ri = np.matmul(A_re_bf, x_im_bf)
-    ir = np.matmul(A_im_bf, x_re_bf)
-
-    # Combine results (still BF16)
-    real_bf = rr - ii
-    imag_bf = ri + ir
-
-    return real_bf, imag_bf
+# def complex_matvec_bf16_bf16_out(A_complex, x_re_bf, x_im_bf):
+#     """Compute y = A_complex @ x_complex, all in BF16.
+#     DEPRECATED: All BF16 computation for Full BF16 scan.
+#     Reason: BF16 scan numerically unstable, use complex_matvec_bf16 (returns FP32) instead.
+#     """
+#     A_re_bf, A_im_bf = complex_to_bf16_pair(A_complex)  # DEPRECATED
+#
+#     # 4x BF16 matmuls (Tensor Core accelerated)
+#     rr = np.matmul(A_re_bf, x_re_bf)  # DEPRECATED
+#     ii = np.matmul(A_im_bf, x_im_bf)  # DEPRECATED
+#     ri = np.matmul(A_re_bf, x_im_bf)  # DEPRECATED
+#     ir = np.matmul(A_im_bf, x_re_bf)  # DEPRECATED
+#
+#     # Combine results (still BF16)
+#     real_bf = rr - ii  # DEPRECATED
+#     imag_bf = ri + ir  # DEPRECATED
+#
+#     return real_bf, imag_bf  # DEPRECATED
 
 
 # Legacy functions for backward compatibility (used by es_lobs5)
@@ -315,6 +296,12 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
     Returns:
         ys (float32): the SSM outputs (S5 layer preactivations)      (L, H)
     """
+    # [DEBUG BF16] Check inputs for NaN
+    jax.debug.print("[apply_ssm] Lambda_bar has NaN: {}, shape: {}", np.any(np.isnan(Lambda_bar)), Lambda_bar.shape)  # DEBUG BF16
+    jax.debug.print("[apply_ssm] B_bar has NaN: {}, shape: {}", np.any(np.isnan(B_bar)), B_bar.shape)  # DEBUG BF16
+    jax.debug.print("[apply_ssm] C_tilde has NaN: {}, shape: {}", np.any(np.isnan(C_tilde)), C_tilde.shape)  # DEBUG BF16
+    jax.debug.print("[apply_ssm] input_sequence has NaN: {}, shape: {}, dtype: {}", np.any(np.isnan(input_sequence)), input_sequence.shape, input_sequence.dtype)  # DEBUG BF16
+
     # Ensure input is FP32 for scan stability (Reference: 7DEC:354)
     input_fp32 = input_sequence.astype(np.float32)
 
@@ -323,9 +310,11 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
 
     # BF16 matmul: B_bar @ u, returns complex64 (FP32) for scan (Reference: 7DEC:146)
     Bu_elements = jax.vmap(lambda u: complex_matvec_bf16_real_x(B_bar, u))(input_fp32)
+    jax.debug.print("[apply_ssm] Bu_elements has NaN: {}, dtype: {}", np.any(np.isnan(Bu_elements)), Bu_elements.dtype)  # DEBUG BF16
 
     # FP32 scan: binary_operator works on complex64 for numerical stability
     _, xs = jax.lax.associative_scan(binary_operator, (Lambda_elements, Bu_elements))
+    jax.debug.print("[apply_ssm] After FP32 scan - xs has NaN: {}, dtype: {}, range: [{}, {}]", np.any(np.isnan(xs)), xs.dtype, np.min(np.abs(xs)), np.max(np.abs(xs)))  # DEBUG BF16
 
     if bidirectional:
         _, xs2 = jax.lax.associative_scan(binary_operator,
@@ -335,9 +324,13 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
 
     # BF16 matmul: C_tilde @ x, returns complex64 (FP32) (Reference: 7DEC:159)
     if conj_sym:
-        return jax.vmap(lambda x: 2 * complex_matvec_bf16(C_tilde, x).real)(xs)
+        ys = jax.vmap(lambda x: 2 * complex_matvec_bf16(C_tilde, x).real)(xs)
     else:
-        return jax.vmap(lambda x: complex_matvec_bf16(C_tilde, x).real)(xs)
+        ys = jax.vmap(lambda x: complex_matvec_bf16(C_tilde, x).real)(xs)
+
+    jax.debug.print("[apply_ssm] Final ys has NaN: {}, dtype: {}, range: [{}, {}]", np.any(np.isnan(ys)), ys.dtype, np.min(ys), np.max(ys))  # DEBUG BF16
+
+    return ys
     
 def apply_ssm_rnn(Lambda_bar, B_bar, C_tilde, hidden, input_sequence, resets, conj_sym, bidirectional):
     """Compute the LxH output of discretized SSM in RNN mode.
@@ -556,6 +549,13 @@ class S5SSM(nn.Module):
         Returns:
             output sequence (float32/bfloat16): (L, H)
         """
+        # [DEBUG BF16] Check discretized params in setup()
+        jax.debug.print("[S5SSM.__call__] self.Lambda_bar has NaN: {}", np.any(np.isnan(self.Lambda_bar)))  # DEBUG BF16
+        jax.debug.print("[S5SSM.__call__] self.B_bar has NaN: {}", np.any(np.isnan(self.B_bar)))  # DEBUG BF16
+        jax.debug.print("[S5SSM.__call__] self.C_tilde has NaN: {}", np.any(np.isnan(self.C_tilde)))  # DEBUG BF16
+        jax.debug.print("[S5SSM.__call__] self.D has NaN: {}", np.any(np.isnan(self.D)))  # DEBUG BF16
+        jax.debug.print("[S5SSM.__call__] input_sequence dtype: {}, has NaN: {}", input_sequence.dtype, np.any(np.isnan(input_sequence)))  # DEBUG BF16
+
         # Save input dtype and cast to FP32 for SSM (apply_ssm returns FP32)
         input_dtype = input_sequence.dtype
         input_fp32 = input_sequence.astype(np.float32)
@@ -568,9 +568,14 @@ class S5SSM(nn.Module):
                        self.conj_sym,
                        self.bidirectional)
 
+        jax.debug.print("[S5SSM.__call__] ys from apply_ssm has NaN: {}, dtype: {}", np.any(np.isnan(ys)), ys.dtype)  # DEBUG BF16
+
         # D feedthrough in FP32
         Du = jax.vmap(lambda u: self.D * u)(input_fp32)
+        jax.debug.print("[S5SSM.__call__] Du has NaN: {}", np.any(np.isnan(Du)))  # DEBUG BF16
+
         output = ys + Du
+        jax.debug.print("[S5SSM.__call__] Final output has NaN: {}, range: [{}, {}]", np.any(np.isnan(output)), np.min(output), np.max(output))  # DEBUG BF16
 
         # Cast output back to input dtype (BF16 if needed)
         return output.astype(input_dtype)
