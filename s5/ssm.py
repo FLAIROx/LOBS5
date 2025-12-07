@@ -273,13 +273,37 @@ def complex_matvec_bf16(A_complex, x_complex):
 
 
 # ============================================================================
-# Full BF16 SSM Apply Functions
+# DEPRECATED: Full BF16 SSM (including scan) - CAUSES NUMERICAL EXPLOSION
+# ============================================================================
+# def apply_ssm_full_bf16(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional):
+#     """
+#     DEPRECATED: Full BF16 implementation causes numerical explosion.
+#
+#     Problem: BF16 associative_scan accumulates errors over 12000 timesteps:
+#       - BF16 precision: 7 bits mantissa (vs FP32 23 bits)
+#       - Recursive depth: log2(12000) = 14 layers
+#       - Observed growth: α=3.3 per layer → 3.3^13 ≈ 10^7× explosion
+#       - Result: xs_re ∈ [-3e8, 3e8] → precision loss → NaN
+#
+#     Mathematical proof:
+#       von Neumann stability: ρ(Λ) + k·ε < 1
+#       FP32: 0.99 + 14×10⁻⁷ ≈ 0.99 ✅ stable
+#       BF16: 0.99 + 14×0.008 ≈ 1.11 ❌ unstable
+#
+#     Logs: bf16_debug_1673380.out, bf16_debug_1673381.out
+#     See: bf16_numerical_analysis.md for full derivation
+#     """
+#     # [Full BF16 implementation commented out - see git history b180c1d]
+#     pass
+
+# ============================================================================
+# Correct BF16 SSM: BF16 matmul + FP32 scan (Reference: 7DEC working implementation)
 # ============================================================================
 
 def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional):
     """Compute the LxH output of discretized SSM given an LxH input.
 
-    Full BF16 implementation: all intermediate computations in BF16.
+    BF16 strategy: Use BF16 for matmul (Tensor Core), FP32 for scan (stability)
 
     Args:
         Lambda_bar (complex64): discretized diagonal state matrix    (P,)
@@ -289,155 +313,92 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
         conj_sym (bool):         whether conjugate symmetry is enforced
         bidirectional (bool):    whether bidirectional setup is used
     Returns:
-        ys (bfloat16): the SSM outputs (S5 layer preactivations)     (L, H)
+        ys (float32): the SSM outputs (S5 layer preactivations)      (L, H)
     """
-    L = input_sequence.shape[0]
+    # Ensure input is FP32 for scan stability (Reference: 7DEC:354)
+    input_fp32 = input_sequence.astype(np.float32)
 
-    # [DEBUG BF16] Check inputs for NaN
-    jax.debug.print("[apply_ssm] Lambda_bar has NaN: {}, shape: {}", np.any(np.isnan(Lambda_bar)), Lambda_bar.shape)  # DEBUG BF16
-    jax.debug.print("[apply_ssm] B_bar has NaN: {}, shape: {}", np.any(np.isnan(B_bar)), B_bar.shape)  # DEBUG BF16
-    jax.debug.print("[apply_ssm] C_tilde has NaN: {}, shape: {}", np.any(np.isnan(C_tilde)), C_tilde.shape)  # DEBUG BF16
-    jax.debug.print("[apply_ssm] input_sequence has NaN: {}, shape: {}, dtype: {}", np.any(np.isnan(input_sequence)), input_sequence.shape, input_sequence.dtype)  # DEBUG BF16
+    # Broadcast Lambda_bar to (L, P), keep as complex64 (FP32) for scan
+    Lambda_elements = Lambda_bar * np.ones((input_fp32.shape[0], Lambda_bar.shape[0]))
 
-    # Convert input to BF16
-    input_bf16 = input_sequence.astype(np.bfloat16)
-    jax.debug.print("[apply_ssm] input_bf16 has NaN: {}", np.any(np.isnan(input_bf16)))  # DEBUG BF16
+    # BF16 matmul: B_bar @ u, returns complex64 (FP32) for scan (Reference: 7DEC:146)
+    Bu_elements = jax.vmap(lambda u: complex_matvec_bf16_real_x(B_bar, u))(input_fp32)
 
-    # Convert Lambda_bar to BF16 pair and broadcast to (L, P)
-    Lambda_re_bf, Lambda_im_bf = complex_to_bf16_pair(Lambda_bar)
-    jax.debug.print("[apply_ssm] Lambda_re_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(Lambda_re_bf)), np.min(Lambda_re_bf), np.max(Lambda_re_bf))  # DEBUG BF16
-    jax.debug.print("[apply_ssm] Lambda_im_bf has NaN: {}, range: [{}, {}]", np.any(np.isnan(Lambda_im_bf)), np.min(Lambda_im_bf), np.max(Lambda_im_bf))  # DEBUG BF16
-
-    Lambda_re_elements = np.broadcast_to(Lambda_re_bf, (L, Lambda_re_bf.shape[0]))
-    Lambda_im_elements = np.broadcast_to(Lambda_im_bf, (L, Lambda_im_bf.shape[0]))
-
-    # Compute Bu = B_bar @ u for each timestep, output as BF16 pair
-    def compute_Bu(u_bf16):
-        return complex_matvec_bf16_real_x_bf16_out(B_bar, u_bf16)
-
-    Bu_re_elements, Bu_im_elements = jax.vmap(compute_Bu)(input_bf16)
-    jax.debug.print("[apply_ssm] Bu_re_elements has NaN: {}, shape: {}", np.any(np.isnan(Bu_re_elements)), Bu_re_elements.shape)  # DEBUG BF16
-    jax.debug.print("[apply_ssm] Bu_im_elements has NaN: {}, shape: {}", np.any(np.isnan(Bu_im_elements)), Bu_im_elements.shape)  # DEBUG BF16
-
-    # Run associative scan with BF16 binary operator
-    (_, _), (xs_re, xs_im) = jax.lax.associative_scan(
-        binary_operator_bf16,
-        ((Lambda_re_elements, Lambda_im_elements), (Bu_re_elements, Bu_im_elements))
-    )
-    jax.debug.print("[apply_ssm] After scan - xs_re has NaN: {}, range: [{}, {}]", np.any(np.isnan(xs_re)), np.min(xs_re), np.max(xs_re))  # DEBUG BF16
-    jax.debug.print("[apply_ssm] After scan - xs_im has NaN: {}, range: [{}, {}]", np.any(np.isnan(xs_im)), np.min(xs_im), np.max(xs_im))  # DEBUG BF16
+    # FP32 scan: binary_operator works on complex64 for numerical stability
+    _, xs = jax.lax.associative_scan(binary_operator, (Lambda_elements, Bu_elements))
 
     if bidirectional:
-        (_, _), (xs2_re, xs2_im) = jax.lax.associative_scan(
-            binary_operator_bf16,
-            ((Lambda_re_elements, Lambda_im_elements), (Bu_re_elements, Bu_im_elements)),
-            reverse=True
-        )
-        xs_re = np.concatenate((xs_re, xs2_re), axis=-1)
-        xs_im = np.concatenate((xs_im, xs2_im), axis=-1)
+        _, xs2 = jax.lax.associative_scan(binary_operator,
+                                          (Lambda_elements, Bu_elements),
+                                          reverse=True)
+        xs = np.concatenate((xs, xs2), axis=-1)
 
-    # Compute C @ x for each timestep, output as BF16
-    def compute_Cx(x_re_bf, x_im_bf):
-        y_re, y_im = complex_matvec_bf16_bf16_out(C_tilde, x_re_bf, x_im_bf)
-        # For SSM output we only need real part: 2*Re(C @ x) or Re(C @ x)
-        return y_re
-
+    # BF16 matmul: C_tilde @ x, returns complex64 (FP32) (Reference: 7DEC:159)
     if conj_sym:
-        ys = jax.vmap(lambda xr, xi: 2 * compute_Cx(xr, xi))(xs_re, xs_im)
+        return jax.vmap(lambda x: 2 * complex_matvec_bf16(C_tilde, x).real)(xs)
     else:
-        ys = jax.vmap(compute_Cx)(xs_re, xs_im)
-
-    jax.debug.print("[apply_ssm] Final ys has NaN: {}, range: [{}, {}]", np.any(np.isnan(ys)), np.min(ys), np.max(ys))  # DEBUG BF16
-
-    return ys  # Returns BF16
+        return jax.vmap(lambda x: complex_matvec_bf16(C_tilde, x).real)(xs)
     
 def apply_ssm_rnn(Lambda_bar, B_bar, C_tilde, hidden, input_sequence, resets, conj_sym, bidirectional):
     """Compute the LxH output of discretized SSM in RNN mode.
 
-    Full BF16 implementation: all intermediate computations in BF16.
-    Hidden state is stored as BF16 pair (hidden_re, hidden_im).
+    BF16 strategy: Use BF16 for matmul (Tensor Core), FP32 for scan (stability)
 
     Args:
         Lambda_bar (complex64): discretized diagonal state matrix    (P,)
         B_bar      (complex64): discretized input matrix             (P, H)
         C_tilde    (complex64): output matrix                        (H, P)
-        hidden: hidden state - either complex64 (1, P) or BF16 pair ((1, P), (1, P))
+        hidden: hidden state - complex64 (1, P)
         input_sequence (float32/bfloat16): input sequence            (L, H)
         resets (bool): reset signals                                 (L,)
         conj_sym (bool): whether conjugate symmetry is enforced
         bidirectional (bool): whether bidirectional (not supported in RNN mode)
     Returns:
-        hidden_out: BF16 pair ((1, P), (1, P)) for next call
-        ys (bfloat16): the SSM outputs                               (L, H)
+        hidden_out: complex64 (1, P) for next call
+        ys (float32): the SSM outputs                                (L, H)
     """
-    L = input_sequence.shape[0]
-    P = Lambda_bar.shape[0]
+    # Ensure input is FP32 for scan stability (Reference: 7DEC:167-170)
+    input_fp32 = input_sequence.astype(np.float32)
 
-    # Convert input to BF16
-    input_bf16 = input_sequence.astype(np.bfloat16)
+    # Broadcast Lambda_bar, keep as complex64 (FP32) for scan
+    Lambda_elements = Lambda_bar * np.ones((input_fp32.shape[0], Lambda_bar.shape[0]))
 
-    # Convert Lambda_bar to BF16 pair
-    Lambda_re_bf, Lambda_im_bf = complex_to_bf16_pair(Lambda_bar)
+    # BF16 matmul: B_bar @ u, returns complex64 (FP32) for scan
+    Bu_elements = jax.vmap(lambda u: complex_matvec_bf16_real_x(B_bar, u))(input_fp32)
 
-    # Handle hidden state: convert from complex64 if needed
-    if isinstance(hidden, tuple) and len(hidden) == 2:
-        # Already BF16 pair
-        hidden_re, hidden_im = hidden
-    else:
-        # Convert from complex64
-        hidden_re, hidden_im = complex_to_bf16_pair(hidden)
+    # Prepend hidden state (complex64)
+    Lambda_elements = np.concatenate([
+        np.ones((1, Lambda_bar.shape[0])),
+        Lambda_elements,
+    ])
 
-    # Broadcast Lambda to (L+1, P) - prepend ones for initial state
-    ones_re = np.ones((1, P), dtype=np.bfloat16)
-    ones_im = np.zeros((1, P), dtype=np.bfloat16)
-    Lambda_re_elements = np.concatenate([ones_re, np.broadcast_to(Lambda_re_bf, (L, P))])
-    Lambda_im_elements = np.concatenate([ones_im, np.broadcast_to(Lambda_im_bf, (L, P))])
+    Bu_elements = np.concatenate([
+        hidden,
+        Bu_elements,
+    ])
 
-    # Compute Bu = B_bar @ u for each timestep
-    def compute_Bu(u_bf16):
-        return complex_matvec_bf16_real_x_bf16_out(B_bar, u_bf16)
-
-    Bu_re_seq, Bu_im_seq = jax.vmap(compute_Bu)(input_bf16)
-
-    # Prepend hidden state
-    Bu_re_elements = np.concatenate([hidden_re, Bu_re_seq])
-    Bu_im_elements = np.concatenate([hidden_im, Bu_im_seq])
-
-    # Run associative scan
+    # FP32 scan: binary_operator works on complex64 for numerical stability
     if resets is None:
-        (_, _), (xs_re, xs_im) = jax.lax.associative_scan(
-            binary_operator_bf16,
-            ((Lambda_re_elements, Lambda_im_elements), (Bu_re_elements, Bu_im_elements))
-        )
+        _, xs = jax.lax.associative_scan(binary_operator, (Lambda_elements, Bu_elements))
     else:
-        # Prepend zero reset for initial state
-        resets_padded = np.concatenate([np.zeros(1, dtype=resets.dtype), resets])
-        (_, _), (xs_re, xs_im), _ = jax.lax.associative_scan(
-            binary_operator_bf16_reset,
-            ((Lambda_re_elements, Lambda_im_elements), (Bu_re_elements, Bu_im_elements), resets_padded)
-        )
+        resets = np.concatenate([
+            np.zeros(1, dtype=resets.dtype),
+            resets,
+        ])
+        _, xs, _ = jax.lax.associative_scan(binary_operator_reset, (Lambda_elements, Bu_elements, resets))
 
-    # Extract hidden state for next call (last state)
-    hidden_out = (xs_re[np.newaxis, -1], xs_im[np.newaxis, -1])
-
-    # Remove the prepended initial state
-    xs_re = xs_re[1:]
-    xs_im = xs_im[1:]
+    # Extract hidden state (complex64) for next call
+    hidden_out = xs[np.newaxis, -1]
+    xs = xs[1:]
 
     if bidirectional:
         raise ValueError("Cannot expect a bidirectional view if doing rnn")
 
-    # Compute C @ x for each timestep
-    def compute_Cx(x_re_bf, x_im_bf):
-        y_re, y_im = complex_matvec_bf16_bf16_out(C_tilde, x_re_bf, x_im_bf)
-        return y_re
-
+    # BF16 matmul: C_tilde @ x, returns complex64 (FP32) (Reference: 7DEC:200-201)
     if conj_sym:
-        ys = jax.vmap(lambda xr, xi: 2 * compute_Cx(xr, xi))(xs_re, xs_im)
+        return hidden_out, jax.vmap(lambda x: 2 * complex_matvec_bf16(C_tilde, x).real)(xs)
     else:
-        ys = jax.vmap(compute_Cx)(xs_re, xs_im)
-
-    return hidden_out, ys  # Returns BF16 pair and BF16 output
+        return hidden_out, jax.vmap(lambda x: complex_matvec_bf16(C_tilde, x).real)(xs)
 
 
 class S5SSM(nn.Module):
@@ -588,78 +549,62 @@ class S5SSM(nn.Module):
         Compute the LxH output of the S5 SSM given an LxH input sequence
         using a parallel scan.
 
-        Full BF16 implementation: all computations in BF16.
+        BF16 strategy: BF16 matmul + FP32 scan (Reference: 7DEC:343-367)
 
         Args:
              input_sequence (float32/bfloat16): input sequence (L, H)
         Returns:
-            output sequence (bfloat16): (L, H)
+            output sequence (float32/bfloat16): (L, H)
         """
-        # [DEBUG BF16] Check discretized params in setup()
-        jax.debug.print("[S5SSM.__call__] self.Lambda_bar has NaN: {}", np.any(np.isnan(self.Lambda_bar)))  # DEBUG BF16
-        jax.debug.print("[S5SSM.__call__] self.B_bar has NaN: {}", np.any(np.isnan(self.B_bar)))  # DEBUG BF16
-        jax.debug.print("[S5SSM.__call__] self.C_tilde has NaN: {}", np.any(np.isnan(self.C_tilde)))  # DEBUG BF16
-        jax.debug.print("[S5SSM.__call__] self.D has NaN: {}", np.any(np.isnan(self.D)))  # DEBUG BF16
+        # Save input dtype and cast to FP32 for SSM (apply_ssm returns FP32)
+        input_dtype = input_sequence.dtype
+        input_fp32 = input_sequence.astype(np.float32)
 
-        # Full BF16: convert input to BF16
-        input_bf16 = input_sequence.astype(np.bfloat16)
-        jax.debug.print("[S5SSM.__call__] input_sequence dtype: {}, has NaN: {}", input_sequence.dtype, np.any(np.isnan(input_sequence)))  # DEBUG BF16
-
-        # apply_ssm now returns BF16
+        # apply_ssm: BF16 matmul + FP32 scan, returns FP32
         ys = apply_ssm(self.Lambda_bar,
                        self.B_bar,
                        self.C_tilde,
-                       input_bf16,
+                       input_fp32,
                        self.conj_sym,
                        self.bidirectional)
 
-        jax.debug.print("[S5SSM.__call__] ys from apply_ssm has NaN: {}", np.any(np.isnan(ys)))  # DEBUG BF16
-
-        # D feedthrough in BF16
-        D_bf16 = self.D.astype(np.bfloat16)
-        jax.debug.print("[S5SSM.__call__] D_bf16 has NaN: {}", np.any(np.isnan(D_bf16)))  # DEBUG BF16
-
-        Du = jax.vmap(lambda u: D_bf16 * u)(input_bf16)
-        jax.debug.print("[S5SSM.__call__] Du has NaN: {}", np.any(np.isnan(Du)))  # DEBUG BF16
-
+        # D feedthrough in FP32
+        Du = jax.vmap(lambda u: self.D * u)(input_fp32)
         output = ys + Du
-        jax.debug.print("[S5SSM.__call__] Final output has NaN: {}, range: [{}, {}]", np.any(np.isnan(output)), np.min(output), np.max(output))  # DEBUG BF16
 
-        # Return BF16 output
-        return output
+        # Cast output back to input dtype (BF16 if needed)
+        return output.astype(input_dtype)
 
     def __call_rnn__(self, hidden, input_sequence, resets):
         """
         Compute the LxH output of the S5 SSM given an LxH input sequence
         using RNN-style forward pass.
 
-        Full BF16 implementation: all computations in BF16.
-        Hidden state is BF16 pair (hidden_re, hidden_im).
+        BF16 strategy: BF16 matmul + FP32 scan (Reference: 7DEC:369-391)
 
         Args:
-             hidden: BF16 pair ((1, P), (1, P)) or complex64 (1, P)
+             hidden: complex64 (1, P) hidden state
              input_sequence (float32/bfloat16): input sequence (L, H)
              resets (bool): reset signals (L,)
         Returns:
-            hidden_out: BF16 pair for next call
-            output (bfloat16): (L, H)
+            hidden_out: complex64 (1, P) for next call
+            output (float32): (L, H)
         """
-        # Full BF16: convert input to BF16
-        input_bf16 = input_sequence.astype(np.bfloat16)
+        # Cast to FP32 for SSM (apply_ssm_rnn returns FP32)
+        input_fp32 = input_sequence.astype(np.float32)
 
-        # apply_ssm_rnn now returns BF16 pair and BF16 output
+        # apply_ssm_rnn: BF16 matmul + FP32 scan, returns complex64 hidden + FP32 output
         hidden_out, ys = apply_ssm_rnn(self.Lambda_bar,
                                         self.B_bar,
                                         self.C_tilde,
                                         hidden,
-                                        input_bf16,
-                                        resets,
+                                        input_fp32,
+                                        None,
                                         self.conj_sym,
                                         self.bidirectional)
 
-        # D feedthrough in BF16
-        D_bf16 = self.D.astype(np.bfloat16)
-        Du = jax.vmap(lambda u: D_bf16 * u)(input_bf16)
+        # D feedthrough in FP32
+        Du = jax.vmap(lambda u: self.D * u)(input_fp32)
         output = ys + Du
 
         return hidden_out, output

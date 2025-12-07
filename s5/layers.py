@@ -167,12 +167,15 @@ class SequenceLayer(nn.Module):
         return hidden, x
     @staticmethod
     def initialize_carry(batch_size, hidden_size):
-        """Initialize hidden state as BF16 pair (real, imag) for Full BF16 training.
+        """Initialize hidden state as complex64 for FP32 scan stability.
+
+        BF16 strategy: Hidden state is complex64 (FP32) to match FP32 scan.
+        Reference: 7DEC working implementation (uses complex64 hidden state)
 
         Returns:
-            (hidden_re, hidden_im): tuple of bfloat16 arrays, each (batch_size, 1, hidden_size)
+            complex64 array (batch_size, 1, hidden_size)
         """
-        # Full BF16: return (real, imag) pair instead of complex64
-        hidden_re = jax.numpy.zeros((batch_size, 1, hidden_size), dtype=jax.numpy.bfloat16)
-        hidden_im = jax.numpy.zeros((batch_size, 1, hidden_size), dtype=jax.numpy.bfloat16)
-        return (hidden_re, hidden_im)
+        # Use complex64 (FP32) for scan stability, not BF16 pair
+        # DEPRECATED (causes NaN): BF16 pair hidden state for Full BF16 scan
+        # Reason: BF16 scan unstable (see bf16_numerical_analysis.md)
+        return jax.numpy.zeros((batch_size, 1, hidden_size), dtype=jax.numpy.complex64)
