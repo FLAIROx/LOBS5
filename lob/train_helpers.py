@@ -857,13 +857,15 @@ def train_step(
     )  # mixed precision overflow debug
     jax.debug.print("[NaN Check 6] Updated params has NaN: {}", new_params_has_nan)  # mixed precision overflow debug
 
-    # [DEBUG BF16] If NaN, find which params
-    def check_and_report_nan(path, x):  # DEBUG BF16
-        if np.any(np.isnan(x)):  # DEBUG BF16
-            path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
-            jax.debug.print("[Post-Update NaN] {}: shape={}, dtype={}, min={}, max={}", path_str, x.shape, x.dtype, np.nanmin(x), np.nanmax(x))  # DEBUG BF16
-    if new_params_has_nan:  # DEBUG BF16
-        jax.tree_util.tree_map_with_path(lambda p, x: check_and_report_nan(p, x), state.params)  # DEBUG BF16
+    # [DEBUG BF16] If NaN, find which params (use debug.callback to avoid tracer bool conversion)
+    def find_nan_params_callback(has_nan_val, params_pytree):  # DEBUG BF16
+        if has_nan_val:  # This runs on host, not traced
+            def check_nan(path, x):  # DEBUG BF16
+                if np.any(np.isnan(x)):  # DEBUG BF16
+                    path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
+                    print(f"[Post-Update NaN] {path_str}: shape={x.shape}, dtype={x.dtype}")  # DEBUG BF16
+            jax.tree_util.tree_map_with_path(lambda p, x: check_nan(p, x), params_pytree)  # DEBUG BF16
+    jax.debug.callback(find_nan_params_callback, new_params_has_nan, state.params)  # DEBUG BF16
 
     #return loss, mod_vars, grads, state
     return state, loss, ce, logits
