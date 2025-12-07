@@ -779,13 +779,13 @@ def train_step(
     jax.debug.callback(write_grad_stats, state.step, grad_norm, leaf_norms_with_path)  # mixed precision overflow debug
 
     # # ===== 梯度裁剪 (Gradient Clipping) =====
-    # # 使用全局范数裁剪
-    # # 注: GPT初始化后梯度范数约4M，使用10000保持合理有效学习率
-    # MAX_GRAD_NORM = 10000.0
+    # # 使用全局范数裁剪，防止梯度爆炸导致 NaN
+    # # BF16 训练更容易出现大梯度，必须启用
+    # MAX_GRAD_NORM = 1.0  # 标准值，适合大多数模型
     # clip_factor = np.minimum(1.0, MAX_GRAD_NORM / (grad_norm + 1e-6))
     # grads = jax.tree_util.tree_map(lambda g: g * clip_factor, grads)
-    # jax.debug.print("[Grad Clip] clip_factor: {:.6f}, clipped_norm: {:.6f}",
-    #                 clip_factor, grad_norm * clip_factor)
+    # jax.debug.print("[Grad Clip] grad_norm: {}, clip_factor: {}, clipped_norm: {}",
+    #                 grad_norm, clip_factor, grad_norm * clip_factor)
 
     # UPDATE
     # calculate means over device dimension (first)

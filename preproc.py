@@ -177,7 +177,13 @@ def transform_L2_state_numpy(
     mybook[book_ind[:, 0]]=(book_ind[:, 1])
     
     delta_p_mid_and_time=delta_p_mid_and_time.astype(np.float32)
-    # Norm seconds to be in [0,1] representing percent of day. 
+
+    # ===== Normalize mid price and CLIP(mid price, volume) to SUPPORT BF16 =====
+    # Based on 2016-2021 statistics: 99th percentile = ±31 ticks
+    # Normalize to [-1, 1] and clip outliers (0.5% extreme values)
+    delta_p_mid_and_time[0] = np.clip(delta_p_mid_and_time[0] / 31.0, -1.0, 1.0)  # Normalize mid price and CLIP to SUPPORT BF16
+
+    # Norm seconds to be in [0,1] representing percent of day.
     delta_p_mid_and_time[1]=((delta_p_mid_and_time[1]-34200)/23400)
     # Norm nanoseconds to be fraction of a second
     delta_p_mid_and_time[2]=(delta_p_mid_and_time[2]/1e9)
@@ -185,9 +191,21 @@ def transform_L2_state_numpy(
 
     # set ask volume to negative (sell orders)
     mybook[price_levels // 2:]=(mybook[price_levels // 2:] * -1)
+
+    # ===== OLD (DEPRECATED): Volume normalization without clipping =====
+    # mybook = np.concatenate((
+    #     delta_p_mid_and_time,
+    #     mybook.astype(np.float32) / 1000
+    # ))
+
+    # ===== NEW: Normalize volume and CLIP to SUPPORT BF16 =====
+    # Based on 2016-2021 statistics: 99th percentile (non-zero) = ±0.3 (after /1000)
+    # Keep /1000 normalization but clip to [-1, 1] to handle outliers
+    vol_normalized = mybook.astype(np.float32) / 1000  # Normalize volume (keep original divisor)
+    vol_normalized = np.clip(vol_normalized, -1.0, 1.0)  # CLIP volume to SUPPORT BF16
     mybook = np.concatenate((
         delta_p_mid_and_time,
-        mybook.astype(np.float32) / 1000
+        vol_normalized
     ))
 
     # return mybook.astype(jnp.float32) #/ divide_by
