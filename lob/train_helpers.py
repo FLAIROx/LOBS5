@@ -415,12 +415,35 @@ def create_train_state(model_cls,
     else:
         print(f"[*] Full FP32 training (BF16 disabled via USE_BF16=0)")
 
+    # ========================================================================
+    # Workaround: Initialize optimizer with FP32 params to avoid dtype mismatch
+    # ========================================================================
+    # Problem: If optimizer is initialized with BF16 params, its internal state may
+    # expect BF16 even after we cast to FP32 during update
+    # Solution: Initialize with FP32, then convert params to BF16 after TrainState.create()
+    # ========================================================================
+    if use_bf16:  # Workaround
+        # Temporarily convert params back to FP32 for TrainState initialization
+        def to_fp32_for_init(x):  # Workaround
+            if x.dtype == np.bfloat16:  # Workaround
+                return x.astype(np.float32)  # Workaround
+            return x  # Workaround
+        params_for_init = jax.tree_util.tree_map(to_fp32_for_init, params)  # Workaround
+        print(f"[*] Initializing optimizer with FP32 params (will convert back to BF16)")  # DEBUG BF16
+    else:  # Workaround
+        params_for_init = params  # Workaround
+
     if batchnorm:
         class TrainState(train_state.TrainState):
             batch_stats: Any
-        state = TrainState.create(apply_fn=model.apply, params=params, tx=tx, batch_stats=batch_stats)
+        state = TrainState.create(apply_fn=model.apply, params=params_for_init, tx=tx, batch_stats=batch_stats)
     else:
-        state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
+        state = train_state.TrainState.create(apply_fn=model.apply, params=params_for_init, tx=tx)
+
+    # Convert params back to BF16 after optimizer initialization
+    if use_bf16:  # Workaround
+        state = state.replace(params=params)  # Use original BF16 params
+        print(f"[*] Optimizer initialized with FP32, params converted back to selective BF16")  # DEBUG BF16
 
     # keep copy of state on each device
     print(state.params['message_encoder']['encoder']['embedding'].shape)
@@ -980,20 +1003,31 @@ def train_step(
             pass  # DEBUG BF16
     jax.debug.callback(sample_params_grads, state.params, grads)  # DEBUG BF16
 
-    # [DEBUG BF16] Manually decompose apply_gradients to find where NaN occurs
-    # Step 1: tx.update() - compute updates from gradients
-    def check_before_tx_update(opt_state_tree):  # DEBUG BF16
-        print("[DEBUG] About to call tx.update()")  # DEBUG BF16
-        # Check if opt_state itself has NaN
-        def check_opt_nan(x):  # DEBUG BF16
-            if hasattr(x, 'dtype') and np.issubdtype(x.dtype, np.floating):  # DEBUG BF16
-                return np.any(np.isnan(x))  # DEBUG BF16
-            return False  # DEBUG BF16
-        has_nan_in_opt = jax.tree_util.tree_reduce(lambda a, b: a or b, jax.tree_util.tree_map(check_opt_nan, opt_state_tree), False)  # DEBUG BF16
-        print(f"[DEBUG] Optimizer state has NaN before tx.update: {has_nan_in_opt}")  # DEBUG BF16
-    jax.debug.callback(check_before_tx_update, state.opt_state)  # DEBUG BF16
+    # ========================================================================
+    # Workaround for multi_transform NaN bug with mixed dtype
+    # ========================================================================
+    # Problem: optax.multi_transform produces NaN updates when params tree has mixed dtype (FP32+BF16)
+    # Solution: Cast all params/grads to FP32 before tx.update(), then cast back after
+    # Reference: User suggestion - "输入optax前都cast成FP32，运算结束后再转回各自精度"
+    # ========================================================================
 
-    updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params)
+    # Save original dtypes
+    def get_dtype(x):  # Workaround for multi_transform NaN
+        return x.dtype  # Workaround for multi_transform NaN
+    original_param_dtypes = jax.tree_util.tree_map(get_dtype, state.params)  # Workaround for multi_transform NaN
+
+    # Cast params and grads to FP32 for optimizer
+    def to_fp32(x):  # Workaround for multi_transform NaN
+        if x.dtype == np.bfloat16:  # Workaround for multi_transform NaN
+            return x.astype(np.float32)  # Workaround for multi_transform NaN
+        return x  # Workaround for multi_transform NaN
+    params_fp32 = jax.tree_util.tree_map(to_fp32, state.params)  # Workaround for multi_transform NaN
+    grads_fp32 = jax.tree_util.tree_map(to_fp32, grads)  # Workaround for multi_transform NaN
+
+    jax.debug.print("[Optimizer Workaround] Cast params/grads to FP32 before tx.update()")  # DEBUG BF16
+
+    # Run optimizer in FP32
+    updates, new_opt_state = state.tx.update(grads_fp32, state.opt_state, params_fp32)  # Workaround for multi_transform NaN
 
     # [DEBUG BF16] Check updates after tx.update() - per group
     def check_updates_detailed(updates_tree):  # DEBUG BF16
@@ -1021,8 +1055,17 @@ def train_step(
             print(f"[After tx.update] Error kernel: {e}")  # DEBUG BF16
     jax.debug.callback(check_updates_detailed, updates)  # DEBUG BF16
 
-    # Step 2: optax.apply_updates() - apply updates to params
-    new_params = optax.apply_updates(state.params, updates)
+    # Step 2: optax.apply_updates() - apply updates to params (in FP32)
+    new_params_fp32 = optax.apply_updates(params_fp32, updates)  # Workaround for multi_transform NaN
+
+    # Cast new_params back to original dtypes (BF16 where needed)
+    def cast_back_to_original_dtype(new_val, orig_dtype):  # Workaround for multi_transform NaN
+        if orig_dtype == np.bfloat16:  # Workaround for multi_transform NaN
+            return new_val.astype(np.bfloat16)  # Workaround for multi_transform NaN
+        return new_val  # Keep FP32 (Lambda, D, log_step)  # Workaround for multi_transform NaN
+    new_params = jax.tree_util.tree_map(cast_back_to_original_dtype, new_params_fp32, original_param_dtypes)  # Workaround for multi_transform NaN
+
+    jax.debug.print("[Optimizer Workaround] Cast new_params back to original dtypes")  # DEBUG BF16
 
     # [DEBUG BF16] Check params after apply_updates
     def check_after_apply_updates(new_params_tree):  # DEBUG BF16

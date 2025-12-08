@@ -1,20 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=bf16_debug
-#SBATCH --output=logs/bf16_debug_%j.out
-#SBATCH --error=logs/bf16_debug_%j.err
+#SBATCH --job-name=test_many_batches
+#SBATCH --output=logs/test_many_batches_%j.out
+#SBATCH --error=logs/test_many_batches_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
-#SBATCH --time=00:30:00
+#SBATCH --time=01:00:00
 #SBATCH --partition=workq
 
 mkdir -p logs
 
 echo "========================================"
-echo "BF16 NaN Debug Test"
-echo "========================================"
-echo "Node: $(hostname)"
-echo "Time: $(date)"
+echo "Many Batches Test (200 batches)"
 echo "========================================"
 
 source ~/miniforge3/etc/profile.d/conda.sh
@@ -25,7 +22,7 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_nv
 
 export USE_BF16=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.50
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
 
@@ -41,10 +38,10 @@ python -u run_train.py \
     --warmup_end=1 --weight_decay=0.05 --msg_seq_len=500 \
     --use_book_data=True --use_simple_book=False --book_transform=True \
     --masking=none \
-    --num_devices=1 --n_data_workers=0 \
-    --curtail_epochs=50 \
+    --num_devices=1 --n_data_workers=4 \
+    --curtail_epochs=200 \
     --USE_WANDB=False
 
 echo "========================================"
-echo "Test completed at: $(date)"
+echo "Test completed: $(date)"
 echo "========================================"
