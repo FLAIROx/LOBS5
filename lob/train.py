@@ -397,6 +397,9 @@ def train(args):
             is_last_segment = (eval_idx == num_evals_per_epoch - 1)
             max_batches = None if is_last_segment else eval_interval
 
+            # Calculate starting batch index for tqdm display
+            segment_start_batch = eval_idx * eval_interval
+
             # Train one segment
             state, train_loss, ce_by_tok, step = train_epoch(
                 state,
@@ -415,7 +418,8 @@ def train(args):
                 args.log_ce_tables,
                 use_wandb=args.USE_WANDB,
                 process_index=args.process_index,
-                max_batches=max_batches  # Limit batches for this segment
+                max_batches=max_batches,  # Limit batches for this segment
+                start_batch_idx=segment_start_batch,  # Show correct batch numbers in tqdm
             )
 
             # Update lr_params with new step count

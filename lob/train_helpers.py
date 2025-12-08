@@ -651,6 +651,7 @@ def train_epoch(
         use_wandb=False,
         process_index=0,
         max_batches=None,  # New: limit number of batches to train (for intra-epoch evaluation)
+        start_batch_idx=0,  # Starting batch index for tqdm display (for intra-epoch segments)
     ):
 
     """
@@ -659,6 +660,8 @@ def train_epoch(
     Args:
         max_batches: If provided, stop training after processing this many batches.
                      Used for intra-epoch evaluation to train only a segment of the epoch.
+        start_batch_idx: Starting batch index for tqdm display. Used to show correct
+                         global batch numbers when training in segments.
     """
     # Store Metrics
     batch_losses = []
@@ -668,7 +671,7 @@ def train_epoch(
     batches_processed = 0  # Track how many batches we've processed in this call
 
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
-    for batch_idx, batch in enumerate(tqdm(trainloader)):
+    for batch_idx, batch in enumerate(tqdm(trainloader, initial=start_batch_idx), start=start_batch_idx):
         # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
         # print(f"train_epoch: Batch input shape: {batch[0].shape}, batch target shape: {batch[1].shape}")
         if not debug_loading:
