@@ -523,6 +523,11 @@ class S5SSM(nn.Module):
                                    (self.P, self.dt_min, self.dt_max))
         step = self.step_rescale * np.exp(self.log_step[:, 0])
 
+        # [DEBUG BF16] Check discretization inputs
+        jax.debug.print("[S5SSM.setup] log_step range: [{}, {}]", np.min(self.log_step), np.max(self.log_step))  # DEBUG BF16
+        jax.debug.print("[S5SSM.setup] step = exp(log_step) range: [{}, {}]", np.min(step), np.max(step))  # DEBUG BF16
+        jax.debug.print("[S5SSM.setup] Lambda range: |Lambda| ∈ [{}, {}]", np.min(np.abs(self.Lambda)), np.max(np.abs(self.Lambda)))  # DEBUG BF16
+
         # Discretize
         if self.discretization in ["zoh"]:
             self.Lambda_bar, self.B_bar = discretize_zoh(self.Lambda, B_tilde, step)
@@ -530,6 +535,10 @@ class S5SSM(nn.Module):
             self.Lambda_bar, self.B_bar = discretize_bilinear(self.Lambda, B_tilde, step)
         else:
             raise NotImplementedError("Discretization method {} not implemented".format(self.discretization))
+
+        # [DEBUG BF16] Check discretization outputs
+        jax.debug.print("[S5SSM.setup] Lambda_bar range: |Lambda_bar| ∈ [{}, {}]", np.min(np.abs(self.Lambda_bar)), np.max(np.abs(self.Lambda_bar)))  # DEBUG BF16
+        jax.debug.print("[S5SSM.setup] B_bar range: |B_bar| ∈ [{}, {}]", np.min(np.abs(self.B_bar)), np.max(np.abs(self.B_bar)))  # DEBUG BF16
 
         # [DEBUG BF16] Check for NaN after discretization in setup()
         jax.debug.print("[S5SSM.setup] After discretization - Lambda_bar has NaN: {}", np.any(np.isnan(self.Lambda_bar)))  # DEBUG BF16
