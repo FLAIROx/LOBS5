@@ -194,37 +194,61 @@ def create_train_state(model_cls,
         """
         print("configuring standard optimization setup")
 
-        # [DEBUG BF16] Test: Use single AdamW instead of multi_transform
-        # multi_transform + inject_hyperparams + mixed dtype (FP32+BF16) causes NaN in tx.update()
-        # Temporary workaround: use single optimizer for all params
-        use_single_optimizer = os.environ.get('USE_SINGLE_OPTIMIZER', '0') == '1'  # DEBUG BF16
+        # # [DEBUG BF16] Test: Use single AdamW instead of multi_transform
+        # # multi_transform + inject_hyperparams + mixed dtype (FP32+BF16) causes NaN in tx.update()
+        # # Temporary workaround: use single optimizer for all params
+        # use_single_optimizer = os.environ.get('USE_SINGLE_OPTIMIZER', '0') == '1'  # DEBUG BF16
 
-        if use_single_optimizer:  # DEBUG BF16
-            print("[DEBUG] Using single AdamW optimizer (no multi_transform)")  # DEBUG BF16
-            tx = optax.adamw(learning_rate=lr, weight_decay=weight_decay)  # DEBUG BF16
-        else:  # DEBUG BF16
-            if dt_global:
-                ssm_fn = map_nested_fn(
-                    lambda k, _: "ssm"
-                    if k in ["B", "Lambda_re", "Lambda_im", "norm"]
-                    else ("none" if k in [] else "regular")
-                )
+        # if use_single_optimizer:  # DEBUG BF16
+        #     print("[DEBUG] Using single AdamW optimizer (no multi_transform)")  # DEBUG BF16
+        #     tx = optax.adamw(learning_rate=lr, weight_decay=weight_decay)  # DEBUG BF16
+        # else:  # DEBUG BF16
+        #     if dt_global:
+        #         ssm_fn = map_nested_fn(
+        #             lambda k, _: "ssm"
+        #             if k in ["B", "Lambda_re", "Lambda_im", "norm"]
+        #             else ("none" if k in [] else "regular")
+        #         )
 
-            else:
-                ssm_fn = map_nested_fn(
-                    lambda k, _: "ssm"
-                    if k in ["B", "Lambda_re", "Lambda_im", "log_step", "norm"]
-                    else ("none" if k in [] else "regular")
-                )
-            tx = optax.multi_transform(
-                {
-                    "none": optax.inject_hyperparams(optax.sgd)(learning_rate=0.0),
-                    "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
-                    "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
-                                                                     weight_decay=weight_decay),
-                },
-                ssm_fn,
+        #     else:
+        #         ssm_fn = map_nested_fn(
+        #             lambda k, _: "ssm"
+        #             if k in ["B", "Lambda_re", "Lambda_im", "log_step", "norm"]
+        #             else ("none" if k in [] else "regular")
+        #         )
+        #     tx = optax.multi_transform(
+        #         {
+        #             "none": optax.inject_hyperparams(optax.sgd)(learning_rate=0.0),
+        #             "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
+        #             "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
+        #                                                              weight_decay=weight_decay),
+        #         },
+        #         ssm_fn,
+        #     )
+        if dt_global:
+            ssm_fn = map_nested_fn(
+                lambda k, _: "ssm"
+                if k in ["B", "Lambda_re", "Lambda_im", "norm"]
+                else ("none" if k in [] else "regular")
             )
+
+        else:
+            ssm_fn = map_nested_fn(
+                lambda k, _: "ssm"
+                if k in ["B", "Lambda_re", "Lambda_im", "log_step", "norm"]
+                else ("none" if k in [] else "regular")
+            )
+        tx = optax.multi_transform(
+            {
+                "none": optax.inject_hyperparams(optax.sgd)(learning_rate=0.0),
+                "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
+                "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
+                                                                 weight_decay=weight_decay),
+            },
+            ssm_fn,
+        )
+        
+        
     elif opt_config in ["BandCdecay"]:
         """This option applies weight decay to both C and B. Note we still apply the
            ssm learning rate to B.
@@ -323,37 +347,37 @@ def create_train_state(model_cls,
     # Weight updates computed in FP32, then cast back to BF16
     # ============================================================================
 
-    # [DEBUG BF16] Check params BEFORE BF16 conversion
-    def check_nan(x):  # DEBUG BF16
-        return np.any(np.isnan(x))  # DEBUG BF16
-    has_nan_before = jax.tree_util.tree_reduce(  # DEBUG BF16
-        lambda a, b: a or b,  # DEBUG BF16
-        jax.tree_util.tree_map(check_nan, params),  # DEBUG BF16
-        False  # DEBUG BF16
-    )  # DEBUG BF16
-    if has_nan_before:  # DEBUG BF16
-        print(f"[ERROR] Params have NaN BEFORE BF16 conversion!")  # DEBUG BF16
-        # Find which params have NaN  # DEBUG BF16
-        def find_nan_params(path, x):  # DEBUG BF16
-            if np.any(np.isnan(x)):  # DEBUG BF16
-                path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
-                print(f"  NaN in {path_str}: shape={x.shape}, dtype={x.dtype}, min={np.nanmin(x)}, max={np.nanmax(x)}")  # DEBUG BF16
-        jax.tree_util.tree_map_with_path(lambda p, x: find_nan_params(p, x), params)  # DEBUG BF16
-    else:  # DEBUG BF16
-        print(f"[*] ✓ No NaN in params before BF16 conversion")  # DEBUG BF16
-        # [DEBUG BF16] Print initial param range
-        params_min_init = jax.tree_util.tree_reduce(lambda a, b: np.minimum(a, b), jax.tree_util.tree_map(lambda p: np.min(p), params), np.inf)  # DEBUG BF16
-        params_max_init = jax.tree_util.tree_reduce(lambda a, b: np.maximum(a, b), jax.tree_util.tree_map(lambda p: np.max(p), params), -np.inf)  # DEBUG BF16
-        print(f"[*] Initial params range (FP32): [{params_min_init}, {params_max_init}]")  # DEBUG BF16
+    # # [DEBUG BF16] Check params BEFORE BF16 conversion
+    # def check_nan(x):  # DEBUG BF16
+    #     return np.any(np.isnan(x))  # DEBUG BF16
+    # has_nan_before = jax.tree_util.tree_reduce(  # DEBUG BF16
+    #     lambda a, b: a or b,  # DEBUG BF16
+    #     jax.tree_util.tree_map(check_nan, params),  # DEBUG BF16
+    #     False  # DEBUG BF16
+    # )  # DEBUG BF16
+    # if has_nan_before:  # DEBUG BF16
+    #     print(f"[ERROR] Params have NaN BEFORE BF16 conversion!")  # DEBUG BF16
+    #     # Find which params have NaN  # DEBUG BF16
+    #     def find_nan_params(path, x):  # DEBUG BF16
+    #         if np.any(np.isnan(x)):  # DEBUG BF16
+    #             path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
+    #             print(f"  NaN in {path_str}: shape={x.shape}, dtype={x.dtype}, min={np.nanmin(x)}, max={np.nanmax(x)}")  # DEBUG BF16
+    #     jax.tree_util.tree_map_with_path(lambda p, x: find_nan_params(p, x), params)  # DEBUG BF16
+    # else:  # DEBUG BF16
+    #     print(f"[*] ✓ No NaN in params before BF16 conversion")  # DEBUG BF16
+    #     # [DEBUG BF16] Print initial param range
+    #     params_min_init = jax.tree_util.tree_reduce(lambda a, b: np.minimum(a, b), jax.tree_util.tree_map(lambda p: np.min(p), params), np.inf)  # DEBUG BF16
+    #     params_max_init = jax.tree_util.tree_reduce(lambda a, b: np.maximum(a, b), jax.tree_util.tree_map(lambda p: np.max(p), params), -np.inf)  # DEBUG BF16
+    #     print(f"[*] Initial params range (FP32): [{params_min_init}, {params_max_init}]")  # DEBUG BF16
 
-        # [DEBUG BF16] Find which param has extreme values
-        def find_extreme_params(path, x):  # DEBUG BF16
-            min_val = float(np.min(x))  # DEBUG BF16
-            max_val = float(np.max(x))  # DEBUG BF16
-            if abs(min_val) > 100 or abs(max_val) > 100:  # DEBUG BF16
-                path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
-                print(f"  [EXTREME] {path_str}: range=[{min_val:.2f}, {max_val:.2f}], shape={x.shape}, dtype={x.dtype}")  # DEBUG BF16
-        jax.tree_util.tree_map_with_path(lambda p, x: find_extreme_params(p, x), params)  # DEBUG BF16
+    #     # [DEBUG BF16] Find which param has extreme values
+    #     def find_extreme_params(path, x):  # DEBUG BF16
+    #         min_val = float(np.min(x))  # DEBUG BF16
+    #         max_val = float(np.max(x))  # DEBUG BF16
+    #         if abs(min_val) > 100 or abs(max_val) > 100:  # DEBUG BF16
+    #             path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
+    #             print(f"  [EXTREME] {path_str}: range=[{min_val:.2f}, {max_val:.2f}], shape={x.shape}, dtype={x.dtype}")  # DEBUG BF16
+    #     jax.tree_util.tree_map_with_path(lambda p, x: find_extreme_params(p, x), params)  # DEBUG BF16
 
     use_bf16 = os.environ.get('USE_BF16', '1') == '1'
     if use_bf16:
@@ -384,25 +408,25 @@ def create_train_state(model_cls,
         params = jax.tree_util.tree_map_with_path(to_bf16_selective, params)
         print(f"[*] Selective BF16 Training: params=BF16, Lambda/D/log_step=FP32, optimizer_states=FP32")
 
-        # [DEBUG BF16] Check params AFTER BF16 conversion
-        has_nan_after = jax.tree_util.tree_reduce(  # DEBUG BF16
-            lambda a, b: a or b,  # DEBUG BF16
-            jax.tree_util.tree_map(check_nan, params),  # DEBUG BF16
-            False  # DEBUG BF16
-        )  # DEBUG BF16
-        if has_nan_after:  # DEBUG BF16
-            print(f"[ERROR] Params have NaN AFTER BF16 conversion!")  # DEBUG BF16
-            def find_nan_params(path, x):  # DEBUG BF16
-                if np.any(np.isnan(x)):  # DEBUG BF16
-                    path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
-                    print(f"  NaN in {path_str}: shape={x.shape}, dtype={x.dtype}")  # DEBUG BF16
-            jax.tree_util.tree_map_with_path(lambda p, x: find_nan_params(p, x), params)  # DEBUG BF16
-        else:  # DEBUG BF16
-            print(f"[*] ✓ No NaN in params after BF16 conversion")  # DEBUG BF16
-        # [DEBUG BF16] Print BF16 param range
-        params_min_bf16 = jax.tree_util.tree_reduce(lambda a, b: np.minimum(a, b), jax.tree_util.tree_map(lambda p: np.min(p), params), np.inf)  # DEBUG BF16
-        params_max_bf16 = jax.tree_util.tree_reduce(lambda a, b: np.maximum(a, b), jax.tree_util.tree_map(lambda p: np.max(p), params), -np.inf)  # DEBUG BF16
-        print(f"[*] BF16 params range: [{params_min_bf16}, {params_max_bf16}]")  # DEBUG BF16
+        # # [DEBUG BF16] Check params AFTER BF16 conversion
+        # has_nan_after = jax.tree_util.tree_reduce(  # DEBUG BF16
+        #     lambda a, b: a or b,  # DEBUG BF16
+        #     jax.tree_util.tree_map(check_nan, params),  # DEBUG BF16
+        #     False  # DEBUG BF16
+        # )  # DEBUG BF16
+        # if has_nan_after:  # DEBUG BF16
+        #     print(f"[ERROR] Params have NaN AFTER BF16 conversion!")  # DEBUG BF16
+        #     def find_nan_params(path, x):  # DEBUG BF16
+        #         if np.any(np.isnan(x)):  # DEBUG BF16
+        #             path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
+        #             print(f"  NaN in {path_str}: shape={x.shape}, dtype={x.dtype}")  # DEBUG BF16
+        #     jax.tree_util.tree_map_with_path(lambda p, x: find_nan_params(p, x), params)  # DEBUG BF16
+        # else:  # DEBUG BF16
+        #     print(f"[*] ✓ No NaN in params after BF16 conversion")  # DEBUG BF16
+        # # [DEBUG BF16] Print BF16 param range
+        # params_min_bf16 = jax.tree_util.tree_reduce(lambda a, b: np.minimum(a, b), jax.tree_util.tree_map(lambda p: np.min(p), params), np.inf)  # DEBUG BF16
+        # params_max_bf16 = jax.tree_util.tree_reduce(lambda a, b: np.maximum(a, b), jax.tree_util.tree_map(lambda p: np.max(p), params), -np.inf)  # DEBUG BF16
+        # print(f"[*] BF16 params range: [{params_min_bf16}, {params_max_bf16}]")  # DEBUG BF16
 
         # Print dtype distribution for verification
         dtype_counts = {}
@@ -448,17 +472,17 @@ def create_train_state(model_cls,
     # keep copy of state on each device
     print(state.params['message_encoder']['encoder']['embedding'].shape)
 
-    # [DEBUG BF16] Check state before replicate
-    print(f"[Before replicate] Lambda_im dtype: {state.params['message_encoder']['layers_1']['seq']['Lambda_im'].dtype}")  # DEBUG BF16
-    print(f"[Before replicate] B dtype: {state.params['message_encoder']['layers_1']['seq']['B'].dtype}")  # DEBUG BF16
+    # # [DEBUG BF16] Check state before replicate
+    # print(f"[Before replicate] Lambda_im dtype: {state.params['message_encoder']['layers_1']['seq']['Lambda_im'].dtype}")  # DEBUG BF16
+    # print(f"[Before replicate] B dtype: {state.params['message_encoder']['layers_1']['seq']['B'].dtype}")  # DEBUG BF16
 
     state = jax_utils.replicate(state)#, devices=global_devices)
     print(state.params['message_encoder']['encoder']['embedding'].shape)
 
     # [DEBUG BF16] Check state after replicate
-    print(f"[After replicate] Lambda_im dtype: {state.params['message_encoder']['layers_1']['seq']['Lambda_im'].dtype}")  # DEBUG BF16
-    print(f"[After replicate] Lambda_im has NaN: {jax.numpy.any(jax.numpy.isnan(state.params['message_encoder']['layers_1']['seq']['Lambda_im']))}")  # DEBUG BF16
-    print(f"[After replicate] B dtype: {state.params['message_encoder']['layers_1']['seq']['B'].dtype}")  # DEBUG BF16
+    # print(f"[After replicate] Lambda_im dtype: {state.params['message_encoder']['layers_1']['seq']['Lambda_im'].dtype}")  # DEBUG BF16
+    # print(f"[After replicate] Lambda_im has NaN: {jax.numpy.any(jax.numpy.isnan(state.params['message_encoder']['layers_1']['seq']['Lambda_im']))}")  # DEBUG BF16
+    # print(f"[After replicate] B dtype: {state.params['message_encoder']['layers_1']['seq']['B'].dtype}")  # DEBUG BF16
 
     return state
 
@@ -785,20 +809,20 @@ def train_step(
         # BF16 Mixed Precision: params are already BF16 from initialization
         # No need for tree_map here - direct use saves 30-40% overhead
 
-        # [DEBUG BF16] Check params dtype in loss_fn
-        def check_params_dtype_callback(params_tree):  # DEBUG BF16
-            lambda_im = params_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
-            b_param = params_tree['message_encoder']['layers_1']['seq']['B']  # DEBUG BF16
-            print(f"[loss_fn] Lambda_im dtype: {lambda_im.dtype}, B dtype: {b_param.dtype}")  # DEBUG BF16
-        jax.debug.callback(check_params_dtype_callback, params)  # DEBUG BF16
+        # # [DEBUG BF16] Check params dtype in loss_fn
+        # def check_params_dtype_callback(params_tree):  # DEBUG BF16
+        #     lambda_im = params_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
+        #     b_param = params_tree['message_encoder']['layers_1']['seq']['B']  # DEBUG BF16
+        #     print(f"[loss_fn] Lambda_im dtype: {lambda_im.dtype}, B dtype: {b_param.dtype}")  # DEBUG BF16
+        # jax.debug.callback(check_params_dtype_callback, params)  # DEBUG BF16
 
-        # ===== NaN检测点1: 输入参数 =====
-        params_has_nan = jax.tree_util.tree_reduce(  # mixed precision overflow debug
-            lambda a, b: a | b,  # mixed precision overflow debug
-            jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), params),  # mixed precision overflow debug
-            False  # mixed precision overflow debug
-        )  # mixed precision overflow debug
-        jax.debug.print("[NaN Check 1] Params has NaN: {}", params_has_nan)  # mixed precision overflow debug
+        # # ===== NaN检测点1: 输入参数 =====
+        # params_has_nan = jax.tree_util.tree_reduce(  # mixed precision overflow debug
+        #     lambda a, b: a | b,  # mixed precision overflow debug
+        #     jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), params),  # mixed precision overflow debug
+        #     False  # mixed precision overflow debug
+        # )  # mixed precision overflow debug
+        # jax.debug.print("[NaN Check 1] Params has NaN: {}", params_has_nan)  # mixed precision overflow debug
 
         if batchnorm:
             logits, mod_vars = state.apply_fn(
@@ -817,9 +841,9 @@ def train_step(
                 method='__call_ar__'
             )
 
-        # ===== NaN检测点2: Forward输出 =====
-        logits_has_nan = np.any(np.isnan(logits))  # mixed precision overflow debug
-        jax.debug.print("[NaN Check 2] Logits has NaN: {}, dtype: {}, range: [{}, {}]", logits_has_nan, logits.dtype, np.min(logits), np.max(logits))  # DEBUG BF16
+        # # ===== NaN检测点2: Forward输出 =====
+        # logits_has_nan = np.any(np.isnan(logits))  # mixed precision overflow debug
+        # jax.debug.print("[NaN Check 2] Logits has NaN: {}, dtype: {}, range: [{}, {}]", logits_has_nan, logits.dtype, np.min(logits), np.max(logits))  # DEBUG BF16
 
         # BF16 Mixed Precision: Cast logits back to FP32 for loss computation
         logits = logits.astype(np.float32)
@@ -843,118 +867,118 @@ def train_step(
         loss = np.mean(ce)
 
         # ===== NaN检测点3: Loss =====
-        loss_has_nan = np.isnan(loss)  # mixed precision overflow debug
-        jax.debug.print("[NaN Check 3] Loss has NaN: {}, value: {:.6f}", loss_has_nan, loss)  # mixed precision overflow debug
+        # loss_has_nan = np.isnan(loss)  # mixed precision overflow debug
+        # jax.debug.print("[NaN Check 3] Loss has NaN: {}, value: {:.6f}", loss_has_nan, loss)  # mixed precision overflow debug
 
         return loss, (mod_vars, logits,ce)
 
     (loss, (mod_vars, logits,ce)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
-    # [DEBUG BF16] Check grads dtype after backward
-    def check_grads_dtype_callback(grads_tree):  # DEBUG BF16
-        lambda_im_grad = grads_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
-        b_grad = grads_tree['message_encoder']['layers_1']['seq']['B']  # DEBUG BF16
-        print(f"[After backward] Lambda_im_grad dtype: {lambda_im_grad.dtype}, B_grad dtype: {b_grad.dtype}")  # DEBUG BF16
-    jax.debug.callback(check_grads_dtype_callback, grads)  # DEBUG BF16
+    # # [DEBUG BF16] Check grads dtype after backward
+    # def check_grads_dtype_callback(grads_tree):  # DEBUG BF16
+    #     lambda_im_grad = grads_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
+    #     b_grad = grads_tree['message_encoder']['layers_1']['seq']['B']  # DEBUG BF16
+    #     print(f"[After backward] Lambda_im_grad dtype: {lambda_im_grad.dtype}, B_grad dtype: {b_grad.dtype}")  # DEBUG BF16
+    # jax.debug.callback(check_grads_dtype_callback, grads)  # DEBUG BF16
 
-    # ===== NaN检测点4: 梯度 =====
-    grads_has_nan = jax.tree_util.tree_reduce(  # mixed precision overflow debug
-        lambda a, b: a | b,  # mixed precision overflow debug
-        jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), grads),  # mixed precision overflow debug
-        False  # mixed precision overflow debug
-    )  # mixed precision overflow debug
-    jax.debug.print("[NaN Check 4] Grads has NaN: {}", grads_has_nan)  # mixed precision overflow debug
+    # # ===== NaN检测点4: 梯度 =====
+    # grads_has_nan = jax.tree_util.tree_reduce(  # mixed precision overflow debug
+    #     lambda a, b: a | b,  # mixed precision overflow debug
+    #     jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), grads),  # mixed precision overflow debug
+    #     False  # mixed precision overflow debug
+    # )  # mixed precision overflow debug
+    # jax.debug.print("[NaN Check 4] Grads has NaN: {}", grads_has_nan)  # mixed precision overflow debug
 
-    # ===== NaN检测点5: 梯度范数 =====
-    grad_norm = np.sqrt(jax.tree_util.tree_reduce(  # mixed precision overflow debug
-        lambda a, b: a + b,  # mixed precision overflow debug
-        jax.tree_util.tree_map(lambda x: np.sum(x.astype(np.float32) ** 2), grads),  # mixed precision overflow debug
-        0.0  # mixed precision overflow debug
-    ))  # mixed precision overflow debug
-    jax.debug.print("[NaN Check 5] Grad norm: {:.6f}", grad_norm)  # mixed precision overflow debug
+    # # ===== NaN检测点5: 梯度范数 =====
+    # grad_norm = np.sqrt(jax.tree_util.tree_reduce(  # mixed precision overflow debug
+    #     lambda a, b: a + b,  # mixed precision overflow debug
+    #     jax.tree_util.tree_map(lambda x: np.sum(x.astype(np.float32) ** 2), grads),  # mixed precision overflow debug
+    #     0.0  # mixed precision overflow debug
+    # ))  # mixed precision overflow debug
+    # jax.debug.print("[NaN Check 5] Grad norm: {:.6f}", grad_norm)  # mixed precision overflow debug
 
-    # [DEBUG BF16] Record all gradient norms to JSON file for detailed analysis
-    def record_all_grads_callback(step_val, global_norm_val, grads_pytree):  # DEBUG BF16
-        """Record all gradient norms and identify large gradients"""  # DEBUG BF16
-        import json  # DEBUG BF16
+    # # [DEBUG BF16] Record all gradient norms to JSON file for detailed analysis
+    # def record_all_grads_callback(step_val, global_norm_val, grads_pytree):  # DEBUG BF16
+    #     """Record all gradient norms and identify large gradients"""  # DEBUG BF16
+    #     import json  # DEBUG BF16
 
-        # Compute per-parameter gradient norms
-        grad_norms = {}  # DEBUG BF16
-        large_grads = []  # DEBUG BF16
+    #     # Compute per-parameter gradient norms
+    #     grad_norms = {}  # DEBUG BF16
+    #     large_grads = []  # DEBUG BF16
 
-        def compute_grad_info(path, g):  # DEBUG BF16
-            path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
-            g_norm = float(np.sqrt(np.sum(g.astype(np.float32) ** 2)))  # DEBUG BF16
-            g_min = float(np.min(g))  # DEBUG BF16
-            g_max = float(np.max(g))  # DEBUG BF16
-            g_mean = float(np.mean(g.astype(np.float32)))  # DEBUG BF16
+    #     def compute_grad_info(path, g):  # DEBUG BF16
+    #         path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
+    #         g_norm = float(np.sqrt(np.sum(g.astype(np.float32) ** 2)))  # DEBUG BF16
+    #         g_min = float(np.min(g))  # DEBUG BF16
+    #         g_max = float(np.max(g))  # DEBUG BF16
+    #         g_mean = float(np.mean(g.astype(np.float32)))  # DEBUG BF16
 
-            grad_norms[path_str] = {  # DEBUG BF16
-                'norm': g_norm,  # DEBUG BF16
-                'min': g_min,  # DEBUG BF16
-                'max': g_max,  # DEBUG BF16
-                'mean': g_mean,  # DEBUG BF16
-                'shape': str(g.shape),  # DEBUG BF16
-                'dtype': str(g.dtype)  # DEBUG BF16
-            }  # DEBUG BF16
+    #         grad_norms[path_str] = {  # DEBUG BF16
+    #             'norm': g_norm,  # DEBUG BF16
+    #             'min': g_min,  # DEBUG BF16
+    #             'max': g_max,  # DEBUG BF16
+    #             'mean': g_mean,  # DEBUG BF16
+    #             'shape': str(g.shape),  # DEBUG BF16
+    #             'dtype': str(g.dtype)  # DEBUG BF16
+    #         }  # DEBUG BF16
 
-            # Flag if large (>1e6)
-            if g_norm > 1e6:  # DEBUG BF16
-                large_grads.append(path_str)  # DEBUG BF16
-                print(f"[LARGE GRAD] {path_str}: norm={g_norm:.2e}, range=[{g_min:.2e}, {g_max:.2e}]")  # DEBUG BF16
+    #         # Flag if large (>1e6)
+    #         if g_norm > 1e6:  # DEBUG BF16
+    #             large_grads.append(path_str)  # DEBUG BF16
+    #             print(f"[LARGE GRAD] {path_str}: norm={g_norm:.2e}, range=[{g_min:.2e}, {g_max:.2e}]")  # DEBUG BF16
 
-        jax.tree_util.tree_map_with_path(lambda p, g: compute_grad_info(p, g), grads_pytree)  # DEBUG BF16
+    #     jax.tree_util.tree_map_with_path(lambda p, g: compute_grad_info(p, g), grads_pytree)  # DEBUG BF16
 
-        # Save to JSON
-        record = {  # DEBUG BF16
-            'step': int(step_val),  # DEBUG BF16
-            'global_norm': float(global_norm_val),  # DEBUG BF16
-            'num_large_grads': len(large_grads),  # DEBUG BF16
-            'large_grad_params': large_grads,  # DEBUG BF16
-            'all_grad_norms': grad_norms  # DEBUG BF16
-        }  # DEBUG BF16
+    #     # Save to JSON
+    #     record = {  # DEBUG BF16
+    #         'step': int(step_val),  # DEBUG BF16
+    #         'global_norm': float(global_norm_val),  # DEBUG BF16
+    #         'num_large_grads': len(large_grads),  # DEBUG BF16
+    #         'large_grad_params': large_grads,  # DEBUG BF16
+    #         'all_grad_norms': grad_norms  # DEBUG BF16
+    #     }  # DEBUG BF16
 
-        with open('grad_analysis_debug.jsonl', 'a') as f:  # DEBUG BF16
-            f.write(json.dumps(record) + '\n')  # DEBUG BF16
+    #     with open('grad_analysis_debug.jsonl', 'a') as f:  # DEBUG BF16
+    #         f.write(json.dumps(record) + '\n')  # DEBUG BF16
 
-    jax.debug.callback(record_all_grads_callback, state.step, grad_norm, grads)  # DEBUG BF16
+    # jax.debug.callback(record_all_grads_callback, state.step, grad_norm, grads)  # DEBUG BF16
 
     # ===== 分层梯度统计 (写入JSON文件) =====
-    # 计算每个叶子节点的梯度范数
-    def compute_leaf_norm(grad):  # mixed precision overflow debug
-        return np.sqrt(np.sum(grad.astype(np.float32) ** 2))  # mixed precision overflow debug
+    # # 计算每个叶子节点的梯度范数
+    # def compute_leaf_norm(grad):  # mixed precision overflow debug
+    #     return np.sqrt(np.sum(grad.astype(np.float32) ** 2))  # mixed precision overflow debug
 
-    leaf_norms = jax.tree_util.tree_map(compute_leaf_norm, grads)  # mixed precision overflow debug
-    leaf_norms_with_path = jax.tree_util.tree_leaves_with_path(leaf_norms)  # mixed precision overflow debug
+    # leaf_norms = jax.tree_util.tree_map(compute_leaf_norm, grads)  # mixed precision overflow debug
+    # leaf_norms_with_path = jax.tree_util.tree_leaves_with_path(leaf_norms)  # mixed precision overflow debug
 
-    # 构建记录并写入文件
-    def write_grad_stats(step_val, global_norm_val, leaf_norms_with_path_val):  # mixed precision overflow debug
-        """在host端写入梯度统计到JSON文件"""  # mixed precision overflow debug
-        # 从环境变量获取精度模式
-        precision = os.environ.get('GRAD_STATS_PRECISION', 'bf16')  # mixed precision overflow debug
+    # # 构建记录并写入文件
+    # def write_grad_stats(step_val, global_norm_val, leaf_norms_with_path_val):  # mixed precision overflow debug
+    #     """在host端写入梯度统计到JSON文件"""  # mixed precision overflow debug
+    #     # 从环境变量获取精度模式
+    #     precision = os.environ.get('GRAD_STATS_PRECISION', 'bf16')  # mixed precision overflow debug
 
-        # 转换为dict: path -> norm
-        layer_norms_dict = {}  # mixed precision overflow debug
-        for path, norm in leaf_norms_with_path_val:  # mixed precision overflow debug
-            path_str = '/'.join(str(k.key) for k in path)  # mixed precision overflow debug
-            layer_norms_dict[path_str] = float(norm)  # mixed precision overflow debug
+    #     # 转换为dict: path -> norm
+    #     layer_norms_dict = {}  # mixed precision overflow debug
+    #     for path, norm in leaf_norms_with_path_val:  # mixed precision overflow debug
+    #         path_str = '/'.join(str(k.key) for k in path)  # mixed precision overflow debug
+    #         layer_norms_dict[path_str] = float(norm)  # mixed precision overflow debug
 
-        record = {  # mixed precision overflow debug
-            'step': int(step_val),  # mixed precision overflow debug
-            'precision': precision,  # mixed precision overflow debug
-            'global_norm': float(global_norm_val),  # mixed precision overflow debug
-            'layer_norms': layer_norms_dict,  # mixed precision overflow debug
-        }  # mixed precision overflow debug
+    #     record = {  # mixed precision overflow debug
+    #         'step': int(step_val),  # mixed precision overflow debug
+    #         'precision': precision,  # mixed precision overflow debug
+    #         'global_norm': float(global_norm_val),  # mixed precision overflow debug
+    #         'layer_norms': layer_norms_dict,  # mixed precision overflow debug
+    #     }  # mixed precision overflow debug
 
-        filepath = f"grad_stats_{precision}.jsonl"  # mixed precision overflow debug
-        with open(filepath, 'a') as f:  # mixed precision overflow debug
-            f.write(json.dumps(record) + '\n')  # mixed precision overflow debug
+    #     filepath = f"grad_stats_{precision}.jsonl"  # mixed precision overflow debug
+    #     with open(filepath, 'a') as f:  # mixed precision overflow debug
+    #         f.write(json.dumps(record) + '\n')  # mixed precision overflow debug
 
-    # 使用callback在host端执行文件写入
-    jax.debug.callback(write_grad_stats, state.step, grad_norm, leaf_norms_with_path)  # mixed precision overflow debug
+    # # 使用callback在host端执行文件写入
+    # jax.debug.callback(write_grad_stats, state.step, grad_norm, leaf_norms_with_path)  # mixed precision overflow debug
 
     # # ===== 梯度裁剪 (Gradient Clipping) - 必须启用防止 BF16 NaN =====
-    # # BF16 训练必须启用：即使梯度范数正常，BF16 更新仍可能产生 NaN
+    # # BF16 训练可以启用：即使梯度范数正常，BF16 更新仍可能产生 NaN
     # # 原因: BF16 精度不足以处理大参数值（如 Lambda_im=-1303）的小更新
     # MAX_GRAD_NORM = 1.0  # 标准值
     # clip_factor = np.minimum(1.0, MAX_GRAD_NORM / (grad_norm + 1e-6))  # 启用 gradient clipping
@@ -967,41 +991,41 @@ def train_step(
     grads = jax.lax.pmean(grads, axis_name="batch_devices")
     ce=jax.lax.pmean(ce,axis_name="batch_devices")
 
-    # [DEBUG BF16] Check grads before apply_gradients
-    grads_min = jax.tree_util.tree_reduce(lambda a, b: np.minimum(a, b), jax.tree_util.tree_map(lambda g: np.min(g), grads), np.inf)  # DEBUG BF16
-    grads_max = jax.tree_util.tree_reduce(lambda a, b: np.maximum(a, b), jax.tree_util.tree_map(lambda g: np.max(g), grads), -np.inf)  # DEBUG BF16
-    jax.debug.print("[Pre-Update] Grads range: [{}, {}]", grads_min, grads_max)  # DEBUG BF16
+    # # [DEBUG BF16] Check grads before apply_gradients
+    # grads_min = jax.tree_util.tree_reduce(lambda a, b: np.minimum(a, b), jax.tree_util.tree_map(lambda g: np.min(g), grads), np.inf)  # DEBUG BF16
+    # grads_max = jax.tree_util.tree_reduce(lambda a, b: np.maximum(a, b), jax.tree_util.tree_map(lambda g: np.max(g), grads), -np.inf)  # DEBUG BF16
+    # jax.debug.print("[Pre-Update] Grads range: [{}, {}]", grads_min, grads_max)  # DEBUG BF16
 
-    # [DEBUG BF16] Check params before apply_gradients
-    params_min = jax.tree_util.tree_reduce(lambda a, b: np.minimum(a, b), jax.tree_util.tree_map(lambda p: np.min(p), state.params), np.inf)  # DEBUG BF16
-    params_max = jax.tree_util.tree_reduce(lambda a, b: np.maximum(a, b), jax.tree_util.tree_map(lambda p: np.max(p), state.params), -np.inf)  # DEBUG BF16
-    jax.debug.print("[Pre-Update] Params range: [{}, {}]", params_min, params_max)  # DEBUG BF16
+    # # [DEBUG BF16] Check params before apply_gradients
+    # params_min = jax.tree_util.tree_reduce(lambda a, b: np.minimum(a, b), jax.tree_util.tree_map(lambda p: np.min(p), state.params), np.inf)  # DEBUG BF16
+    # params_max = jax.tree_util.tree_reduce(lambda a, b: np.maximum(a, b), jax.tree_util.tree_map(lambda p: np.max(p), state.params), -np.inf)  # DEBUG BF16
+    # jax.debug.print("[Pre-Update] Params range: [{}, {}]", params_min, params_max)  # DEBUG BF16
 
-    # [DEBUG BF16] Check optimizer state (Adam m, v) before update
-    # Adam states should be FP32 even if params are BF16
-    def check_opt_state_callback(opt_state_tree):  # DEBUG BF16
-        try:  # DEBUG BF16
-            # Access Adam state for 'ssm' group (Lambda_im, log_step)
-            ssm_state = opt_state_tree.inner_states['ssm'].inner_state  # DEBUG BF16
-            # Check mu (first moment) dtype
-            if hasattr(ssm_state, 'mu'):  # DEBUG BF16
-                print(f"[Optimizer] ssm group mu dtype: {type(ssm_state.mu)}")  # DEBUG BF16
-            elif hasattr(ssm_state, 'count'):  # DEBUG BF16
-                print(f"[Optimizer] ssm group structure: {type(ssm_state)}")  # DEBUG BF16
-        except Exception as e:  # DEBUG BF16
-            print(f"[Optimizer] Cannot access structure: {e}")  # DEBUG BF16
-    jax.debug.callback(check_opt_state_callback, state.opt_state)  # DEBUG BF16
+    # # [DEBUG BF16] Check optimizer state (Adam m, v) before update
+    # # Adam states should be FP32 even if params are BF16
+    # def check_opt_state_callback(opt_state_tree):  # DEBUG BF16
+    #     try:  # DEBUG BF16
+    #         # Access Adam state for 'ssm' group (Lambda_im, log_step)
+    #         ssm_state = opt_state_tree.inner_states['ssm'].inner_state  # DEBUG BF16
+    #         # Check mu (first moment) dtype
+    #         if hasattr(ssm_state, 'mu'):  # DEBUG BF16
+    #             print(f"[Optimizer] ssm group mu dtype: {type(ssm_state.mu)}")  # DEBUG BF16
+    #         elif hasattr(ssm_state, 'count'):  # DEBUG BF16
+    #             print(f"[Optimizer] ssm group structure: {type(ssm_state)}")  # DEBUG BF16
+    #     except Exception as e:  # DEBUG BF16
+    #         print(f"[Optimizer] Cannot access structure: {e}")  # DEBUG BF16
+    # jax.debug.callback(check_opt_state_callback, state.opt_state)  # DEBUG BF16
 
-    # [DEBUG BF16] Sample a few params and grads before update
-    def sample_params_grads(params_tree, grads_tree):  # DEBUG BF16
-        # Sample message_encoder/layers_1/seq/Lambda_im (FP32 param that becomes NaN)
-        try:  # DEBUG BF16
-            lambda_im_param = params_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
-            lambda_im_grad = grads_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
-            print(f"[Sample Before Update] Lambda_im: param range=[{np.min(lambda_im_param):.4f}, {np.max(lambda_im_param):.4f}], grad range=[{np.min(lambda_im_grad):.6f}, {np.max(lambda_im_grad):.6f}]")  # DEBUG BF16
-        except:  # DEBUG BF16
-            pass  # DEBUG BF16
-    jax.debug.callback(sample_params_grads, state.params, grads)  # DEBUG BF16
+    # # [DEBUG BF16] Sample a few params and grads before update
+    # def sample_params_grads(params_tree, grads_tree):  # DEBUG BF16
+    #     # Sample message_encoder/layers_1/seq/Lambda_im (FP32 param that becomes NaN)
+    #     try:  # DEBUG BF16
+    #         lambda_im_param = params_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
+    #         lambda_im_grad = grads_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
+    #         print(f"[Sample Before Update] Lambda_im: param range=[{np.min(lambda_im_param):.4f}, {np.max(lambda_im_param):.4f}], grad range=[{np.min(lambda_im_grad):.6f}, {np.max(lambda_im_grad):.6f}]")  # DEBUG BF16
+    #     except:  # DEBUG BF16
+    #         pass  # DEBUG BF16
+    # jax.debug.callback(sample_params_grads, state.params, grads)  # DEBUG BF16
 
     # ========================================================================
     # Workaround for multi_transform NaN bug with mixed dtype
@@ -1029,31 +1053,31 @@ def train_step(
     # Run optimizer in FP32
     updates, new_opt_state = state.tx.update(grads_fp32, state.opt_state, params_fp32)  # Workaround for multi_transform NaN
 
-    # [DEBUG BF16] Check updates after tx.update() - per group
-    def check_updates_detailed(updates_tree):  # DEBUG BF16
-        # Check ssm group (Lambda_im, should be updated by Adam)
-        try:  # DEBUG BF16
-            lambda_im_update = updates_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
-            print(f"[After tx.update] Lambda_im (ssm group): range=[{np.min(lambda_im_update):.6f}, {np.max(lambda_im_update):.6f}], dtype={lambda_im_update.dtype}, has NaN={np.any(np.isnan(lambda_im_update))}")  # DEBUG BF16
-        except Exception as e:  # DEBUG BF16
-            print(f"[After tx.update] Error Lambda_im: {e}")  # DEBUG BF16
+    # # [DEBUG BF16] Check updates after tx.update() - per group
+    # def check_updates_detailed(updates_tree):  # DEBUG BF16
+    #     # Check ssm group (Lambda_im, should be updated by Adam)
+    #     try:  # DEBUG BF16
+    #         lambda_im_update = updates_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
+    #         print(f"[After tx.update] Lambda_im (ssm group): range=[{np.min(lambda_im_update):.6f}, {np.max(lambda_im_update):.6f}], dtype={lambda_im_update.dtype}, has NaN={np.any(np.isnan(lambda_im_update))}")  # DEBUG BF16
+    #     except Exception as e:  # DEBUG BF16
+    #         print(f"[After tx.update] Error Lambda_im: {e}")  # DEBUG BF16
 
-        # Check ssm group (B, BF16 complex param)
-        try:  # DEBUG BF16
-            b_update = updates_tree['message_encoder']['layers_1']['seq']['B']  # DEBUG BF16
-            b_update_norm = np.sqrt(np.sum(b_update.astype(np.float32) ** 2))  # DEBUG BF16
-            print(f"[After tx.update] B (ssm group): norm={b_update_norm:.6f}, dtype={b_update.dtype}, has NaN={np.any(np.isnan(b_update))}")  # DEBUG BF16
-        except Exception as e:  # DEBUG BF16
-            print(f"[After tx.update] Error B: {e}")  # DEBUG BF16
+    #     # Check ssm group (B, BF16 complex param)
+    #     try:  # DEBUG BF16
+    #         b_update = updates_tree['message_encoder']['layers_1']['seq']['B']  # DEBUG BF16
+    #         b_update_norm = np.sqrt(np.sum(b_update.astype(np.float32) ** 2))  # DEBUG BF16
+    #         print(f"[After tx.update] B (ssm group): norm={b_update_norm:.6f}, dtype={b_update.dtype}, has NaN={np.any(np.isnan(b_update))}")  # DEBUG BF16
+    #     except Exception as e:  # DEBUG BF16
+    #         print(f"[After tx.update] Error B: {e}")  # DEBUG BF16
 
-        # Check regular group (Dense kernel, BF16)
-        try:  # DEBUG BF16
-            kernel_update = updates_tree['message_encoder']['layers_1']['out2']['kernel']  # DEBUG BF16
-            kernel_norm = np.sqrt(np.sum(kernel_update.astype(np.float32) ** 2))  # DEBUG BF16
-            print(f"[After tx.update] out2/kernel (regular group): norm={kernel_norm:.6f}, dtype={kernel_update.dtype}, has NaN={np.any(np.isnan(kernel_update))}")  # DEBUG BF16
-        except Exception as e:  # DEBUG BF16
-            print(f"[After tx.update] Error kernel: {e}")  # DEBUG BF16
-    jax.debug.callback(check_updates_detailed, updates)  # DEBUG BF16
+    #     # Check regular group (Dense kernel, BF16)
+    #     try:  # DEBUG BF16
+    #         kernel_update = updates_tree['message_encoder']['layers_1']['out2']['kernel']  # DEBUG BF16
+    #         kernel_norm = np.sqrt(np.sum(kernel_update.astype(np.float32) ** 2))  # DEBUG BF16
+    #         print(f"[After tx.update] out2/kernel (regular group): norm={kernel_norm:.6f}, dtype={kernel_update.dtype}, has NaN={np.any(np.isnan(kernel_update))}")  # DEBUG BF16
+    #     except Exception as e:  # DEBUG BF16
+    #         print(f"[After tx.update] Error kernel: {e}")  # DEBUG BF16
+    # jax.debug.callback(check_updates_detailed, updates)  # DEBUG BF16
 
     # Step 2: optax.apply_updates() - apply updates to params (in FP32)
     new_params_fp32 = optax.apply_updates(params_fp32, updates)  # Workaround for multi_transform NaN
@@ -1067,14 +1091,14 @@ def train_step(
 
     jax.debug.print("[Optimizer Workaround] Cast new_params back to original dtypes")  # DEBUG BF16
 
-    # [DEBUG BF16] Check params after apply_updates
-    def check_after_apply_updates(new_params_tree):  # DEBUG BF16
-        try:  # DEBUG BF16
-            lambda_im_new = new_params_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
-            print(f"[After apply_updates] Lambda_im: range=[{np.min(lambda_im_new):.4f}, {np.max(lambda_im_new):.4f}], has NaN={np.any(np.isnan(lambda_im_new))}")  # DEBUG BF16
-        except:  # DEBUG BF16
-            pass  # DEBUG BF16
-    jax.debug.callback(check_after_apply_updates, new_params)  # DEBUG BF16
+    # # [DEBUG BF16] Check params after apply_updates
+    # def check_after_apply_updates(new_params_tree):  # DEBUG BF16
+    #     try:  # DEBUG BF16
+    #         lambda_im_new = new_params_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
+    #         print(f"[After apply_updates] Lambda_im: range=[{np.min(lambda_im_new):.4f}, {np.max(lambda_im_new):.4f}], has NaN={np.any(np.isnan(lambda_im_new))}")  # DEBUG BF16
+    #     except:  # DEBUG BF16
+    #         pass  # DEBUG BF16
+    # jax.debug.callback(check_after_apply_updates, new_params)  # DEBUG BF16
 
     # Step 3: Replace state
     if batchnorm:
@@ -1083,14 +1107,14 @@ def train_step(
     else:
         state = state.replace(step=state.step + 1, params=new_params, opt_state=new_opt_state)
 
-    # [DEBUG BF16] Sample after full update
-    def sample_params_after(params_tree):  # DEBUG BF16
-        try:  # DEBUG BF16
-            lambda_im_param = params_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
-            print(f"[Sample After Update] Lambda_im: param range=[{np.min(lambda_im_param):.4f}, {np.max(lambda_im_param):.4f}], has NaN={np.any(np.isnan(lambda_im_param))}")  # DEBUG BF16
-        except:  # DEBUG BF16
-            pass  # DEBUG BF16
-    jax.debug.callback(sample_params_after, state.params)  # DEBUG BF16
+    # # [DEBUG BF16] Sample after full update
+    # def sample_params_after(params_tree):  # DEBUG BF16
+    #     try:  # DEBUG BF16
+    #         lambda_im_param = params_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
+    #         print(f"[Sample After Update] Lambda_im: param range=[{np.min(lambda_im_param):.4f}, {np.max(lambda_im_param):.4f}], has NaN={np.any(np.isnan(lambda_im_param))}")  # DEBUG BF16
+    #     except:  # DEBUG BF16
+    #         pass  # DEBUG BF16
+    # jax.debug.callback(sample_params_after, state.params)  # DEBUG BF16
 
     # ===== NaN检测点6: 更新后参数 + 自动停止训练 =====
     new_params_has_nan = jax.tree_util.tree_reduce(  # NaN detection
