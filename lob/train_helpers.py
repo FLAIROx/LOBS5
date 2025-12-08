@@ -193,28 +193,38 @@ def create_train_state(model_cls,
             SSM parameters with no weight decay.
         """
         print("configuring standard optimization setup")
-        if dt_global:
-            ssm_fn = map_nested_fn(
-                lambda k, _: "ssm"
-                if k in ["B", "Lambda_re", "Lambda_im", "norm"]
-                else ("none" if k in [] else "regular")
-            )
 
-        else:
-            ssm_fn = map_nested_fn(
-                lambda k, _: "ssm"
-                if k in ["B", "Lambda_re", "Lambda_im", "log_step", "norm"]
-                else ("none" if k in [] else "regular")
+        # [DEBUG BF16] Test: Use single AdamW instead of multi_transform
+        # multi_transform + inject_hyperparams + mixed dtype (FP32+BF16) causes NaN in tx.update()
+        # Temporary workaround: use single optimizer for all params
+        use_single_optimizer = os.environ.get('USE_SINGLE_OPTIMIZER', '0') == '1'  # DEBUG BF16
+
+        if use_single_optimizer:  # DEBUG BF16
+            print("[DEBUG] Using single AdamW optimizer (no multi_transform)")  # DEBUG BF16
+            tx = optax.adamw(learning_rate=lr, weight_decay=weight_decay)  # DEBUG BF16
+        else:  # DEBUG BF16
+            if dt_global:
+                ssm_fn = map_nested_fn(
+                    lambda k, _: "ssm"
+                    if k in ["B", "Lambda_re", "Lambda_im", "norm"]
+                    else ("none" if k in [] else "regular")
+                )
+
+            else:
+                ssm_fn = map_nested_fn(
+                    lambda k, _: "ssm"
+                    if k in ["B", "Lambda_re", "Lambda_im", "log_step", "norm"]
+                    else ("none" if k in [] else "regular")
+                )
+            tx = optax.multi_transform(
+                {
+                    "none": optax.inject_hyperparams(optax.sgd)(learning_rate=0.0),
+                    "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
+                    "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
+                                                                     weight_decay=weight_decay),
+                },
+                ssm_fn,
             )
-        tx = optax.multi_transform(
-            {
-                "none": optax.inject_hyperparams(optax.sgd)(learning_rate=0.0),
-                "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
-                "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
-                                                                 weight_decay=weight_decay),
-            },
-            ssm_fn,
-        )
     elif opt_config in ["BandCdecay"]:
         """This option applies weight decay to both C and B. Note we still apply the
            ssm learning rate to B.
@@ -414,8 +424,18 @@ def create_train_state(model_cls,
 
     # keep copy of state on each device
     print(state.params['message_encoder']['encoder']['embedding'].shape)
+
+    # [DEBUG BF16] Check state before replicate
+    print(f"[Before replicate] Lambda_im dtype: {state.params['message_encoder']['layers_1']['seq']['Lambda_im'].dtype}")  # DEBUG BF16
+    print(f"[Before replicate] B dtype: {state.params['message_encoder']['layers_1']['seq']['B'].dtype}")  # DEBUG BF16
+
     state = jax_utils.replicate(state)#, devices=global_devices)
     print(state.params['message_encoder']['encoder']['embedding'].shape)
+
+    # [DEBUG BF16] Check state after replicate
+    print(f"[After replicate] Lambda_im dtype: {state.params['message_encoder']['layers_1']['seq']['Lambda_im'].dtype}")  # DEBUG BF16
+    print(f"[After replicate] Lambda_im has NaN: {jax.numpy.any(jax.numpy.isnan(state.params['message_encoder']['layers_1']['seq']['Lambda_im']))}")  # DEBUG BF16
+    print(f"[After replicate] B dtype: {state.params['message_encoder']['layers_1']['seq']['B'].dtype}")  # DEBUG BF16
 
     return state
 
@@ -936,7 +956,18 @@ def train_step(
 
     # [DEBUG BF16] Check optimizer state (Adam m, v) before update
     # Adam states should be FP32 even if params are BF16
-    # jax.debug.print("[Pre-Update] Optimizer state structure: {}", type(state.opt_state))  # DEBUG BF16
+    def check_opt_state_callback(opt_state_tree):  # DEBUG BF16
+        try:  # DEBUG BF16
+            # Access Adam state for 'ssm' group (Lambda_im, log_step)
+            ssm_state = opt_state_tree.inner_states['ssm'].inner_state  # DEBUG BF16
+            # Check mu (first moment) dtype
+            if hasattr(ssm_state, 'mu'):  # DEBUG BF16
+                print(f"[Optimizer] ssm group mu dtype: {type(ssm_state.mu)}")  # DEBUG BF16
+            elif hasattr(ssm_state, 'count'):  # DEBUG BF16
+                print(f"[Optimizer] ssm group structure: {type(ssm_state)}")  # DEBUG BF16
+        except Exception as e:  # DEBUG BF16
+            print(f"[Optimizer] Cannot access structure: {e}")  # DEBUG BF16
+    jax.debug.callback(check_opt_state_callback, state.opt_state)  # DEBUG BF16
 
     # [DEBUG BF16] Sample a few params and grads before update
     def sample_params_grads(params_tree, grads_tree):  # DEBUG BF16
@@ -949,13 +980,67 @@ def train_step(
             pass  # DEBUG BF16
     jax.debug.callback(sample_params_grads, state.params, grads)  # DEBUG BF16
 
+    # [DEBUG BF16] Manually decompose apply_gradients to find where NaN occurs
+    # Step 1: tx.update() - compute updates from gradients
+    def check_before_tx_update(opt_state_tree):  # DEBUG BF16
+        print("[DEBUG] About to call tx.update()")  # DEBUG BF16
+        # Check if opt_state itself has NaN
+        def check_opt_nan(x):  # DEBUG BF16
+            if hasattr(x, 'dtype') and np.issubdtype(x.dtype, np.floating):  # DEBUG BF16
+                return np.any(np.isnan(x))  # DEBUG BF16
+            return False  # DEBUG BF16
+        has_nan_in_opt = jax.tree_util.tree_reduce(lambda a, b: a or b, jax.tree_util.tree_map(check_opt_nan, opt_state_tree), False)  # DEBUG BF16
+        print(f"[DEBUG] Optimizer state has NaN before tx.update: {has_nan_in_opt}")  # DEBUG BF16
+    jax.debug.callback(check_before_tx_update, state.opt_state)  # DEBUG BF16
+
+    updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params)
+
+    # [DEBUG BF16] Check updates after tx.update() - per group
+    def check_updates_detailed(updates_tree):  # DEBUG BF16
+        # Check ssm group (Lambda_im, should be updated by Adam)
+        try:  # DEBUG BF16
+            lambda_im_update = updates_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
+            print(f"[After tx.update] Lambda_im (ssm group): range=[{np.min(lambda_im_update):.6f}, {np.max(lambda_im_update):.6f}], dtype={lambda_im_update.dtype}, has NaN={np.any(np.isnan(lambda_im_update))}")  # DEBUG BF16
+        except Exception as e:  # DEBUG BF16
+            print(f"[After tx.update] Error Lambda_im: {e}")  # DEBUG BF16
+
+        # Check ssm group (B, BF16 complex param)
+        try:  # DEBUG BF16
+            b_update = updates_tree['message_encoder']['layers_1']['seq']['B']  # DEBUG BF16
+            b_update_norm = np.sqrt(np.sum(b_update.astype(np.float32) ** 2))  # DEBUG BF16
+            print(f"[After tx.update] B (ssm group): norm={b_update_norm:.6f}, dtype={b_update.dtype}, has NaN={np.any(np.isnan(b_update))}")  # DEBUG BF16
+        except Exception as e:  # DEBUG BF16
+            print(f"[After tx.update] Error B: {e}")  # DEBUG BF16
+
+        # Check regular group (Dense kernel, BF16)
+        try:  # DEBUG BF16
+            kernel_update = updates_tree['message_encoder']['layers_1']['out2']['kernel']  # DEBUG BF16
+            kernel_norm = np.sqrt(np.sum(kernel_update.astype(np.float32) ** 2))  # DEBUG BF16
+            print(f"[After tx.update] out2/kernel (regular group): norm={kernel_norm:.6f}, dtype={kernel_update.dtype}, has NaN={np.any(np.isnan(kernel_update))}")  # DEBUG BF16
+        except Exception as e:  # DEBUG BF16
+            print(f"[After tx.update] Error kernel: {e}")  # DEBUG BF16
+    jax.debug.callback(check_updates_detailed, updates)  # DEBUG BF16
+
+    # Step 2: optax.apply_updates() - apply updates to params
+    new_params = optax.apply_updates(state.params, updates)
+
+    # [DEBUG BF16] Check params after apply_updates
+    def check_after_apply_updates(new_params_tree):  # DEBUG BF16
+        try:  # DEBUG BF16
+            lambda_im_new = new_params_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16
+            print(f"[After apply_updates] Lambda_im: range=[{np.min(lambda_im_new):.4f}, {np.max(lambda_im_new):.4f}], has NaN={np.any(np.isnan(lambda_im_new))}")  # DEBUG BF16
+        except:  # DEBUG BF16
+            pass  # DEBUG BF16
+    jax.debug.callback(check_after_apply_updates, new_params)  # DEBUG BF16
+
+    # Step 3: Replace state
     if batchnorm:
         mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
-        state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
+        state = state.replace(step=state.step + 1, params=new_params, opt_state=new_opt_state, batch_stats=mod_vars["batch_stats"])
     else:
-        state = state.apply_gradients(grads=grads)
+        state = state.replace(step=state.step + 1, params=new_params, opt_state=new_opt_state)
 
-    # [DEBUG BF16] Sample after update
+    # [DEBUG BF16] Sample after full update
     def sample_params_after(params_tree):  # DEBUG BF16
         try:  # DEBUG BF16
             lambda_im_param = params_tree['message_encoder']['layers_1']['seq']['Lambda_im']  # DEBUG BF16

@@ -43,6 +43,13 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_nv
 export USE_BF16=${USE_BF16:-1}
 export GRAD_STATS_PRECISION=${GRAD_STATS_PRECISION:-bf16_gpt_init}
 echo "[Wrapper] Precision mode: USE_BF16=$USE_BF16, GRAD_STATS_PRECISION=$GRAD_STATS_PRECISION"
+
+# **************** Optimizer Configuration ****************
+# USE_SINGLE_OPTIMIZER=1: Use single AdamW (workaround for multi_transform NaN bug)
+# USE_SINGLE_OPTIMIZER=0 (default): Use multi_transform (ssm/regular groups)
+export USE_SINGLE_OPTIMIZER=${USE_SINGLE_OPTIMIZER:-0}
+echo "[Wrapper] Optimizer mode: USE_SINGLE_OPTIMIZER=$USE_SINGLE_OPTIMIZER"
+# **************** Optimizer Configuration ****************
 # **************** BF16 vs FP32 梯度对比测试 ****************
 
 # **************** MULTI NODES COMMUNICATIONS OPTIMIZATION ****************
