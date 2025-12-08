@@ -118,6 +118,26 @@ nvidia-smi --list-gpus | head -4
 MODEL_PRESET=${MODEL_PRESET:-1B}
 echo "[Wrapper] Model preset: $MODEL_PRESET"
 
+# **************** Data Mode Configuration ****************
+# DATA_MODE: 'preproc' (default) or 'encoded'
+#   preproc: Load pre-processed data, encode on-the-fly (more flexible)
+#   encoded: Load pre-encoded data (faster, less CPU overhead)
+# Usage: DATA_MODE=encoded MODEL_PRESET=55M sbatch ...
+DATA_MODE=${DATA_MODE:-preproc}
+echo "[Wrapper] Data mode: DATA_MODE=$DATA_MODE"
+
+# Set data directories based on DATA_MODE
+if [ "$DATA_MODE" = "encoded" ]; then
+    DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021'
+    TEST_DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_encoded'
+else
+    DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021'
+    TEST_DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc'
+fi
+echo "[Wrapper] Train dir: $DIR_NAME"
+echo "[Wrapper] Test dir: $TEST_DIR_NAME"
+# **************** Data Mode Configuration ****************
+
 # Run Python with all arguments passed through
 # -u: unbuffered output for real-time logging
 # -B: don't write .pyc files
@@ -127,12 +147,9 @@ python -u -B run_train.py \
         --model_preset=$MODEL_PRESET \
         --C_init=trunc_standard_normal --prenorm=True --batchnorm=False --bidirectional=False \
         --dataset=lobster-prediction --merging=padded \
-        --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021' \
-        --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_encoded' \
-        --data_mode='encoded' \
-        --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021' \
-        --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc' \
-        --data_mode='preproc' \
+        --dir_name="$DIR_NAME" \
+        --test_dir_name="$TEST_DIR_NAME" \
+        --data_mode="$DATA_MODE" \
         --clip_eigs=True --activation_fn=half_glu1 \
         --dt_global=False --epochs=100 --jax_seed=42 \
         --opt_config=standard --p_dropout=0.0 \
