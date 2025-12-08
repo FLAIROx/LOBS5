@@ -18,6 +18,7 @@
 #   MODEL_PRESET=1.4B sbatch --nodes=2 --time=02:00:00 isambard.batch
 #
 # Available presets: 1.4B, 1B, 300M, 55M
+# MODEL_PRESET=55M sbatch  --nodes=20 --time=23:59:00 /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/bin/run_experiments/isambard.batch
 # ============================================
 
 # Model preset (default: 1B)

@@ -149,6 +149,7 @@ def create_lobster_prediction_dataset(
 			seed=seed,
 			batch_size=effective_bsz,
 			shuffle=False,
+			drop_last=True,
 			sampler=sam_val,
 			num_workers=0,
 			worker_init_fn=None)
@@ -168,6 +169,7 @@ def create_lobster_prediction_dataset(
 			seed=seed,
 			batch_size=effective_bsz,
 			shuffle=False,
+			drop_last=True,
 			sampler=sam_test,
 			num_workers=0,
 			worker_init_fn=None)

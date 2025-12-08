@@ -55,7 +55,7 @@ def make_data_loader(dset,
 
 	if sampler is not None:
 		shuffle = False
-		drop_last = False
+		# Keep drop_last as specified by caller (don't override to False)
 
 	# Generate the dataloaders.
 	return torch.utils.data.DataLoader(
