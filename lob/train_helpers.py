@@ -1092,23 +1092,28 @@ def train_step(
             pass  # DEBUG BF16
     jax.debug.callback(sample_params_after, state.params)  # DEBUG BF16
 
-    # ===== NaN检测点6: 更新后参数 =====
-    new_params_has_nan = jax.tree_util.tree_reduce(  # mixed precision overflow debug
-        lambda a, b: a | b,  # mixed precision overflow debug
-        jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), state.params),  # mixed precision overflow debug
-        False  # mixed precision overflow debug
-    )  # mixed precision overflow debug
-    jax.debug.print("[NaN Check 6] Updated params has NaN: {}", new_params_has_nan)  # mixed precision overflow debug
+    # ===== NaN检测点6: 更新后参数 + 自动停止训练 =====
+    new_params_has_nan = jax.tree_util.tree_reduce(  # NaN detection
+        lambda a, b: a | b,  # NaN detection
+        jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), state.params),  # NaN detection
+        False  # NaN detection
+    )  # NaN detection
+    jax.debug.print("[NaN Check 6] Updated params has NaN: {}", new_params_has_nan)  # NaN detection
 
-    # [DEBUG BF16] If NaN, find which params (use debug.callback to avoid tracer bool conversion)
-    def find_nan_params_callback(has_nan_val, params_pytree):  # DEBUG BF16
-        if has_nan_val:  # This runs on host, not traced
-            def check_nan(path, x):  # DEBUG BF16
-                if np.any(np.isnan(x)):  # DEBUG BF16
-                    path_str = '/'.join(str(k.key) for k in path)  # DEBUG BF16
-                    print(f"[Post-Update NaN] {path_str}: shape={x.shape}, dtype={x.dtype}")  # DEBUG BF16
-            jax.tree_util.tree_map_with_path(lambda p, x: check_nan(p, x), params_pytree)  # DEBUG BF16
-    jax.debug.callback(find_nan_params_callback, new_params_has_nan, state.params)  # DEBUG BF16
+    # Auto-stop training on NaN (no JIT overhead, runs on host)
+    def halt_on_nan(has_nan_val, step_val, params_pytree):  # NaN auto-stop
+        if has_nan_val:  # NaN auto-stop
+            print(f"\n{'='*70}")  # NaN auto-stop
+            print(f"[FATAL] NaN detected in params after step {step_val}! Stopping training.")  # NaN auto-stop
+            print(f"{'='*70}\n")  # NaN auto-stop
+            # Find which params have NaN
+            def check_nan(path, x):  # NaN auto-stop
+                if np.any(np.isnan(x)):  # NaN auto-stop
+                    path_str = '/'.join(str(k.key) for k in path)  # NaN auto-stop
+                    print(f"  NaN in: {path_str}, shape={x.shape}, dtype={x.dtype}")  # NaN auto-stop
+            jax.tree_util.tree_map_with_path(lambda p, x: check_nan(p, x), params_pytree)  # NaN auto-stop
+            raise RuntimeError(f"Training stopped: NaN in params at step {step_val}")  # NaN auto-stop
+    jax.debug.callback(halt_on_nan, new_params_has_nan, state.step, state.params)  # NaN auto-stop
 
     #return loss, mod_vars, grads, state
     return state, loss, ce, logits
