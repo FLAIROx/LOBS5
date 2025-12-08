@@ -28,6 +28,8 @@ def _lobster_worker_init_fn(worker_id):
 	# Force JAX to use CPU in worker processes to avoid CUDA device conflicts
 	# Workers only load data (CPU task), main process handles GPU training
 	os.environ['JAX_PLATFORMS'] = 'cpu'
+	# Prevent PyTorch/CUDA from initializing in worker processes
+	os.environ['CUDA_VISIBLE_DEVICES'] = ''
 
 	from .lobster_dataloader import LOBSTER
 	# These will be set by create_lobster_prediction_dataset

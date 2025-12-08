@@ -127,9 +127,9 @@ python -u -B run_train.py \
         --model_preset=$MODEL_PRESET \
         --C_init=trunc_standard_normal --prenorm=True --batchnorm=False --bidirectional=False \
         --dataset=lobster-prediction --merging=padded \
-        --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG' \
-        --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_encoded' \
-        --data_mode='encoded' \
+        --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021' \
+        --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc' \
+        --data_mode='preproc' \
         --clip_eigs=True --activation_fn=half_glu1 \
         --dt_global=False --epochs=20 --jax_seed=42 \
         --opt_config=standard --p_dropout=0.0 \
@@ -146,6 +146,10 @@ python -u -B run_train.py \
         --USE_WANDB=True \
         --wandb_entity=kang-oxford
 
+
+        # --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG' \
+        # --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_encoded' \
+        # --data_mode='encoded' \
 
         # --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021' \
         # --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc' \
