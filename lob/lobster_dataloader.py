@@ -347,7 +347,9 @@ class LOBSTER_Dataset(Dataset):
             inference=False,
             limit_seq_per_file=math.inf,
             # data_mode: 'preproc' (encode on-the-fly) or 'encoded' (load pre-encoded)
-            data_mode='preproc'
+            data_mode='preproc',
+            # token_mode: 22 (default, base-10000 size) or 24 (base-100 size)
+            token_mode=22
             ) -> None:
 
 
@@ -355,17 +357,23 @@ class LOBSTER_Dataset(Dataset):
         assert not (use_simple_book and book_transform)
         assert data_mode in ['preproc', 'encoded'], f"data_mode must be 'preproc' or 'encoded', got '{data_mode}'"
         assert not (data_mode == 'encoded' and return_raw_msgs), "return_raw_msgs not supported with data_mode='encoded'"
+        assert token_mode in [22, 24], f"token_mode must be 22 or 24, got {token_mode}"
 
         # shift book state by 1 for inference tasks,
         # because the most recent message is not masked (=complete)
         # and the new book state is already available
         self.inference = inference
         self.data_mode = data_mode
+        self.token_mode = token_mode
+
+        # Set Message_Tokenizer mode (affects MSG_LEN, TOK_LENS, etc.)
+        Message_Tokenizer.set_token_mode(token_mode)
 
         # Print informative message for pre-encoded mode
         if data_mode == 'encoded':
-            print(f"[*] Using pre-encoded data mode")
-            print(f"    - Message: expecting shape (N, 24)")
+            expected_msg_len = Message_Tokenizer.get_msg_len(token_mode)
+            print(f"[*] Using pre-encoded data mode (token_mode={token_mode})")
+            print(f"    - Message: expecting shape (N, {expected_msg_len})")
             if book_transform and book_files is not None:
                 print(f"    - Orderbook: expecting pre-transformed shape (N, {book_depth + 3})")
 
@@ -386,7 +394,7 @@ class LOBSTER_Dataset(Dataset):
 
         self.n_cache_files = n_cache_files
         self._message_cache = OrderedDict()
-        self.vocab = Vocab()
+        self.vocab = Vocab(token_mode=token_mode)
         self.mask_fn = mask_fn
         if self.mask_fn==LOBSTER_Dataset.no_mask or self.mask_fn==LOBSTER_Dataset.inference_mask:
             self.seq_len=self.n_messages* Message_Tokenizer.MSG_LEN
@@ -474,18 +482,20 @@ class LOBSTER_Dataset(Dataset):
             X_raw = None  # Not available in encoded mode unless needed
 
             # Validate shape for encoded data
-            if X.shape[1] != 24:  # Message_Tokenizer.MSG_LEN updated for base-100 size encoding
+            expected_msg_len = Message_Tokenizer.MSG_LEN  # Dynamic based on token_mode
+            if X.shape[1] != expected_msg_len:
                 raise ValueError(
                     f"Pre-encoded message data has {X.shape[1]} tokens per message, "
-                    f"but expected 24. Data may be raw (14 columns) instead of encoded. "
+                    f"but expected {expected_msg_len} (token_mode={self.token_mode}). "
+                    f"Data may be raw (14 columns) instead of encoded. "
                     f"Use data_mode='preproc' for raw data."
                 )
         else:  # data_mode == 'preproc'
             # Data is raw (shape: N, 14), need to encode
             X_raw = np.array(X[seq_start: seq_end])
             # print(X_raw[0])
-            # encode message
-            X = encode_msgs(X_raw, self.vocab.ENCODING)
+            # encode message (using token_mode from self.vocab)
+            X = encode_msgs(X_raw, self.vocab.ENCODING, token_mode=self.token_mode)
         # print(f"lobster_dataloader.py: First loaded message from batch is \n  {X_raw[0]}\n which is \n {X[0]}\nafter encoding.")
 
         
@@ -750,6 +760,7 @@ class LOBSTER(SequenceDataset):
             "debug_overfit": False,
             "test_data_dir": None,
             "data_mode": "preproc",
+            "token_mode": 22,  # 22 (default, base-10000 size) or 24 (base-100 size)
         }
 
     def setup(self):
@@ -858,6 +869,7 @@ class LOBSTER(SequenceDataset):
             book_depth=self.book_depth,
             return_raw_msgs=self.return_raw_msgs,
             data_mode=self.data_mode,
+            token_mode=self.token_mode,
         )
         #self.d_input = self.dataset_train.shape[-1]
         self.d_input = len(self.dataset_train.vocab)
@@ -884,6 +896,7 @@ class LOBSTER(SequenceDataset):
             book_depth=self.book_depth,
             return_raw_msgs=self.return_raw_msgs,
             data_mode=self.data_mode,
+            token_mode=self.token_mode,
         )
 
         self.dataset_test = LOBSTER_Dataset(
@@ -899,6 +912,7 @@ class LOBSTER(SequenceDataset):
             book_depth=self.book_depth,
             return_raw_msgs=self.return_raw_msgs,
             data_mode=self.data_mode,
+            token_mode=self.token_mode,
         )
 
     def reset_train_offsets(self):
@@ -922,6 +936,7 @@ class LOBSTER(SequenceDataset):
             book_depth=self.book_depth,
             return_raw_msgs=self.return_raw_msgs,
             data_mode=self.data_mode,
+            token_mode=self.token_mode,
         )
 
     def __str__(self):

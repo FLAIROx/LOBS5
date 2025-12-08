@@ -126,6 +126,14 @@ echo "[Wrapper] Model preset: $MODEL_PRESET"
 DATA_MODE=${DATA_MODE:-preproc}
 echo "[Wrapper] Data mode: DATA_MODE=$DATA_MODE"
 
+# **************** Token Mode Configuration ****************
+# TOKEN_MODE: 22 (default) or 24
+#   22: Original encoding, base-10000 size (single token), vocab ~12k
+#   24: Base-100 encoding for size (two tokens), vocab ~2k
+# Usage: TOKEN_MODE=24 MODEL_PRESET=55M sbatch ...
+TOKEN_MODE=${TOKEN_MODE:-22}
+echo "[Wrapper] Token mode: TOKEN_MODE=$TOKEN_MODE"
+
 # Set data directories based on DATA_MODE
 if [ "$DATA_MODE" = "encoded" ]; then
     DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021'
@@ -150,6 +158,7 @@ python -u -B run_train.py \
         --dir_name="$DIR_NAME" \
         --test_dir_name="$TEST_DIR_NAME" \
         --data_mode="$DATA_MODE" \
+        --token_mode=$TOKEN_MODE \
         --clip_eigs=True --activation_fn=half_glu1 \
         --dt_global=False --epochs=100 --jax_seed=42 \
         --opt_config=standard --p_dropout=0.0 \

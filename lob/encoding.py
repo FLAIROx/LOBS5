@@ -90,13 +90,68 @@ def combine_field(
 
 
 # event_type	direction	price	size	delta_t	time_s	time_ns	price_ref	size_ref	time_s_ref	time_ns_ref
+
+# ============================================
+# 22-TOKEN MODE: Original encoding (base-10000 size)
+# ============================================
 @jax.jit
-def encode_msg(
+def encode_msg_22(
         msg: jax.Array,
         encoding: Dict[str, Tuple[jax.Array, jax.Array]],
     ) -> jax.Array:
+    """Encode message using 22-token format (single token for size, base-10000)."""
     event_type = encode(msg[1], *encoding['event_type'])
-    
+
+    direction = encode(msg[2], *encoding['direction'])
+    # NOTE: leave out price_abs in msg[3]
+    price = split_field(msg[4], 1, 3, True)
+    # CAVE: temporary fix to switch tokens for + and - sign
+    price_sign = encode(price[0], *encoding['sign'])
+    price = encode(price[1], *encoding['price'])
+
+    # 22-token mode: single token for size (base-10000)
+    size_enc = encode(msg[5], *encoding['size'])
+
+    time_comb = encode_time(
+        time_s = msg[8],
+        time_ns = msg[9],
+        encoding = encoding,
+        delta_t_s = msg[6],
+        delta_t_ns = msg[7],
+    )
+
+    price_ref = split_field(msg[10], 1, 3, True)
+    # CAVE: temporary fix to switch tokens for + and - sign
+    price_ref_sign = encode(price_ref[0], *encoding['sign'])
+    price_ref = encode(price_ref[1], *encoding['price'])
+
+    # 22-token mode: single token for size_ref (base-10000)
+    size_ref_enc = encode(msg[11], *encoding['size'])
+
+    time_ref_comb = encode_time(
+        time_s = msg[12],
+        time_ns = msg[13],
+        encoding = encoding
+    )
+
+    # 22-token output: size and size_ref are 1 token each
+    out = [
+        event_type, direction, price_sign, price, size_enc, time_comb,
+        price_ref_sign, price_ref, size_ref_enc, time_ref_comb]
+    return jnp.hstack(out)
+
+
+# ============================================
+# 24-TOKEN MODE: Base-100 encoding for size
+# ============================================
+@jax.jit
+def encode_msg_24(
+        msg: jax.Array,
+        encoding: Dict[str, Tuple[jax.Array, jax.Array]],
+    ) -> jax.Array:
+    """Encode message using 24-token format (two tokens for size, base-100)."""
+    event_type = encode(msg[1], *encoding['event_type'])
+
     direction = encode(msg[2], *encoding['direction'])
     # NOTE: leave out price_abs in msg[3]
     price = split_field(msg[4], 1, 3, True)
@@ -111,7 +166,7 @@ def encode_msg(
     size_low_enc = encode(size_low, *encoding['size_digit'])
 
     time_comb = encode_time(
-        time_s = msg[8], 
+        time_s = msg[8],
         time_ns = msg[9],
         encoding = encoding,
         delta_t_s = msg[6],
@@ -130,19 +185,39 @@ def encode_msg(
     size_ref_low_enc = encode(size_ref_low, *encoding['size_digit'])
 
     time_ref_comb = encode_time(
-        time_s = msg[12], 
+        time_s = msg[12],
         time_ns = msg[13],
         encoding = encoding
     )
 
-    # Updated output array: size and size_ref are now 2 tokens each
+    # 24-token output: size and size_ref are 2 tokens each
     out = [
         event_type, direction, price_sign, price, size_high_enc, size_low_enc, time_comb,
         price_ref_sign, price_ref, size_ref_high_enc, size_ref_low_enc, time_ref_comb]
     return jnp.hstack(out)
 
 
-encode_msgs = jax.jit(jax.vmap(encode_msg, in_axes=(0, None)))  # Let JAX auto-select backend (GPU)
+# Vectorized versions
+encode_msgs_22 = jax.jit(jax.vmap(encode_msg_22, in_axes=(0, None)))
+encode_msgs_24 = jax.jit(jax.vmap(encode_msg_24, in_axes=(0, None)))
+
+
+def encode_msgs(msgs, encoding, token_mode=22):
+    """
+    Encode messages using the specified token mode.
+
+    Args:
+        msgs: Array of raw messages
+        encoding: Encoding dictionary from Vocab
+        token_mode: 22 (default) or 24
+
+    Returns:
+        Encoded messages array
+    """
+    if token_mode == 22:
+        return encode_msgs_22(msgs, encoding)
+    else:
+        return encode_msgs_24(msgs, encoding)
 
 @jax.jit
 def encode_time(
@@ -165,15 +240,53 @@ def encode_time(
     return time_comb
 
 
+# ============================================
+# 22-TOKEN MODE: Original decoding (base-10000 size)
+# ============================================
 @jax.jit
-def decode_msg(msg_enc, encoding):
-    # TODO: check if fields with same decoder can be combined into one decode call
-
+def decode_msg_22(msg_enc, encoding):
+    """Decode message from 22-token format (single token for size, base-10000)."""
     event_type = decode(msg_enc[0], *encoding['event_type'])
 
     direction = decode(msg_enc[1], *encoding['direction'])
 
-    price_sign =  decode(msg_enc[2], *encoding['sign'])
+    price_sign = decode(msg_enc[2], *encoding['sign'])
+    price = decode(msg_enc[3], *encoding['price'])
+    price = combine_field(price, 3, price_sign)
+
+    # 22-token mode: single token for size (base-10000)
+    size = decode(msg_enc[4], *encoding['size'])
+
+    # 22-token indices: time is at 5:14
+    delta_t_s, delta_t_ns, time_s, time_ns = decode_time(msg_enc[5:14], encoding)
+
+    price_ref_sign = decode(msg_enc[14], *encoding['sign'])
+    price_ref = decode(msg_enc[15], *encoding['price'])
+    price_ref = combine_field(price_ref, 3, price_ref_sign)
+
+    # 22-token mode: single token for size_ref (base-10000)
+    size_ref = decode(msg_enc[16], *encoding['size'])
+
+    time_s_ref, time_ns_ref = decode_time(msg_enc[17:22], encoding)
+
+    # order ID is not encoded, so it's set to NA
+    # same for price_abs
+    return jnp.hstack([NA_VAL,
+        event_type, direction, NA_VAL, price, size, delta_t_s, delta_t_ns, time_s, time_ns,
+        price_ref, size_ref, time_s_ref, time_ns_ref])
+
+
+# ============================================
+# 24-TOKEN MODE: Base-100 decoding for size
+# ============================================
+@jax.jit
+def decode_msg_24(msg_enc, encoding):
+    """Decode message from 24-token format (two tokens for size, base-100)."""
+    event_type = decode(msg_enc[0], *encoding['event_type'])
+
+    direction = decode(msg_enc[1], *encoding['direction'])
+
+    price_sign = decode(msg_enc[2], *encoding['sign'])
     price = decode(msg_enc[3], *encoding['price'])
     price = combine_field(price, 3, price_sign)
 
@@ -182,7 +295,7 @@ def decode_msg(msg_enc, encoding):
     size_low = decode(msg_enc[5], *encoding['size_digit'])
     size = size_high * 100 + size_low
 
-    # Note: indices shifted by +1 due to size being 2 tokens now
+    # 24-token indices: time is at 6:15
     delta_t_s, delta_t_ns, time_s, time_ns = decode_time(msg_enc[6:15], encoding)
 
     price_ref_sign = decode(msg_enc[15], *encoding['sign'])
@@ -198,11 +311,32 @@ def decode_msg(msg_enc, encoding):
 
     # order ID is not encoded, so it's set to NA
     # same for price_abs
-    return jnp.hstack([ NA_VAL,
+    return jnp.hstack([NA_VAL,
         event_type, direction, NA_VAL, price, size, delta_t_s, delta_t_ns, time_s, time_ns,
         price_ref, size_ref, time_s_ref, time_ns_ref])
 
-decode_msgs = jax.jit(jax.vmap(decode_msg, in_axes=(0,)),backend='cpu')
+
+# Vectorized versions
+decode_msgs_22 = jax.jit(jax.vmap(decode_msg_22, in_axes=(0, None)), backend='cpu')
+decode_msgs_24 = jax.jit(jax.vmap(decode_msg_24, in_axes=(0, None)), backend='cpu')
+
+
+def decode_msgs(msgs_enc, encoding, token_mode=22):
+    """
+    Decode messages using the specified token mode.
+
+    Args:
+        msgs_enc: Array of encoded messages
+        encoding: Encoding dictionary from Vocab
+        token_mode: 22 (default) or 24
+
+    Returns:
+        Decoded messages array
+    """
+    if token_mode == 22:
+        return decode_msgs_22(msgs_enc, encoding)
+    else:
+        return decode_msgs_24(msgs_enc, encoding)
 
 @jax.jit
 def decode_time(time_toks, encoding):
@@ -242,7 +376,15 @@ class Vocab:
     NA_TOK = 2
     START_TOK= 3
 
-    def __init__(self) -> None:
+    def __init__(self, token_mode=22) -> None:
+        """
+        Initialize vocabulary for message encoding.
+
+        Args:
+            token_mode: 22 (default, base-10000 size) or 24 (base-100 size)
+        """
+        assert token_mode in [22, 24], f"token_mode must be 22 or 24, got {token_mode}"
+        self.token_mode = token_mode
         self.counter = 4  # 0: MSK, 1: HID, 2: NAN, 3: START
         self.ENCODING = {}
         self.DECODING = {}
@@ -251,8 +393,15 @@ class Vocab:
 
         self._add_field('time', range(1000), [3,6,9,12])
         self._add_field('event_type', range(1,5), None)
-        # Changed: Use base-100 encoding for size (100 tokens instead of 10000)
-        self._add_field('size_digit', range(100), [])  # Shared tokens for size high/low digits
+
+        # Size encoding depends on token_mode
+        if token_mode == 22:
+            # 22-token mode: single token, base-10000 (original)
+            self._add_field('size', range(10000), [])
+        else:
+            # 24-token mode: two tokens, base-100
+            self._add_field('size_digit', range(100), [])  # Shared tokens for size high/low digits
+
         self._add_field('price', range(1000), [1])
         self._add_field('sign', [-1, 1], None)
         self._add_field('direction', [0, 1], None)
@@ -318,14 +467,48 @@ class Message_Tokenizer:
     FIELD_I = (lambda fields=FIELDS:{
         f: i for i, f in enumerate(fields)
     })()
-    # Updated: size and size_ref now use 2 tokens each (base-100 encoding)
-    #          event_type, direction, price(2), size(2), delta_t_s, delta_t_ns(3), time_s(2), time_ns(3), price_ref(2), size_ref(2), time_s_ref(2), time_ns_ref(3)
-    TOK_LENS = np.array((1, 1, 2, 2, 1, 3, 2, 3, 2, 2, 2, 3))
+
+    # Token lengths for different modes:
+    # 22-token mode: size and size_ref use 1 token each (base-10000)
+    # 24-token mode: size and size_ref use 2 tokens each (base-100)
+    TOK_LENS_22 = np.array((1, 1, 2, 1, 1, 3, 2, 3, 2, 1, 2, 3))  # 22 tokens total
+    TOK_LENS_24 = np.array((1, 1, 2, 2, 1, 3, 2, 3, 2, 2, 2, 3))  # 24 tokens total
+
+    # Default to 22-token mode (can be overridden by set_token_mode)
+    TOK_LENS = TOK_LENS_22
     TOK_DELIM = np.cumsum(TOK_LENS[:-1])
     MSG_LEN = np.sum(TOK_LENS)
     # encoded message length: total length - length of reference fields
     NEW_MSG_LEN = MSG_LEN - \
         (lambda tl=TOK_LENS, fields=FIELDS: np.sum(tl[i] for i, f in enumerate(fields) if f.endswith('_ref')))()
+
+    @classmethod
+    def set_token_mode(cls, token_mode):
+        """
+        Set the token mode for Message_Tokenizer.
+
+        Args:
+            token_mode: 22 (default, base-10000 size) or 24 (base-100 size)
+        """
+        assert token_mode in [22, 24], f"token_mode must be 22 or 24, got {token_mode}"
+        if token_mode == 22:
+            cls.TOK_LENS = cls.TOK_LENS_22
+        else:
+            cls.TOK_LENS = cls.TOK_LENS_24
+        cls.TOK_DELIM = np.cumsum(cls.TOK_LENS[:-1])
+        cls.MSG_LEN = np.sum(cls.TOK_LENS)
+        cls.NEW_MSG_LEN = cls.MSG_LEN - \
+            sum(cls.TOK_LENS[i] for i, f in enumerate(cls.FIELDS) if f.endswith('_ref'))
+
+    @classmethod
+    def get_tok_lens(cls, token_mode):
+        """Get TOK_LENS for a specific token mode without changing class state."""
+        return cls.TOK_LENS_22 if token_mode == 22 else cls.TOK_LENS_24
+
+    @classmethod
+    def get_msg_len(cls, token_mode):
+        """Get MSG_LEN for a specific token mode without changing class state."""
+        return 22 if token_mode == 22 else 24
     # fields in correct message order:
     FIELD_ENC_TYPES = {
         'event_type': 'event_type',

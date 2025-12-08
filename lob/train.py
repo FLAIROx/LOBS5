@@ -156,6 +156,7 @@ def train(args):
             debug_overfit=args.debug_overfit,
             test_dir=args.test_dir_name if hasattr(args, 'test_dir_name') else None,
             data_mode=args.data_mode if hasattr(args, 'data_mode') else 'preproc',
+            token_mode=args.token_mode if hasattr(args, 'token_mode') else 22,
             use_distributed_sampler=args.is_distributed,
             process_rank=args.process_index,
             process_count=args.process_count,

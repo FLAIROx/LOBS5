@@ -67,6 +67,7 @@ def create_lobster_prediction_dataset(
 		debug_overfit=False,
 		test_dir: Union[str, Path, None] = None,
 		data_mode: str = 'preproc',
+		token_mode: int = 22,  # 22 (default, base-10000 size) or 24 (base-100 size)
 		use_distributed_sampler: bool = False,
 		process_rank: int = 0,
 		process_count: int = 1,
@@ -117,6 +118,7 @@ def create_lobster_prediction_dataset(
 		debug_overfit=debug_overfit,
 		test_data_dir=test_dir,
 		data_mode=data_mode,
+		token_mode=token_mode,
 	)
 	dataset_obj.setup()
 

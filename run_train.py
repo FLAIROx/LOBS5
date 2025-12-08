@@ -79,6 +79,9 @@ if __name__ == "__main__":
 	parser.add_argument("--data_mode", type=str, choices=['preproc', 'encoded'],
 						default='preproc',
 						help="data loading mode: 'preproc' (encode on-the-fly) or 'encoded' (load pre-encoded data)")
+	parser.add_argument("--token_mode", type=int, choices=[22, 24],
+						default=22,
+						help="token encoding mode: 22 (default, base-10000 size) or 24 (base-100 size)")
 	parser.add_argument("--dataset", type=str, choices=Datasets.keys(),
 						default='lobster-prediction',
 						help="dataset name")
