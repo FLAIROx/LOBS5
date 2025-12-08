@@ -68,15 +68,49 @@ def train(args):
         run = DummyRun()
 
     ssm_size = args.ssm_size_base
-    ssm_lr = args.ssm_lr_base
+
+    # ============================================
+    # Square Root Scaling Rule for Learning Rate
+    # ============================================
+    # LR scales with sqrt of effective batch size (recommended for Adam/AdamW)
+    # Reference: "Train longer, generalize better" (Hoffer et al., 2017)
+    #
+    # Rationale: Gradient noise (std) scales as 1/√B, so lr should scale as √k
+    # This is more stable than linear scaling for large batch sizes
+    #
+    # Base LR (ssm_lr_base) is defined for single-GPU batch size (per_gpu_bsz)
+    # Scaled LR = Base LR × √(global_effective_bsz / base_bsz)
+    # ============================================
+    import math
+    base_bsz = args.per_gpu_bsz  # Single GPU batch size (base reference)
+    global_effective_bsz = args.per_gpu_bsz * args.num_devices * args.process_count
+    lr_scale_factor = math.sqrt(global_effective_bsz / base_bsz)
+
+    ssm_lr = args.ssm_lr_base * lr_scale_factor
+    lr = args.lr_factor * ssm_lr
+
+    # Set lr_min to 1/10 of scaled lr (standard practice for cosine annealing)
+    args.lr_min = lr / 10.0
+
+    print(f"[*] LR Scaling (Square Root Rule):")
+    print(f"    Base batch size: {base_bsz}")
+    print(f"    Global effective batch size: {global_effective_bsz} ({args.per_gpu_bsz} × {args.num_devices} GPUs × {args.process_count} nodes)")
+    print(f"    LR scale factor: √{global_effective_bsz // base_bsz} = {lr_scale_factor:.2f}x")
+    print(f"    Base ssm_lr: {args.ssm_lr_base:.6f} → Scaled ssm_lr: {ssm_lr:.6f}")
+    print(f"    Base lr: {args.ssm_lr_base * args.lr_factor:.6f} → Scaled lr: {lr:.6f}")
+    print(f"    lr_min (1/10 of lr): {args.lr_min:.7f}")
 
     # determine the size of initial blocks
     block_size = int(ssm_size / args.blocks)
     if args.USE_WANDB and args.process_index == 0:
-        wandb.log({"block_size": block_size})
-
-    # Set global learning rate lr (e.g. encoders, etc.) as function of ssm_lr
-    lr = args.lr_factor * ssm_lr
+        wandb.log({
+            "block_size": block_size,
+            "lr_scale_factor": lr_scale_factor,
+            "scaled_ssm_lr": ssm_lr,
+            "scaled_lr": lr,
+            "lr_min": args.lr_min,
+            "global_effective_bsz": global_effective_bsz,
+        })
 
     # Set randomness...
     print("[*] Setting Randomness...")
