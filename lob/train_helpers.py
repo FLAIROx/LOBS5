@@ -1048,7 +1048,7 @@ def train_step(
     params_fp32 = jax.tree_util.tree_map(to_fp32, state.params)  # Workaround for multi_transform NaN
     grads_fp32 = jax.tree_util.tree_map(to_fp32, grads)  # Workaround for multi_transform NaN
 
-    jax.debug.print("[Optimizer Workaround] Cast params/grads to FP32 before tx.update()")  # DEBUG BF16
+    # jax.debug.print("[Optimizer Workaround] Cast params/grads to FP32 before tx.update()")  # DEBUG BF16
 
     # Run optimizer in FP32
     updates, new_opt_state = state.tx.update(grads_fp32, state.opt_state, params_fp32)  # Workaround for multi_transform NaN
@@ -1089,7 +1089,7 @@ def train_step(
         return new_val  # Keep FP32 (Lambda, D, log_step)  # Workaround for multi_transform NaN
     new_params = jax.tree_util.tree_map(cast_back_to_original_dtype, new_params_fp32, original_param_dtypes)  # Workaround for multi_transform NaN
 
-    jax.debug.print("[Optimizer Workaround] Cast new_params back to original dtypes")  # DEBUG BF16
+    # jax.debug.print("[Optimizer Workaround] Cast new_params back to original dtypes")  # DEBUG BF16
 
     # # [DEBUG BF16] Check params after apply_updates
     # def check_after_apply_updates(new_params_tree):  # DEBUG BF16
@@ -1122,7 +1122,7 @@ def train_step(
         jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), state.params),  # NaN detection
         False  # NaN detection
     )  # NaN detection
-    jax.debug.print("[NaN Check 6] Updated params has NaN: {}", new_params_has_nan)  # NaN detection
+    # jax.debug.print("[NaN Check 6] Updated params has NaN: {}", new_params_has_nan)  # NaN detection
 
     # Auto-stop training on NaN (no JIT overhead, runs on host)
     def halt_on_nan(has_nan_val, step_val, params_pytree):  # NaN auto-stop
