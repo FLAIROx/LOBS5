@@ -30,7 +30,9 @@ def make_data_loader(dset,
 					 collate_fn: callable=None,
 					 sampler: Optional[Sampler]=None,
 					 num_workers: int = 0,
-					 worker_init_fn: Callable = None):
+					 worker_init_fn: Callable = None,
+					 prefetch_factor: int = 4,
+					 pin_memory: bool = True):
 	"""
 
 	:param dset: 			(PT dset):		PyTorch dataset object.
@@ -39,6 +41,8 @@ def make_data_loader(dset,
 	:param batch_size: 		(int):			Batch size for batches.
 	:param shuffle:         (bool):			Shuffle the data loader?
 	:param drop_last: 		(bool):			Drop ragged final batch (particularly for training).
+	:param prefetch_factor: (int):			Number of batches to prefetch per worker (default: 4).
+	:param pin_memory:      (bool):			Use pinned memory for faster CPU->GPU transfer (default: True).
 	:return:
 	"""
 
@@ -58,11 +62,21 @@ def make_data_loader(dset,
 		# Keep drop_last as specified by caller (don't override to False)
 
 	# Generate the dataloaders.
-	return torch.utils.data.DataLoader(
-		dataset=dset, collate_fn=collate_fn, batch_size=batch_size, shuffle=shuffle,
-		drop_last=drop_last, generator=rng, sampler=sampler, num_workers=num_workers,
-		worker_init_fn=worker_init_fn)#,
-		# prefetch_factor=3)
+	# Note: prefetch_factor and pin_memory require num_workers > 0
+	if num_workers > 0:
+		return torch.utils.data.DataLoader(
+			dataset=dset, collate_fn=collate_fn, batch_size=batch_size, shuffle=shuffle,
+			drop_last=drop_last, generator=rng, sampler=sampler, num_workers=num_workers,
+			worker_init_fn=worker_init_fn,
+			prefetch_factor=prefetch_factor,
+			pin_memory=pin_memory,
+			persistent_workers=True)  # Keep workers alive between epochs
+	else:
+		# num_workers=0: single-process loading, prefetch_factor not supported
+		return torch.utils.data.DataLoader(
+			dataset=dset, collate_fn=collate_fn, batch_size=batch_size, shuffle=shuffle,
+			drop_last=drop_last, generator=rng, sampler=sampler, num_workers=num_workers,
+			worker_init_fn=worker_init_fn)
 
 
 def create_lra_imdb_classification_dataset(cache_dir: Union[str, Path] = DEFAULT_CACHE_DIR_ROOT,
