@@ -30,7 +30,9 @@ from functools import partial
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lob.encoding import Vocab, encode_msgs
-from preproc import transform_L2_state  # Fast JAX version instead of slow np.vectorize
+# ✅ Use numpy version - simple, reliable, validated in training
+# ⚠️ DO NOT use transform_L2_state (JAX) - complex and error-prone
+from preproc import transform_L2_state_numpy
 
 
 def encode_message_file(
@@ -98,13 +100,9 @@ def transform_orderbook_file(
         # Load raw orderbook data
         book_raw = np.load(input_path, mmap_mode='r')
 
-        # Transform to volume image representation using fast JAX version
-        import jax.numpy as jnp
-        book_raw_jax = jnp.array(book_raw)
-        book_transformed = transform_L2_state(book_raw_jax, book_depth, tick_size)
-
-        # Convert to numpy array and save
-        book_transformed_np = np.array(book_transformed, dtype=np.float32)
+        # ✅ Transform using numpy version (simple, reliable, validated)
+        # Note: JAX versions exist but are deprecated (see preproc.py warnings)
+        book_transformed_np = transform_L2_state_numpy(book_raw, book_depth, tick_size)
 
         # Create output directory if needed
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -213,7 +211,10 @@ def pre_encode_directory(
 
     for file_path in all_files:
         rel_path = file_path.relative_to(input_path)
-        out_path = output_path / rel_path
+
+        # Change suffix from _proc.npy to _encoded.npy
+        out_name = file_path.name.replace('_proc.npy', '_encoded.npy')
+        out_path = output_path / rel_path.parent / out_name
 
         if "message" in file_path.name:
             message_files.append((file_path, out_path, True))
@@ -360,7 +361,7 @@ Examples:
     print(f"Input directory:  {args.input_dir}")
     print(f"Output directory: {args.output_dir}")
     print(f"Workers:          {args.num_workers}")
-    print(f"Orderbook files:  Transform (JAX accelerated)")
+    print(f"Orderbook files:  Transform (Numpy - CPU only)")
     if args.skip_files > 0 or args.max_files is not None:
         print(f"Batch processing: Skip {args.skip_files}, Max {args.max_files if args.max_files else 'all'}")
     print("="*70 + "\n")

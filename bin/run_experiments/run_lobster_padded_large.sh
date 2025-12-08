@@ -43,6 +43,13 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_nv
 export USE_BF16=${USE_BF16:-1}
 export GRAD_STATS_PRECISION=${GRAD_STATS_PRECISION:-bf16_gpt_init}
 echo "[Wrapper] Precision mode: USE_BF16=$USE_BF16, GRAD_STATS_PRECISION=$GRAD_STATS_PRECISION"
+
+# **************** Optimizer Configuration ****************
+# USE_SINGLE_OPTIMIZER=1: Use single AdamW (workaround for multi_transform NaN bug)
+# USE_SINGLE_OPTIMIZER=0 (default): Use multi_transform (ssm/regular groups)
+export USE_SINGLE_OPTIMIZER=${USE_SINGLE_OPTIMIZER:-0}
+echo "[Wrapper] Optimizer mode: USE_SINGLE_OPTIMIZER=$USE_SINGLE_OPTIMIZER"
+# **************** Optimizer Configuration ****************
 # **************** BF16 vs FP32 梯度对比测试 ****************
 
 # **************** MULTI NODES COMMUNICATIONS OPTIMIZATION ****************
@@ -59,8 +66,13 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90    # Use 90% GPU memory
 # export NCCL_P2P_DIRECT_DISABLE=1
 # export NCCL_SHM_DISABLE=1
 
-export JAX_TRACEBACK_IN_LOCATIONS=1
+# export JAX_TRACEBACK_IN_LOCATIONS=1
+# export TF_GPU_ALLOCATOR=cuda_malloc_async
+
+
 export TF_GPU_ALLOCATOR=cuda_malloc_async
+export TF_ENABLE_ONEDNN_OPTS=0
+
 
 # JAX distributed coordination service timeout configuration (10 minutes for multi-node)
 export JAX_COORDINATOR_TIMEOUT_MS=600000  # 10 minutes in milliseconds
@@ -102,19 +114,25 @@ mkdir -p "$CUDA_CACHE_PATH" || true
 echo "[Wrapper] Available GPUs:"
 nvidia-smi --list-gpus | head -4
 
+# Model preset (from environment variable, default: 1B)
+MODEL_PRESET=${MODEL_PRESET:-1B}
+echo "[Wrapper] Model preset: $MODEL_PRESET"
+
 # Run Python with all arguments passed through
 # -u: unbuffered output for real-time logging
 # -B: don't write .pyc files
-# 3072 d_model x 32 layers x 48 blocks (from commit 12fe4a9)
+# Model parameters (d_model, n_layers, blocks, ssm_size_base, ssm_lr_base, per_gpu_bsz, wandb_project, log_dir)
+# are automatically set by --model_preset
 python -u -B run_train.py \
+        --model_preset=$MODEL_PRESET \
         --C_init=trunc_standard_normal --prenorm=True --batchnorm=False --bidirectional=False \
-        --blocks=48 --per_gpu_bsz=2 --d_model=3072 --dataset=lobster-prediction --merging=padded \
+        --dataset=lobster-prediction --merging=padded \
         --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG' \
         --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc' \
         --data_mode='preproc' \
         --clip_eigs=True --activation_fn=half_glu1 \
-        --dt_global=False --epochs=20 --jax_seed=42 --lr_factor=1 --n_layers=32 \
-        --opt_config=standard --p_dropout=0.0 --ssm_lr_base=0.0001 --ssm_size_base=3072 \
+        --dt_global=False --epochs=20 --jax_seed=42 \
+        --opt_config=standard --p_dropout=0.0 \
         --warmup_end=1 --weight_decay=0.05 --msg_seq_len=500 \
         --use_book_data=True --use_simple_book=False --book_transform=True  \
         --masking=none \
@@ -126,11 +144,10 @@ python -u -B run_train.py \
         --debug_overfit=False \
         --lr_patience=3 \
         --USE_WANDB=True \
-        --wandb_project=lobs5-3072x32-tok24 \
         --wandb_entity=kang-oxford
 
 
-        # --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOGL' \
+        # --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG' \
         # --test_dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_encoded' \
         # --data_mode='encoded' \
         # ························································

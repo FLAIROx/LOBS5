@@ -159,6 +159,7 @@ class LobBookModel(nn.Module):
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
     dtype: Any = None  # 计算 dtype，由 USE_BF16 环境变量控制
+    use_remat: bool = False  # Gradient checkpointing: 减少运行时内存
 
     def setup(self):
         """
@@ -184,6 +185,7 @@ class LobBookModel(nn.Module):
                 bn_momentum=self.bn_momentum,
                 step_rescale=self.step_rescale,
                 dtype=compute_dtype,
+                use_remat=self.use_remat,
             ) for _ in range(self.n_pre_layers))
         # GPT风格初始化: stddev = 0.02 / sqrt(n_layers) 防止梯度爆炸
         n_total_layers = self.n_pre_layers + self.n_post_layers
@@ -206,6 +208,7 @@ class LobBookModel(nn.Module):
                 bn_momentum=self.bn_momentum,
                 step_rescale=self.step_rescale,
                 dtype=compute_dtype,
+                use_remat=self.use_remat,
             )
             for _ in range(self.n_post_layers)
         )
@@ -405,6 +408,7 @@ class PaddedLobPredModel(nn.Module):
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
     dtype: Any = None  # 计算 dtype，由 USE_BF16 环境变量控制
+    use_remat: bool = False  # Gradient checkpointing: 减少运行时内存
 
     def setup(self):
         """
@@ -432,6 +436,7 @@ class PaddedLobPredModel(nn.Module):
             use_embed_layer=True,
             vocab_size=self.d_output,
             dtype=compute_dtype,
+            use_remat=self.use_remat,
         )
 
         # applied to transposed message output to get seq len for fusion
@@ -451,6 +456,7 @@ class PaddedLobPredModel(nn.Module):
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
             dtype=compute_dtype,
+            use_remat=self.use_remat,
         )
 
 
@@ -470,6 +476,7 @@ class PaddedLobPredModel(nn.Module):
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
             dtype=compute_dtype,
+            use_remat=self.use_remat,
         )
         # GPT风格初始化: stddev = 0.02 / sqrt(n_layers) 防止梯度爆炸
         n_total_layers = self.n_message_layers + self.n_book_pre_layers + self.n_book_post_layers + self.n_fused_layers
@@ -572,8 +579,8 @@ class PaddedLobPredModel(nn.Module):
         elif self.mode in ["none"]:
             pass
         elif self.mode in ['ema']:
-             # print("x",x)  # DEBUG: commented out to reduce XLA compile memory
-             # print("ema",ema)  # DEBUG: commented out to reduce XLA compile memory
+             print("x",x)  # mixed precision overflow debug
+             print("ema",ema)  # mixed precision overflow debug
              x,fo=ewma_vectorized_safe(x,2 /(22 + 1.0),fo,override)
         else:
             raise NotImplementedError("Must double check before running rnn")
@@ -860,7 +867,7 @@ def ewma_vectorized(data, alpha, offset=None, dtype=None, order='C', out=None):
         the same shape as the input. If not provided or `None`,
         a freshly-allocated array is returned.
     """
-    # print("CALL")  # DEBUG: commented out to reduce XLA compile memory
+    print("CALL")  # mixed precision overflow debug
     data = jnp.array(data, copy=False)
 
     if dtype is None:

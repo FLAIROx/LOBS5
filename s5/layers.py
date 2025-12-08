@@ -31,10 +31,16 @@ class SequenceLayer(nn.Module):
     bn_momentum: float = 0.90
     step_rescale: float = 1.0
     dtype: Any = jax.numpy.float32  # 默认 FP32，由上层传入 BF16
+    # use_remat: bool = False  # Gradient checkpointing: 反向时重计算激活值以节省内存
 
     def setup(self):
         """Initializes the ssm, batch/layer norm and dropout
         """
+        # 使用 nn.remat 包装 SSM 以节省内存 (反向时重计算)
+        # if self.use_remat:
+        #     self.seq = nn.remat(self.ssm)(step_rescale=self.step_rescale)
+        # else:
+        #     self.seq = self.ssm(step_rescale=self.step_rescale)
         self.seq = self.ssm(step_rescale=self.step_rescale)
 
         # GPT风格初始化: stddev=0.02 防止梯度爆炸
@@ -68,12 +74,17 @@ class SequenceLayer(nn.Module):
         Returns:
             output sequence (float32): (L, d_model)
         """
-        #jax.debug.print("call x before prenorm : {}",x)
+    #     # remat 已在 setup() 中应用到 self.seq，直接调用 _forward
+    #     return self._forward(x)
+
+    # def _forward(self, x):
+    #     """Internal forward pass, may be checkpointed for memory efficiency."""
+    #     #jax.debug.print("call x before prenorm : {}",x)
 
         skip = x
         if self.prenorm:
             x = self.norm(x)
-        
+
         #jax.debug.print("call x before ssm : {}",x)
         x = self.seq(x)
         #jax.debug.print("call x_m after ssm : {}",x)
@@ -95,7 +106,7 @@ class SequenceLayer(nn.Module):
         else:
             raise NotImplementedError(
                    "Activation: {} not implemented".format(self.activation))
-        
+
         #jax.debug.print("call x_m[0:5] after activation : {}",x[0:2][0][0:2])
 
 
@@ -106,51 +117,66 @@ class SequenceLayer(nn.Module):
 
         return x
 
-    def __call_rnn__(self,hidden, x,d):
-            """
-            Compute the LxH output of S5 layer given an LxH input.
-            Args:
-                hidden : hidden state (P,)
-                x (float32): input sequence (L, d_model)
-                d (bool): reset signal (L,)
-            Returns:
-                output sequence (float32): (L, d_model)
-            """
-            #jax.debug.print("call_rnn x before prenorm : {}",x)
+    def __call_rnn__(self, hidden, x, d):
+        """
+        Compute the LxH output of S5 layer given an LxH input.
+        Args:
+            hidden : hidden state (P,)
+            x (float32): input sequence (L, d_model)
+            d (bool): reset signal (L,)
+        Returns:
+            output sequence (float32): (L, d_model)
+        """
+    #     # remat 已在 setup() 中应用到 self.seq，直接调用 _forward_rnn
+    #     return self._forward_rnn(hidden, x, d)
 
-            skip = x
-            if self.prenorm:
-                x = self.norm(x)
+    # def _forward_rnn(self, hidden, x, d):
+    #     """Internal RNN forward pass, may be checkpointed for memory efficiency."""
+    #     #jax.debug.print("call_rnn x before prenorm : {}",x)
 
-            hidden,x = self.seq.__call_rnn__(hidden,x,d)
-            #hidden, x = jax.vmap(self.seq.__call_rnn__, in_axes=(None,1,None), out_axes=1)(hidden, x, d)
+        skip = x
+        if self.prenorm:
+            x = self.norm(x)
+
+        hidden, x = self.seq.__call_rnn__(hidden, x, d)
+        #hidden, x = jax.vmap(self.seq.__call_rnn__, in_axes=(None,1,None), out_axes=1)(hidden, x, d)
 
 
-            if self.activation in ["full_glu"]:
-                x = self.drop(nn.gelu(x))
-                x = self.out1(x) * jax.nn.sigmoid(self.out2(x))
-                x = self.drop(x)
-            elif self.activation in ["half_glu1"]:
-                x = self.drop(nn.gelu(x))
-                x = x * jax.nn.sigmoid(self.out2(x))
-                x = self.drop(x)
-            elif self.activation in ["half_glu2"]:
-                # Only apply GELU to the gate input
-                x1 = self.drop(nn.gelu(x))
-                x = x * jax.nn.sigmoid(self.out2(x1))
-                x = self.drop(x)
-            elif self.activation in ["gelu"]:
-                x = self.drop(nn.gelu(x))
-            else:
-                raise NotImplementedError(
-                    "Activation: {} not implemented".format(self.activation))
+        if self.activation in ["full_glu"]:
+            x = self.drop(nn.gelu(x))
+            x = self.out1(x) * jax.nn.sigmoid(self.out2(x))
+            x = self.drop(x)
+        elif self.activation in ["half_glu1"]:
+            x = self.drop(nn.gelu(x))
+            x = x * jax.nn.sigmoid(self.out2(x))
+            x = self.drop(x)
+        elif self.activation in ["half_glu2"]:
+            # Only apply GELU to the gate input
+            x1 = self.drop(nn.gelu(x))
+            x = x * jax.nn.sigmoid(self.out2(x1))
+            x = self.drop(x)
+        elif self.activation in ["gelu"]:
+            x = self.drop(nn.gelu(x))
+        else:
+            raise NotImplementedError(
+                "Activation: {} not implemented".format(self.activation))
 
-            x = skip + x
-            if not self.prenorm:
-                x = self.norm(x)
+        x = skip + x
+        if not self.prenorm:
+            x = self.norm(x)
 
-            return hidden, x
+        return hidden, x
     @staticmethod
     def initialize_carry(batch_size, hidden_size):
-        # Use a dummy key since the default state init fn is just zeros.
-        return jax.numpy.zeros((batch_size,1, hidden_size), dtype=jax.numpy.complex64)
+        """Initialize hidden state as complex64 for FP32 scan stability.
+
+        BF16 strategy: Hidden state is complex64 (FP32) to match FP32 scan.
+        Reference: 7DEC working implementation (uses complex64 hidden state)
+
+        Returns:
+            complex64 array (batch_size, 1, hidden_size)
+        """
+        # Use complex64 (FP32) for scan stability, not BF16 pair
+        # DEPRECATED (causes NaN): BF16 pair hidden state for Full BF16 scan
+        # Reason: BF16 scan unstable (see bf16_numerical_analysis.md)
+        return jax.numpy.zeros((batch_size, 1, hidden_size), dtype=jax.numpy.complex64)

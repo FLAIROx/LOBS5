@@ -15,6 +15,23 @@ from functools import partial
 from lob.encoding import Vocab, Message_Tokenizer
 
 
+################################################################################
+# ⚠️  WARNING: JAX VERSIONS DEPRECATED - USE transform_L2_state_numpy INSTEAD
+#
+# These JAX versions have been fixed but are complex and error-prone.
+# They are kept for reference but SHOULD NOT BE USED in production.
+#
+# Issues with JAX versions:
+# 1. Immutable arrays require careful assignment (arr = arr.at[].set())
+# 2. Type conversion must happen before normalization
+# 3. vmap decorator adds complexity
+#
+# ✅ RECOMMENDED: Use transform_L2_state_numpy (line 114-162)
+#    - Simple, reliable, validated in training
+#    - Used by pre_encode_data.py and data_mode='preproc'
+################################################################################
+
+# DEPRECATED: Use transform_L2_state_numpy instead
 @partial(jax.jit, static_argnums=(1, 2),backend='cpu')
 @partial(
     jax.vmap,
@@ -22,7 +39,7 @@ from lob.encoding import Vocab, Message_Tokenizer
     out_axes=0,
 )
 def transform_L2_state(
-        book: jax.Array, 
+        book: jax.Array,
         price_levels: int,
         tick_size: int = 100,
         #divide_by: int = 1,
@@ -46,22 +63,25 @@ def transform_L2_state(
     mybook = jnp.zeros(price_levels, dtype=jnp.int32)
     mybook = mybook.at[book[:, 0]].set(book[:, 1])
 
-    # Norm seconds to be in [0,1] representing percent of day. 
-    delta_p_mid_and_time.at[1].set((delta_p_mid_and_time[1]-34200)/23400)
+    # Convert to float32 BEFORE normalization (otherwise division results get truncated to int!)
+    delta_p_mid_and_time = delta_p_mid_and_time.astype(jnp.float32)
+    # Norm seconds to be in [0,1] representing percent of day.
+    delta_p_mid_and_time = delta_p_mid_and_time.at[1].set((delta_p_mid_and_time[1]-34200)/23400)
     # Norm nanoseconds to be fraction of a second
-    delta_p_mid_and_time.at[2].set(delta_p_mid_and_time[2]/1e9)
+    delta_p_mid_and_time = delta_p_mid_and_time.at[2].set(delta_p_mid_and_time[2]/1e9)
 
-    
+
     # set ask volume to negative (sell orders)
     mybook = mybook.at[price_levels // 2:].set(mybook[price_levels // 2:] * -1)
     mybook = jnp.concatenate((
-        delta_p_mid_and_time.astype(jnp.float32),
+        delta_p_mid_and_time,  # Already float32 from line 50
         mybook.astype(jnp.float32) / 1000
     ))
 
     # return mybook.astype(jnp.float32) #/ divide_by
     return mybook 
 
+# DEPRECATED: Use transform_L2_state_numpy instead
 @partial(jax.jit, static_argnums=(1, 2),backend='gpu')
 @partial(
     jax.vmap,
@@ -69,7 +89,7 @@ def transform_L2_state(
     out_axes=0,
 )
 def transform_L2_state_gpu(
-        book: jax.Array, 
+        book: jax.Array,
         price_levels: int,
         tick_size: int = 100,
         #divide_by: int = 1,
@@ -92,17 +112,17 @@ def transform_L2_state_gpu(
 
     mybook = jnp.zeros(price_levels, dtype=jnp.int32)
     mybook = mybook.at[book[:, 0]].set(book[:, 1])
-    
-    # Norm seconds to be in [0,1] representing percent of day. 
-    delta_p_mid_and_time=delta_p_mid_and_time.astype(jnp.float32)
-    delta_p_mid_and_time=delta_p_mid_and_time.at[1].set((delta_p_mid_and_time[1]-34200)/23400)
+
+    # Norm seconds to be in [0,1] representing percent of day.
+    delta_p_mid_and_time = delta_p_mid_and_time.astype(jnp.float32)
+    delta_p_mid_and_time = delta_p_mid_and_time.at[1].set((delta_p_mid_and_time[1]-34200)/23400)
     # Norm nanoseconds to be fraction of a second
-    delta_p_mid_and_time=delta_p_mid_and_time.at[2].set(delta_p_mid_and_time[2]/1e9)
+    delta_p_mid_and_time = delta_p_mid_and_time.at[2].set(delta_p_mid_and_time[2]/1e9)
 
     # set ask volume to negative (sell orders)
     mybook = mybook.at[price_levels // 2:].set(mybook[price_levels // 2:] * -1)
     mybook = jnp.concatenate((
-        delta_p_mid_and_time.astype(jnp.float32),
+        delta_p_mid_and_time,  # Already float32 from line 99
         mybook.astype(jnp.float32) / 1000
     ))
 
@@ -110,9 +130,21 @@ def transform_L2_state_gpu(
     return mybook
 
 
+################################################################################
+# ✅ RECOMMENDED: This is the production version - simple, reliable, validated
+#
+# This numpy version is:
+# - Used by pre_encode_data.py for encoding
+# - Used by lobster_dataloader.py in data_mode='preproc'
+# - Validated in training for years
+# - Simple and easy to understand
+#
+# DO NOT use the JAX versions above unless you know what you're doing.
+################################################################################
+
 @partial(np.vectorize,signature="(c),(),()->(d)")
 def transform_L2_state_numpy(
-        book: np.ndarray, 
+        book: np.ndarray,
         price_levels: int,
         tick_size: int = 100,
         #divide_by: int = 1,
@@ -145,7 +177,27 @@ def transform_L2_state_numpy(
     mybook[book_ind[:, 0]]=(book_ind[:, 1])
     
     delta_p_mid_and_time=delta_p_mid_and_time.astype(np.float32)
-    # Norm seconds to be in [0,1] representing percent of day. 
+
+    # ========================================================================
+    # Normalize mid price and CLIP(mid price, volume) to SUPPORT BF16
+    # ========================================================================
+    # ---------- Statistics from logs/data_analysis_1673370.out ----------
+    # Dataset: GOOG 2016-2021 (1499 files, 756,907,244 Ch0 samples)
+    #
+    # [Ch0] delta_mid_price - 99th percentile = ±31 ticks:
+    #   Year breakdown:
+    #     2016: [-11, 11],  2017: [-13, 13],  2018: [-15, 15]
+    #     2019: [-10, 11],  2020: [-18, 17],  2021: [-31, 31]
+    #   All years combined:
+    #     99.0%: [-22, 22],  99.5%: [-31, 31],  99.9%: [-53, 53]
+    #     Extreme outliers (0.1%): min=-27690, max=28980
+    #
+    # Normalization: divide by 31.0 (99.5th percentile)
+    # Result: 99% data in [-1, 1], clips 0.5% extreme outliers
+    # ---------------------------------------------------------------------
+    delta_p_mid_and_time[0] = np.clip(delta_p_mid_and_time[0] / 31.0, -1.0, 1.0)  # Normalize mid price and CLIP to SUPPORT BF16
+
+    # Norm seconds to be in [0,1] representing percent of day.
     delta_p_mid_and_time[1]=((delta_p_mid_and_time[1]-34200)/23400)
     # Norm nanoseconds to be fraction of a second
     delta_p_mid_and_time[2]=(delta_p_mid_and_time[2]/1e9)
@@ -153,9 +205,35 @@ def transform_L2_state_numpy(
 
     # set ask volume to negative (sell orders)
     mybook[price_levels // 2:]=(mybook[price_levels // 2:] * -1)
+
+    # ===== OLD (DEPRECATED): Volume normalization without clipping =====
+    # mybook = np.concatenate((
+    #     delta_p_mid_and_time,
+    #     mybook.astype(np.float32) / 1000
+    # ))
+
+    # ========================================================================
+    # Normalize volume and CLIP to SUPPORT BF16
+    # ========================================================================
+    # ---------- Statistics from logs/data_analysis_1673370.out ----------
+    # Dataset: GOOG 2016-2021 (1499 files, 14.7B volume samples, non-zero only)
+    #
+    # [Vol] volume image (after /1000) - 99th percentile statistics:
+    #   Year breakdown (99th percentile after /1000):
+    #     2016: [-0.53, 0.51],  2017: [-0.56, 0.50],  2018: [-0.38, 0.33]
+    #     2019: [-0.31, 0.40],  2020: [-0.25, 0.22],  2021: [-0.21, 0.30]
+    #   All years combined:
+    #     99.0%: [-0.20, 0.20],  99.5%: [-0.30, 0.30],  99.9%: [-0.50, 0.66]
+    #     Extreme outliers (0.1%): min=-56.67, max=54.94 (after /1000)
+    #
+    # Normalization: divide by 1000 (keep original)
+    # Clipping: [-1, 1] to handle rare extreme outliers
+    # ---------------------------------------------------------------------
+    vol_normalized = mybook.astype(np.float32) / 1000  # Normalize volume (keep original divisor)
+    vol_normalized = np.clip(vol_normalized, -1.0, 1.0)  # CLIP volume to SUPPORT BF16
     mybook = np.concatenate((
         delta_p_mid_and_time,
-        mybook.astype(np.float32) / 1000
+        vol_normalized
     ))
 
     # return mybook.astype(jnp.float32) #/ divide_by

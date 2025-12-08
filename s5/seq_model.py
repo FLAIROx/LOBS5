@@ -38,6 +38,7 @@ class StackedEncoderModel(nn.Module):
     use_embed_layer: bool = False
     vocab_size: int = -1  # only used if use_encode_layer is True
     dtype: Any = None  # None means use default (controlled by USE_BF16 env var)
+    # use_remat: bool = False  # Gradient checkpointing: 减少运行时内存
 
     def setup(self):
         """
@@ -78,6 +79,7 @@ class StackedEncoderModel(nn.Module):
                 bn_momentum=self.bn_momentum,
                 step_rescale=self.step_rescale,
                 dtype=compute_dtype,
+                # use_remat=self.use_remat,
             )
             for _ in range(self.n_layers)
         ]

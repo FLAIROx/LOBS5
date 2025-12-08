@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=lobs5_3072x32
-#SBATCH --output=logs_lobs5_3072x32/lobs5_%j.out
-#SBATCH --error=logs_lobs5_3072x32/lobs5_%j.err
+#SBATCH --job-name=lobs5
+#SBATCH --output=logs_%j.out
+#SBATCH --error=logs_%j.err
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
@@ -13,9 +13,16 @@
 # LOBS5 Training Script (Single/Multi-Node)
 # ============================================
 # Usage:
-#   Single-node (4 GPUs):   sbatch isambard.batch
-#   Multi-node  (8 GPUs):    sbatch --nodes=2 --time=02:00:00 isambard.batch
+#   MODEL_PRESET=1B sbatch isambard.batch
+#   MODEL_PRESET=55M sbatch --nodes=1 isambard.batch
+#   MODEL_PRESET=1.4B sbatch --nodes=2 --time=02:00:00 isambard.batch
+#
+# Available presets: 1.4B, 1B, 300M, 55M
 # ============================================
+
+# Model preset (default: 1B)
+MODEL_PRESET=${MODEL_PRESET:-1B}
+LOG_DIR="logs_${MODEL_PRESET}"
 
 echo "============================================"
 echo "Job started at: $(date)"
@@ -24,11 +31,13 @@ echo "Running on nodes: $SLURM_JOB_NODELIST"
 echo "Number of nodes: $SLURM_NNODES"
 echo "GPUs per node (requested): 4"
 echo "Total GPUs (expected): $((SLURM_NNODES * 4))"
+echo "Model preset: $MODEL_PRESET"
+echo "Log directory: $LOG_DIR"
 echo "============================================"
 echo ""
 
 # Create logs directory
-mkdir -p logs_lobs5_3072x32
+mkdir -p $LOG_DIR
 
 # Change to working directory
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
@@ -68,11 +77,14 @@ echo "[*] Starting training at: $(date)"
 echo "============================================"
 echo ""
 
+# Export MODEL_PRESET for wrapper script
+export MODEL_PRESET
+
 # Run training
 if [ $NNODES -eq 1 ]; then
     # Single-node: use wrapper script for environment setup
     bash /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/bin/run_experiments/run_lobster_padded_large.sh \
-        2>&1 | tee logs_lobs5_3072x32/training_${SLURM_JOB_ID}.log
+        2>&1 | tee ${LOG_DIR}/training_${SLURM_JOB_ID}.log
 else
     # Multi-node: use srun with wrapper script
     srun --nodes=$NNODES \
@@ -80,7 +92,7 @@ else
          --ntasks-per-node=1 \
          --gres=gpu:$GPUS_PER_NODE \
          --gpu-bind=map_gpu:0,1,2,3 \
-         --output=logs_lobs5_3072x32/training_${SLURM_JOB_ID}_node%n.log \
+         --output=${LOG_DIR}/training_${SLURM_JOB_ID}_node%n.log \
          --export=ALL \
          bash /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/bin/run_experiments/run_lobster_padded_large.sh
 fi
