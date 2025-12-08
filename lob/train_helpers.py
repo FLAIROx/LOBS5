@@ -816,7 +816,7 @@ def train_step(
         #     print(f"[loss_fn] Lambda_im dtype: {lambda_im.dtype}, B dtype: {b_param.dtype}")  # DEBUG BF16
         # jax.debug.callback(check_params_dtype_callback, params)  # DEBUG BF16
 
-        # # ===== NaN检测点1: 输入参数 =====
+        # # ===== NaN Detection Point 1: Input Parameters =====
         # params_has_nan = jax.tree_util.tree_reduce(  # mixed precision overflow debug
         #     lambda a, b: a | b,  # mixed precision overflow debug
         #     jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), params),  # mixed precision overflow debug
@@ -841,7 +841,7 @@ def train_step(
                 method='__call_ar__'
             )
 
-        # # ===== NaN检测点2: Forward输出 =====
+        # # ===== NaN Detection Point 2: Forward Output =====
         # logits_has_nan = np.any(np.isnan(logits))  # mixed precision overflow debug
         # jax.debug.print("[NaN Check 2] Logits has NaN: {}, dtype: {}, range: [{}, {}]", logits_has_nan, logits.dtype, np.min(logits), np.max(logits))  # DEBUG BF16
 
@@ -866,7 +866,7 @@ def train_step(
         # average cross-ent loss
         loss = np.mean(ce)
 
-        # ===== NaN检测点3: Loss =====
+        # ===== NaN Detection Point 3: Loss =====
         # loss_has_nan = np.isnan(loss)  # mixed precision overflow debug
         # jax.debug.print("[NaN Check 3] Loss has NaN: {}, value: {:.6f}", loss_has_nan, loss)  # mixed precision overflow debug
 
@@ -881,7 +881,7 @@ def train_step(
     #     print(f"[After backward] Lambda_im_grad dtype: {lambda_im_grad.dtype}, B_grad dtype: {b_grad.dtype}")  # DEBUG BF16
     # jax.debug.callback(check_grads_dtype_callback, grads)  # DEBUG BF16
 
-    # # ===== NaN检测点4: 梯度 =====
+    # # ===== NaN Detection Point 4: Gradients =====
     # grads_has_nan = jax.tree_util.tree_reduce(  # mixed precision overflow debug
     #     lambda a, b: a | b,  # mixed precision overflow debug
     #     jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), grads),  # mixed precision overflow debug
@@ -889,7 +889,7 @@ def train_step(
     # )  # mixed precision overflow debug
     # jax.debug.print("[NaN Check 4] Grads has NaN: {}", grads_has_nan)  # mixed precision overflow debug
 
-    # # ===== NaN检测点5: 梯度范数 =====
+    # # ===== NaN Detection Point 5: Gradient Norm =====
     # grad_norm = np.sqrt(jax.tree_util.tree_reduce(  # mixed precision overflow debug
     #     lambda a, b: a + b,  # mixed precision overflow debug
     #     jax.tree_util.tree_map(lambda x: np.sum(x.astype(np.float32) ** 2), grads),  # mixed precision overflow debug
@@ -943,21 +943,21 @@ def train_step(
 
     # jax.debug.callback(record_all_grads_callback, state.step, grad_norm, grads)  # DEBUG BF16
 
-    # ===== 分层梯度统计 (写入JSON文件) =====
-    # # 计算每个叶子节点的梯度范数
+    # ===== Layered Gradient Statistics (Write to JSON File) =====
+    # # Calculate gradient norm for each leaf node
     # def compute_leaf_norm(grad):  # mixed precision overflow debug
     #     return np.sqrt(np.sum(grad.astype(np.float32) ** 2))  # mixed precision overflow debug
 
     # leaf_norms = jax.tree_util.tree_map(compute_leaf_norm, grads)  # mixed precision overflow debug
     # leaf_norms_with_path = jax.tree_util.tree_leaves_with_path(leaf_norms)  # mixed precision overflow debug
 
-    # # 构建记录并写入文件
+    # # Build record and write to file
     # def write_grad_stats(step_val, global_norm_val, leaf_norms_with_path_val):  # mixed precision overflow debug
-    #     """在host端写入梯度统计到JSON文件"""  # mixed precision overflow debug
-    #     # 从环境变量获取精度模式
+    #     """Write gradient statistics to JSON file on host"""  # mixed precision overflow debug
+    #     # Get precision mode from environment variable
     #     precision = os.environ.get('GRAD_STATS_PRECISION', 'bf16')  # mixed precision overflow debug
 
-    #     # 转换为dict: path -> norm
+    #     # Convert to dict: path -> norm
     #     layer_norms_dict = {}  # mixed precision overflow debug
     #     for path, norm in leaf_norms_with_path_val:  # mixed precision overflow debug
     #         path_str = '/'.join(str(k.key) for k in path)  # mixed precision overflow debug
@@ -974,15 +974,15 @@ def train_step(
     #     with open(filepath, 'a') as f:  # mixed precision overflow debug
     #         f.write(json.dumps(record) + '\n')  # mixed precision overflow debug
 
-    # # 使用callback在host端执行文件写入
+    # # Use callback to execute file write on host
     # jax.debug.callback(write_grad_stats, state.step, grad_norm, leaf_norms_with_path)  # mixed precision overflow debug
 
-    # # ===== 梯度裁剪 (Gradient Clipping) - 必须启用防止 BF16 NaN =====
-    # # BF16 训练可以启用：即使梯度范数正常，BF16 更新仍可能产生 NaN
-    # # 原因: BF16 精度不足以处理大参数值（如 Lambda_im=-1303）的小更新
-    # MAX_GRAD_NORM = 1.0  # 标准值
-    # clip_factor = np.minimum(1.0, MAX_GRAD_NORM / (grad_norm + 1e-6))  # 启用 gradient clipping
-    # grads = jax.tree_util.tree_map(lambda g: g * clip_factor, grads)  # 启用 gradient clipping
+    # # ===== Gradient Clipping - Must Enable to Prevent BF16 NaN =====
+    # # BF16 training can enable: even if gradient norm is normal, BF16 updates may still produce NaN
+    # # Reason: BF16 precision insufficient to handle small updates to large parameter values (e.g., Lambda_im=-1303)
+    # MAX_GRAD_NORM = 1.0  # Standard value
+    # clip_factor = np.minimum(1.0, MAX_GRAD_NORM / (grad_norm + 1e-6))  # Enable gradient clipping
+    # grads = jax.tree_util.tree_map(lambda g: g * clip_factor, grads)  # Enable gradient clipping
     # jax.debug.print("[Grad Clip] grad_norm: {}, clip_factor: {}, clipped_norm: {}", grad_norm, clip_factor, grad_norm * clip_factor)  # DEBUG BF16
 
     # UPDATE
@@ -1116,7 +1116,7 @@ def train_step(
     #         pass  # DEBUG BF16
     # jax.debug.callback(sample_params_after, state.params)  # DEBUG BF16
 
-    # ===== NaN检测点6: 更新后参数 + 自动停止训练 =====
+    # ===== NaN Detection Point 6: Updated Parameters + Auto-stop Training =====
     new_params_has_nan = jax.tree_util.tree_reduce(  # NaN detection
         lambda a, b: a | b,  # NaN detection
         jax.tree_util.tree_map(lambda x: np.any(np.isnan(x)), state.params),  # NaN detection

@@ -39,7 +39,7 @@ if __name__ == "__main__":
 	#tf.config.experimental.set_visible_devices([], "GPU")
 
 	# ============================================
-	# Model Presets: 预设模型配置
+	# Model Presets: Pre-configured Model Settings
 	# ============================================
 	MODEL_PRESETS = {
 		"1.4B": {
@@ -107,9 +107,9 @@ if __name__ == "__main__":
 	# Model Preset (overrides individual model parameters if specified)
 	parser.add_argument("--model_preset", type=str, default=None,
 						choices=list(MODEL_PRESETS.keys()),
-						help="预设模型配置: 1.4B, 1B, 300M, 55M。覆盖 d_model, n_layers, blocks, ssm_size_base, per_gpu_bsz, ssm_lr_base, lr_factor, wandb_project, log_dir")
+						help="Pre-configured model settings: 1.4B, 1B, 300M, 55M. Overrides d_model, n_layers, blocks, ssm_size_base, per_gpu_bsz, ssm_lr_base, lr_factor, wandb_project, log_dir")
 	parser.add_argument("--log_dir", type=str, default="logs",
-						help="日志输出目录 (由 model_preset 自动设置)")
+						help="Log output directory (automatically set by model_preset)")
 
 	# Model Parameters
 	parser.add_argument("--n_message_layers", type=int, default=2,  # 2

@@ -62,10 +62,10 @@ class LobPredModel(nn.Module):
                             bn_momentum=self.bn_momentum,
                             step_rescale=self.step_rescale,
                                         )
-        # GPT风格初始化: stddev = 0.02 / sqrt(n_layers) 防止梯度爆炸
+        # GPT-style initialization: stddev = 0.02 / sqrt(n_layers) to prevent gradient explosion
         gpt_init = nn.initializers.normal(stddev=0.02 / math.sqrt(self.n_layers))
 
-        # Kaiming He初始化: variance = 2/fan_in, 适合GELU激活
+        # Kaiming He initialization: variance = 2/fan_in, suitable for GELU activation
         # kaiming_init = nn.initializers.variance_scaling(
         #     scale=2.0, mode='fan_in', distribution='truncated_normal'
         # )
@@ -158,14 +158,14 @@ class LobBookModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
-    dtype: Any = None  # 计算 dtype，由 USE_BF16 环境变量控制
-    use_remat: bool = False  # Gradient checkpointing: 减少运行时内存
+    dtype: Any = None  # Compute dtype, controlled by USE_BF16 environment variable
+    # use_remat: bool = False  # Gradient checkpointing: reduce runtime memory
 
     def setup(self):
         """
         Initializes ...
         """
-        # 确定计算 dtype
+        # Determine compute dtype
         if self.dtype is None:
             use_bf16 = os.environ.get('USE_BF16', '1') == '1'
             compute_dtype = jnp.bfloat16 if use_bf16 else jnp.float32
@@ -185,13 +185,13 @@ class LobBookModel(nn.Module):
                 bn_momentum=self.bn_momentum,
                 step_rescale=self.step_rescale,
                 dtype=compute_dtype,
-                use_remat=self.use_remat,
+                # use_remat=self.use_remat,
             ) for _ in range(self.n_pre_layers))
-        # GPT风格初始化: stddev = 0.02 / sqrt(n_layers) 防止梯度爆炸
+        # GPT-style initialization: stddev = 0.02 / sqrt(n_layers) to prevent gradient explosion
         n_total_layers = self.n_pre_layers + self.n_post_layers
         gpt_init = nn.initializers.normal(stddev=0.02 / math.sqrt(n_total_layers))
 
-        # Kaiming He初始化: variance = 2/fan_in, 适合GELU激活
+        # Kaiming He initialization: variance = 2/fan_in, suitable for GELU activation
         # kaiming_init = nn.initializers.variance_scaling(
         #     scale=2.0, mode='fan_in', distribution='truncated_normal'
         # )
@@ -208,7 +208,7 @@ class LobBookModel(nn.Module):
                 bn_momentum=self.bn_momentum,
                 step_rescale=self.step_rescale,
                 dtype=compute_dtype,
-                use_remat=self.use_remat,
+                # use_remat=self.use_remat,
             )
             for _ in range(self.n_post_layers)
         )
@@ -278,20 +278,20 @@ class FullLobPredModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
-    dtype: Any = None  # 计算 dtype，由 USE_BF16 环境变量控制
+    dtype: Any = None  # Compute dtype, controlled by USE_BF16 environment variable
 
     def setup(self):
         """
         Initializes the S5 stacked encoder and a linear decoder.
         """
-        # 确定计算 dtype
+        # Determine compute dtype
         if self.dtype is None:
             use_bf16 = os.environ.get('USE_BF16', '1') == '1'
             compute_dtype = jnp.bfloat16 if use_bf16 else jnp.float32
         else:
             compute_dtype = self.dtype
 
-        # GPT风格初始化: stddev = 0.02 / sqrt(n_layers) 防止梯度爆炸
+        # GPT-style initialization: stddev = 0.02 / sqrt(n_layers) to prevent gradient explosion
         n_total_layers = self.n_message_layers + self.n_book_pre_layers + self.n_book_post_layers + self.n_fused_layers
         gpt_init = nn.initializers.normal(stddev=0.02 / math.sqrt(n_total_layers))
 
@@ -342,7 +342,7 @@ class FullLobPredModel(nn.Module):
             step_rescale=self.step_rescale,
             dtype=compute_dtype,
         )
-        # decoder 输出 logits，需要 cast 回 FP32 做 softmax，所以这里不用 dtype
+        # decoder outputs logits, need to cast back to FP32 for softmax, so don't use dtype here
         self.decoder = nn.Dense(self.d_output, kernel_init=gpt_init)
 
     def __call__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):
@@ -407,14 +407,14 @@ class PaddedLobPredModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
-    dtype: Any = None  # 计算 dtype，由 USE_BF16 环境变量控制
-    use_remat: bool = False  # Gradient checkpointing: 减少运行时内存
+    dtype: Any = None  # Compute dtype, controlled by USE_BF16 environment variable
+    # use_remat: bool = False  # Gradient checkpointing: reduce runtime memory
 
     def setup(self):
         """
         Initializes the S5 stacked encoder and a linear decoder.
         """
-        # 确定计算 dtype
+        # Determine compute dtype
         if self.dtype is None:
             use_bf16 = os.environ.get('USE_BF16', '1') == '1'
             compute_dtype = jnp.bfloat16 if use_bf16 else jnp.float32
@@ -436,7 +436,7 @@ class PaddedLobPredModel(nn.Module):
             use_embed_layer=True,
             vocab_size=self.d_output,
             dtype=compute_dtype,
-            use_remat=self.use_remat,
+            # use_remat=self.use_remat,
         )
 
         # applied to transposed message output to get seq len for fusion
@@ -456,7 +456,7 @@ class PaddedLobPredModel(nn.Module):
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
             dtype=compute_dtype,
-            use_remat=self.use_remat,
+            # use_remat=self.use_remat,
         )
 
 
@@ -476,12 +476,12 @@ class PaddedLobPredModel(nn.Module):
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
             dtype=compute_dtype,
-            use_remat=self.use_remat,
+            # use_remat=self.use_remat,
         )
-        # GPT风格初始化: stddev = 0.02 / sqrt(n_layers) 防止梯度爆炸
+        # GPT-style initialization: stddev = 0.02 / sqrt(n_layers) to prevent gradient explosion
         n_total_layers = self.n_message_layers + self.n_book_pre_layers + self.n_book_post_layers + self.n_fused_layers
         gpt_init = nn.initializers.normal(stddev=0.02 / math.sqrt(n_total_layers))
-        # decoder 输出 logits，需要 cast 回 FP32 做 softmax，所以这里不用 dtype
+        # decoder outputs logits, need to cast back to FP32 for softmax, so don't use dtype here
         self.decoder = nn.Dense(self.d_output, kernel_init=gpt_init)
 
     def __call__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):

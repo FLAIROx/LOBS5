@@ -30,23 +30,23 @@ class SequenceLayer(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.90
     step_rescale: float = 1.0
-    dtype: Any = jax.numpy.float32  # 默认 FP32，由上层传入 BF16
-    # use_remat: bool = False  # Gradient checkpointing: 反向时重计算激活值以节省内存
+    dtype: Any = jax.numpy.float32  # Default FP32, BF16 passed from upper layer
+    # use_remat: bool = False  # Gradient checkpointing: recompute activations during backward to save memory
 
     def setup(self):
         """Initializes the ssm, batch/layer norm and dropout
         """
-        # 使用 nn.remat 包装 SSM 以节省内存 (反向时重计算)
+        # Use nn.remat to wrap SSM to save memory (recompute during backward)
         # if self.use_remat:
         #     self.seq = nn.remat(self.ssm)(step_rescale=self.step_rescale)
         # else:
         #     self.seq = self.ssm(step_rescale=self.step_rescale)
         self.seq = self.ssm(step_rescale=self.step_rescale)
 
-        # GPT风格初始化: stddev=0.02 防止梯度爆炸
+        # GPT-style initialization: stddev=0.02 to prevent gradient explosion
         gpt_init = nn.initializers.normal(stddev=0.02)
 
-        # Dense 层使用 dtype 控制计算精度，param_dtype 默认 FP32 (master weights)
+        # Dense layer uses dtype to control compute precision, param_dtype defaults to FP32 (master weights)
         if self.activation in ["full_glu"]:
             self.out1 = nn.Dense(self.d_model, kernel_init=gpt_init, dtype=self.dtype)
             self.out2 = nn.Dense(self.d_model, kernel_init=gpt_init, dtype=self.dtype)

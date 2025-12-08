@@ -44,22 +44,22 @@ class StackedEncoderModel(nn.Module):
         """
         Initializes a linear encoder and the stack of S5 layers.
         """
-        # 确定计算 dtype：如果未指定，根据 USE_BF16 环境变量决定
+        # Determine compute dtype: if not specified, decide based on USE_BF16 environment variable
         if self.dtype is None:
             use_bf16 = os.environ.get('USE_BF16', '1') == '1'
             compute_dtype = jax.numpy.bfloat16 if use_bf16 else jax.numpy.float32
         else:
             compute_dtype = self.dtype
 
-        # GPT风格初始化: stddev = 0.02 / sqrt(n_layers) 防止梯度爆炸
+        # GPT-style initialization: stddev = 0.02 / sqrt(n_layers) to prevent gradient explosion
         gpt_init = nn.initializers.normal(stddev=0.02 / math.sqrt(self.n_layers))
 
-        # Kaiming He初始化: variance = 2/fan_in, 适合GELU激活
+        # Kaiming He initialization: variance = 2/fan_in, suitable for GELU activation
         # kaiming_init = nn.initializers.variance_scaling(
         #     scale=2.0, mode='fan_in', distribution='truncated_normal'
         # )
 
-        # Dense/Embed: param_dtype=float32 (master weights), dtype=compute_dtype (BF16 计算)
+        # Dense/Embed: param_dtype=float32 (master weights), dtype=compute_dtype (BF16 computation)
         if self.use_embed_layer:
             self.encoder = nn.Embed(self.vocab_size, self.d_model, dtype=compute_dtype)
         else:
@@ -96,7 +96,7 @@ class StackedEncoderModel(nn.Module):
         #jax.debug.print("Before encoder in StackedEncoderModel {}",x.shape)
         #jax.debug.print("call x_m[0:5] before msg_enc.encoder : {}",x[0:5][0])
 
-        # encoder 已通过 dtype 参数控制计算精度，无需手动 cast
+        # encoder already controls compute precision via dtype parameter, no need to manually cast
         x = self.encoder(x)
 
         #jax.debug.print("call x_m[0:5] after msg_enc.encoder : {}",x[0:5][0])
@@ -216,7 +216,7 @@ class ClassificationModel(nn.Module):
                             bn_momentum=self.bn_momentum,
                             step_rescale=self.step_rescale,
                                         )
-        # GPT风格初始化: stddev = 0.02 / sqrt(n_layers) 防止梯度爆炸
+        # GPT-style initialization: stddev = 0.02 / sqrt(n_layers) to prevent gradient explosion
         gpt_init = nn.initializers.normal(stddev=0.02 / math.sqrt(self.n_layers))
         self.decoder = nn.Dense(self.d_output, kernel_init=gpt_init)
 

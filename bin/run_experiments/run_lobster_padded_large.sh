@@ -36,7 +36,7 @@ module load cuda/12.6
 # Set LD_LIBRARY_PATH for JAX CUDA libraries (complete list from working environment)
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nvshmem/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
-# **************** BF16 vs FP32 梯度对比测试 ****************
+# **************** BF16 vs FP32 Gradient Comparison Test ****************
 # USE_BF16=1 (default): Enable BF16 mixed precision
 # USE_BF16=0: Disable BF16, use FP32
 # GRAD_STATS_PRECISION: Label for gradient stats JSON output (bf16/fp32)
@@ -50,7 +50,7 @@ echo "[Wrapper] Precision mode: USE_BF16=$USE_BF16, GRAD_STATS_PRECISION=$GRAD_S
 export USE_SINGLE_OPTIMIZER=${USE_SINGLE_OPTIMIZER:-0}
 echo "[Wrapper] Optimizer mode: USE_SINGLE_OPTIMIZER=$USE_SINGLE_OPTIMIZER"
 # **************** Optimizer Configuration ****************
-# **************** BF16 vs FP32 梯度对比测试 ****************
+# **************** BF16 vs FP32 Gradient Comparison Test ****************
 
 # **************** MULTI NODES COMMUNICATIONS OPTIMIZATION ****************
 # ✓ Critical: Enable memory preallocate to eliminate 80ms overhead per batch
@@ -152,7 +152,7 @@ python -u -B run_train.py \
         # --data_mode='encoded' \
         # ························································
         # --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded' \
-        # ============= 原始大模型配置 (3072x32) =================
+        # ============= Original Large Model Config (3072x32) =================
         # --blocks=48 --d_model=3072 --n_layers=32 --ssm_size_base=3072 \
         # --epochs=20 --USE_WANDB=True --wandb_project=lobs5-3072x32-tok24 \
         # =========================================================
