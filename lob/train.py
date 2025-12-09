@@ -248,9 +248,11 @@ def train(args):
             # OPTIMIZATION: Enable async checkpointing to avoid GPU idle during save
             # =========================================================================
             # Original: enable_async_checkpointing=False (to avoid multi-node issues)
-            # Optimized: enable_async_checkpointing=True (saves in background thread)
-            # Note: Must call ckpt_mgr.wait_until_finished() before next epoch to ensure safety
-            enable_async_checkpointing=True,
+            # Tested: enable_async_checkpointing=True (saves in background thread)
+            # Result: FAILED - causes barrier timeout (job 1686446) and deadlock (job 1686508)
+            # Reason: Multi-node coordination conflicts with async operations
+            # REVERTED: Keep synchronous checkpoint for multi-node stability
+            enable_async_checkpointing=False,
             # CRITICAL: Tell Orbax only process 0 participates in checkpointing
             # This prevents Orbax's internal barriers from waiting for other processes
             multiprocessing_options=MultiprocessingOptions(primary_host=0, active_processes={0})
@@ -547,6 +549,15 @@ def train(args):
                 save_checkpoint(ckpt_mgr, intra_ckpt, ckpt_step)
                 print(f"[*] Intra-epoch checkpoint saved: epoch {epoch}, segment {eval_idx}, step {step}, dataloader_seed {current_dataloader_seed}")
 
+            # =========================================================================
+            # OPTIMIZATION: Remove post-checkpoint barrier for async checkpoint
+            # =========================================================================
+            # Original: All processes wait for process 0 to finish saving (GPU idle)
+            # Tested: Remove barrier to allow other processes to continue training
+            # Result: DEADLOCK - processes wait for each other in gradient sync
+            # Reason: JAX pmap requires all processes synchronized for collective ops
+            # REVERTED: Must keep post_checkpoint barrier for multi-node stability
+            # =========================================================================
             # Second barrier after checkpoint save to ensure all processes sync before next segment
             if is_multi_node:
                 print(f"[*] Process {args.process_index}: entering post_checkpoint barrier")
