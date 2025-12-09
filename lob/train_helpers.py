@@ -676,37 +676,51 @@ def train_epoch(
     import time
     timing_stats = {'prep_batch': [], 'train_step': [], 'loss_sync': [], 'lr_update': [], 'total': []}
 
-    #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
-    for batch_idx, batch in enumerate(tqdm(trainloader, initial=start_batch_idx), start=start_batch_idx):
-        # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
-        # print(f"train_epoch: Batch input shape: {batch[0].shape}, batch target shape: {batch[1].shape}")
-        if not debug_loading:
+    # =========================================================================
+    # Double-buffering: Overlap CPU prep_batch with GPU train_step
+    # =========================================================================
+    # Timeline WITHOUT double-buffering (serial):
+    #   CPU: [prep0]        [prep1]        [prep2]        ...
+    #   GPU:        [train0]       [train1]       [train2] ...
+    #                       ^ idle  ^ idle  ^ idle
+    #
+    # Timeline WITH double-buffering (overlapped):
+    #   CPU: [prep0] [prep1] [prep2] [prep3] ...
+    #   GPU:        [train0] [train1] [train2] ...
+    #                  ^ no idle - next batch already ready!
+    # =========================================================================
+    use_double_buffering = True  # Set to False to use original serial loop
+
+    if use_double_buffering and not debug_loading:
+        # Double-buffering implementation
+        batch_iter = iter(trainloader)
+        total_batches = len(trainloader)
+
+        # Prefetch the first batch
+        try:
+            next_batch = next(batch_iter)
+            next_inputs, next_labels, next_integration_times = prep_batch(next_batch, seq_len, num_devices)
+            rng, next_drop_rng = jax.random.split(rng)
+        except StopIteration:
+            # Empty dataloader
+            return state, np.array(0.0), None, step
+
+        pbar = tqdm(total=total_batches, initial=start_batch_idx)
+        batch_idx = start_batch_idx
+
+        while True:
             t_total_start = time.perf_counter()
 
             if (step>1) & (step<3) & debug_profiler:
                 jax.profiler.start_trace("/tmp/tensorboard")
 
-            # --- prep_batch timing ---
+            # Current batch is already prepared (from previous iteration or initial prefetch)
             t0 = time.perf_counter()
-            inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
+            inputs, labels, integration_times = next_inputs, next_labels, next_integration_times
+            drop_rng = next_drop_rng
             t1 = time.perf_counter()
 
-            # print("train_epoch: Prepared batch inputs shape:", inputs[0].shape)
-            # print("train_epoch: Prepared batch labels shape:", labels.shape)
-            # print("train_epoch: Inputs 0:5:", inputs[0][0,0:5,:])
-            rng, drop_rng = jax.random.split(rng)
-
-
-            # state,loss=train_step_rnn(
-            #     state,
-            #     drop_rng,
-            #     inputs,
-            #     labels,
-            #     integration_times,
-            #     batchnorm,
-            #     init_hiddens)
-
-            # --- train_step timing ---
+            # --- train_step: GPU computation (async) ---
             t2 = time.perf_counter()
             state, loss, ce, logits = train_step(
                 state,
@@ -717,43 +731,32 @@ def train_epoch(
                 batchnorm,
                 ignore_times,
             )
-            # Force sync to measure actual GPU time
+            # Note: train_step is async - GPU runs in background while we prep next batch
+
+            # --- Prefetch next batch while GPU is busy ---
+            # This is the key optimization: CPU preps next batch while GPU computes current
+            try:
+                next_batch = next(batch_iter)
+                next_inputs, next_labels, next_integration_times = prep_batch(next_batch, seq_len, num_devices)
+                rng, next_drop_rng = jax.random.split(rng)
+                has_next = True
+            except StopIteration:
+                has_next = False
+
+            # Force sync to measure actual GPU time (only for timing)
             if debug_timing:
                 loss.block_until_ready()
             t3 = time.perf_counter()
 
             if debug_profiler:
                 loss.block_until_ready()
-            # print("completes train step")
-            # if (batch_idx==0) & (epoch%100==0):
-            #     np.set_printoptions(threshold=sys.maxsize)
-            #     with open(f'/data1/sascha/data/losses/losses_batch_{batch_idx}_training.txt', 'w') as f:
-            #         print( ce, file=f)
-            #     print("Printing logits of shape ", logits.shape, " to file")
-            #     with open(f'/data1/sascha/data/losses/logits_batch_{batch_idx}_training.txt', 'w') as f:
-            #         print( logits[0,0,0:44,:], file=f)
-            #     np.set_printoptions()
-            #     print('Done Printing')
 
             # --- loss_sync timing ---
             t4 = time.perf_counter()
-            # losses are already averaged across devices (--> should be all the same here)
             batch_losses.append(loss[0])
             if log_ce_tables:
                 cross_entropies.append(ce)
             t5 = time.perf_counter()
-
-            # DISABLED: Per-step wandb logging causes ~10% slowdown even at 1000-step intervals
-            # Only using per-epoch logging in train.py instead
-            # if use_wandb and process_index == 0 and step % 1000 == 0:
-            #     import wandb
-            #     current_lr = decay_function(step, lr, end_step, lr_min)
-            #     wandb.log({
-            #         "train/loss_step": float(loss[0]),
-            #         "train/step": step,
-            #         "train/epoch": epoch,
-            #         "train/lr": float(current_lr),
-            #     })
 
             # --- lr_update timing ---
             t6 = time.perf_counter()
@@ -770,32 +773,157 @@ def train_epoch(
                 timing_stats['loss_sync'].append(t5 - t4)
                 timing_stats['lr_update'].append(t7 - t6)
                 timing_stats['total'].append(t_total_end - t_total_start)
-
-                # Print per-step timing for first 30 steps
                 print(f"[Step {step-1:3d}] prep_batch: {(t1-t0)*1000:6.1f}ms | "
                       f"train_step: {(t3-t2)*1000:6.1f}ms | "
                       f"loss_sync: {(t5-t4)*1000:6.1f}ms | "
                       f"lr_update: {(t7-t6)*1000:6.1f}ms | "
                       f"total: {(t_total_end-t_total_start)*1000:6.1f}ms")
 
-            # Increment batch counter
             batches_processed += 1
+            batch_idx += 1
+            pbar.update(1)
 
             if (step>20) & (step<=21) & debug_profiler:
                 jax.profiler.stop_trace()
                 break
 
-            # Check max_batches limit (for intra-epoch evaluation)
             if (max_batches is not None) and (batches_processed >= max_batches):
                 print(f"[train_epoch] Reached max_batches={max_batches}, stopping segment")
                 break
 
-            # Original curtail_epochs check
             if (curtail_epochs is not None) and (batch_idx>=curtail_epochs):
                 print("Ending epoch early due to curtail_epochs being ",curtail_epochs)
                 break
-        else:
-            continue
+
+            if not has_next:
+                break
+
+        pbar.close()
+
+    else:
+        # =========================================================================
+        # Original serial loop (use_double_buffering=False or debug_loading=True)
+        # =========================================================================
+        #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
+        for batch_idx, batch in enumerate(tqdm(trainloader, initial=start_batch_idx), start=start_batch_idx):
+            # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
+            # print(f"train_epoch: Batch input shape: {batch[0].shape}, batch target shape: {batch[1].shape}")
+            if not debug_loading:
+                t_total_start = time.perf_counter()
+
+                if (step>1) & (step<3) & debug_profiler:
+                    jax.profiler.start_trace("/tmp/tensorboard")
+
+                # --- prep_batch timing ---
+                t0 = time.perf_counter()
+                inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
+                t1 = time.perf_counter()
+
+                # print("train_epoch: Prepared batch inputs shape:", inputs[0].shape)
+                # print("train_epoch: Prepared batch labels shape:", labels.shape)
+                # print("train_epoch: Inputs 0:5:", inputs[0][0,0:5,:])
+                rng, drop_rng = jax.random.split(rng)
+
+
+                # state,loss=train_step_rnn(
+                #     state,
+                #     drop_rng,
+                #     inputs,
+                #     labels,
+                #     integration_times,
+                #     batchnorm,
+                #     init_hiddens)
+
+                # --- train_step timing ---
+                t2 = time.perf_counter()
+                state, loss, ce, logits = train_step(
+                    state,
+                    drop_rng,
+                    inputs,
+                    labels,
+                    integration_times,
+                    batchnorm,
+                    ignore_times,
+                )
+                # Force sync to measure actual GPU time
+                if debug_timing:
+                    loss.block_until_ready()
+                t3 = time.perf_counter()
+
+                if debug_profiler:
+                    loss.block_until_ready()
+                # print("completes train step")
+                # if (batch_idx==0) & (epoch%100==0):
+                #     np.set_printoptions(threshold=sys.maxsize)
+                #     with open(f'/data1/sascha/data/losses/losses_batch_{batch_idx}_training.txt', 'w') as f:
+                #         print( ce, file=f)
+                #     print("Printing logits of shape ", logits.shape, " to file")
+                #     with open(f'/data1/sascha/data/losses/logits_batch_{batch_idx}_training.txt', 'w') as f:
+                #         print( logits[0,0,0:44,:], file=f)
+                #     np.set_printoptions()
+                #     print('Done Printing')
+
+                # --- loss_sync timing ---
+                t4 = time.perf_counter()
+                # losses are already averaged across devices (--> should be all the same here)
+                batch_losses.append(loss[0])
+                if log_ce_tables:
+                    cross_entropies.append(ce)
+                t5 = time.perf_counter()
+
+                # DISABLED: Per-step wandb logging causes ~10% slowdown even at 1000-step intervals
+                # Only using per-epoch logging in train.py instead
+                # if use_wandb and process_index == 0 and step % 1000 == 0:
+                #     import wandb
+                #     current_lr = decay_function(step, lr, end_step, lr_min)
+                #     wandb.log({
+                #         "train/loss_step": float(loss[0]),
+                #         "train/step": step,
+                #         "train/epoch": epoch,
+                #         "train/lr": float(current_lr),
+                #     })
+
+                # --- lr_update timing ---
+                t6 = time.perf_counter()
+                lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
+                state, step = update_learning_rate_per_step(lr_params, state)
+                t7 = time.perf_counter()
+
+                t_total_end = time.perf_counter()
+
+                # Record timing stats
+                if debug_timing and batches_processed < 30:
+                    timing_stats['prep_batch'].append(t1 - t0)
+                    timing_stats['train_step'].append(t3 - t2)
+                    timing_stats['loss_sync'].append(t5 - t4)
+                    timing_stats['lr_update'].append(t7 - t6)
+                    timing_stats['total'].append(t_total_end - t_total_start)
+
+                    # Print per-step timing for first 30 steps
+                    print(f"[Step {step-1:3d}] prep_batch: {(t1-t0)*1000:6.1f}ms | "
+                          f"train_step: {(t3-t2)*1000:6.1f}ms | "
+                          f"loss_sync: {(t5-t4)*1000:6.1f}ms | "
+                          f"lr_update: {(t7-t6)*1000:6.1f}ms | "
+                          f"total: {(t_total_end-t_total_start)*1000:6.1f}ms")
+
+                # Increment batch counter
+                batches_processed += 1
+
+                if (step>20) & (step<=21) & debug_profiler:
+                    jax.profiler.stop_trace()
+                    break
+
+                # Check max_batches limit (for intra-epoch evaluation)
+                if (max_batches is not None) and (batches_processed >= max_batches):
+                    print(f"[train_epoch] Reached max_batches={max_batches}, stopping segment")
+                    break
+
+                # Original curtail_epochs check
+                if (curtail_epochs is not None) and (batch_idx>=curtail_epochs):
+                    print("Ending epoch early due to curtail_epochs being ",curtail_epochs)
+                    break
+            else:
+                continue
         
     
         
