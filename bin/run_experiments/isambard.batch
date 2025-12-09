@@ -8,6 +8,9 @@
 #SBATCH --mem=0
 #SBATCH --time=01:00:00
 #SBATCH --contiguous
+#SBATCH --exclude=nid010718
+
+
 
 # ============================================
 # LOBS5 Training Script (Single/Multi-Node)
