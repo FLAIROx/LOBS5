@@ -244,8 +244,13 @@ def train(args):
             max_to_keep=10,
             keep_period=5,
             # step_prefix=f'{run.name}_{run.id}',
-            # Disable async checkpointing to avoid multi-node issues
-            enable_async_checkpointing=False,
+            # =========================================================================
+            # OPTIMIZATION: Enable async checkpointing to avoid GPU idle during save
+            # =========================================================================
+            # Original: enable_async_checkpointing=False (to avoid multi-node issues)
+            # Optimized: enable_async_checkpointing=True (saves in background thread)
+            # Note: Must call ckpt_mgr.wait_until_finished() before next epoch to ensure safety
+            enable_async_checkpointing=True,
             # CRITICAL: Tell Orbax only process 0 participates in checkpointing
             # This prevents Orbax's internal barriers from waiting for other processes
             multiprocessing_options=MultiprocessingOptions(primary_host=0, active_processes={0})
@@ -372,6 +377,17 @@ def train(args):
 
     for epoch in range(start_epoch, args.epochs):
         print(f"[*] Starting Training Epoch {epoch + 1}...")
+
+        # =========================================================================
+        # Wait for previous epoch's async checkpoint to finish (if any)
+        # =========================================================================
+        # Orbax async checkpointing saves in background thread
+        # We must wait before starting new epoch to ensure data safety
+        if args.process_index == 0 and ckpt_mgr is not None and epoch > start_epoch:
+            print(f"[*] Waiting for previous epoch's async checkpoint to finish...")
+            ckpt_mgr.wait_until_finished()
+            print(f"[*] Previous checkpoint write completed")
+
         # jax.profiler.start_trace("./jax-traces")
 
         if epoch < args.warmup_end:
@@ -540,22 +556,22 @@ def train(args):
         # End of intra-epoch loop
         print(f"\n[*] Epoch {epoch + 1} Training Complete - All {num_evals_per_epoch} segments done")
 
+        # =========================================================================
+        # OPTIMIZATION: Defer trainloader recreation to overlap with test evaluation
+        # =========================================================================
+        # Original (causes GPU idle ~1-2s before validation):
+        # if args.random_offsets_train:
+        #     current_dataloader_seed = int(random.randint(skey, (1,), 0, 100000)[0])
+        #     print(f"[*] Next epoch dataloader_seed: {current_dataloader_seed}")
+        #     del trainloader
+        #     trainloader = create_lobster_train_loader(...)
+        # =========================================================================
+        # Optimized: Defer recreation to AFTER test (see below)
+        # Pre-generate seed now, recreate trainloader after test completes
+        next_epoch_dataloader_seed = None
         if args.random_offsets_train:
-            # reinit training loader, so that sequences are initialised with different offsets
-            # Generate new random seed for next epoch and update current_dataloader_seed for checkpoint
-            current_dataloader_seed = int(random.randint(skey, (1,), 0, 100000)[0])
-            print(f"[*] Next epoch dataloader_seed: {current_dataloader_seed}")
-            del trainloader
-            trainloader = create_lobster_train_loader(
-                lobster_dataset,
-                current_dataloader_seed,
-                args.effective_bsz,
-                num_workers=args.n_data_workers,
-                reset_train_offsets=args.random_offsets_train,
-                shuffle=args.shuffle_train,
-                use_distributed_sampler=args.is_distributed,
-                process_rank=args.process_index,
-                process_count=args.process_count)
+            next_epoch_dataloader_seed = int(random.randint(skey, (1,), 0, 100000)[0])
+            print(f"[*] Next epoch dataloader_seed prepared: {next_epoch_dataloader_seed} (will recreate after test)")
         # ===== End-of-Epoch: Full Validation and Test Evaluation =====
         print(f"\n{'='*80}")
         print(f"[*] Epoch {epoch + 1} - Final Evaluation (complete val + test sets)")
@@ -733,14 +749,36 @@ def train(args):
             wandb.run.summary["Best Epoch"] = best_epoch
             wandb.run.summary["Best Test Loss"] = best_test_loss
             wandb.run.summary["Best Test Accuracy"] = best_test_acc
+
+        # =========================================================================
+        # OPTIMIZATION: Recreate trainloader AFTER test (overlapped with GPU busy time)
+        # =========================================================================
+        # Test evaluation has completed, now recreate trainloader for next epoch
+        # This happens while doing other CPU work (wandb logging, gc, etc.)
+        if next_epoch_dataloader_seed is not None:
+            print(f"[*] Recreating trainloader for next epoch (seed={next_epoch_dataloader_seed})")
+            del trainloader
+            trainloader = create_lobster_train_loader(
+                lobster_dataset,
+                next_epoch_dataloader_seed,
+                args.effective_bsz,
+                num_workers=args.n_data_workers,
+                reset_train_offsets=args.random_offsets_train,
+                shuffle=args.shuffle_train,
+                use_distributed_sampler=args.is_distributed,
+                process_rank=args.process_index,
+                process_count=args.process_count)
+            current_dataloader_seed = next_epoch_dataloader_seed
+            print(f"[*] Trainloader recreated for next epoch")
+
         # print("IGNORING EARLY STOPPING FOR TINY EPOCH SIZE ")
         # After each epoch
         # jax.clear_backends()  # Clears JAX backends: releases all GPU/TPU device memory; disconnects devices; too aggressive, breaks subsequent ops
         # jax.profiler.stop_trace()  # Stops JAX profiler: ends trace recording; writes trace data to disk
-        
-        
-        
-        
+
+
+
+
         gc.collect()  # Python GC: frees Python objects (batch_losses, temp tensors); triggers PyTorch/numpy memory release
 
         import torch
@@ -749,3 +787,11 @@ def train(args):
         # jax.clear_caches()  # Clears JIT cache: frees XLA compiled graphs (100s MB~GBs); side effect: next epoch recompiles (slower + temp memory spike)
         if count > args.early_stop_patience:
             break
+
+    # =========================================================================
+    # Wait for final async checkpoint to finish before exiting
+    # =========================================================================
+    if args.process_index == 0 and ckpt_mgr is not None:
+        print(f"[*] Training complete, waiting for final checkpoint to finish...")
+        ckpt_mgr.wait_until_finished()
+        print(f"[*] Final checkpoint write completed")

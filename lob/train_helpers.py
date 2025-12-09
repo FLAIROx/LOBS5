@@ -689,7 +689,9 @@ def train_epoch(
     #   GPU:        [train0] [train1] [train2] ...
     #                  ^ no idle - next batch already ready!
     # =========================================================================
-    use_double_buffering = True  # Set to False to use original serial loop
+    # DISABLED: Causes OOM (65.72GiB) with no speed improvement (1.489 vs 1.498 it/s)
+    # Root cause of GPU idle is validation/checkpoint barriers, not prep_batch
+    use_double_buffering = False  # Set to False to use original serial loop
 
     if use_double_buffering and not debug_loading:
         # Double-buffering implementation
