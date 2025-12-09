@@ -732,9 +732,17 @@ def train(args):
             wandb.run.summary["Best Test Accuracy"] = best_test_acc
         # print("IGNORING EARLY STOPPING FOR TINY EPOCH SIZE ")
         # After each epoch
-        gc.collect()
-        # jax.clear_backends()
-        jax.clear_caches()
-        # jax.profiler.stop_trace()
+        # jax.clear_backends()  # Clears JAX backends: releases all GPU/TPU device memory; disconnects devices; too aggressive, breaks subsequent ops
+        # jax.profiler.stop_trace()  # Stops JAX profiler: ends trace recording; writes trace data to disk
+        
+        
+        
+        
+        gc.collect()  # Python GC: frees Python objects (batch_losses, temp tensors); triggers PyTorch/numpy memory release
+
+        import torch
+        torch.cuda.empty_cache()  # Force release PyTorch CUDA cache to free memory and reduce fragmentation
+
+        # jax.clear_caches()  # Clears JIT cache: frees XLA compiled graphs (100s MB~GBs); side effect: next epoch recompiles (slower + temp memory spike)
         if count > args.early_stop_patience:
             break
