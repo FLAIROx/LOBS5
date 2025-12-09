@@ -652,6 +652,7 @@ def train_epoch(
         process_index=0,
         max_batches=None,  # New: limit number of batches to train (for intra-epoch evaluation)
         start_batch_idx=0,  # Starting batch index for tqdm display (for intra-epoch segments)
+        debug_timing=False,  # New: enable timing profiler for each step
     ):
 
     """
@@ -662,6 +663,7 @@ def train_epoch(
                      Used for intra-epoch evaluation to train only a segment of the epoch.
         start_batch_idx: Starting batch index for tqdm display. Used to show correct
                          global batch numbers when training in segments.
+        debug_timing: If True, print timing breakdown for each step (first 30 steps only).
     """
     # Store Metrics
     batch_losses = []
@@ -670,21 +672,32 @@ def train_epoch(
     decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min = lr_params
     batches_processed = 0  # Track how many batches we've processed in this call
 
+    # Timing profiler
+    import time
+    timing_stats = {'prep_batch': [], 'train_step': [], 'loss_sync': [], 'lr_update': [], 'total': []}
+
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     for batch_idx, batch in enumerate(tqdm(trainloader, initial=start_batch_idx), start=start_batch_idx):
         # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
         # print(f"train_epoch: Batch input shape: {batch[0].shape}, batch target shape: {batch[1].shape}")
         if not debug_loading:
+            t_total_start = time.perf_counter()
+
             if (step>1) & (step<3) & debug_profiler:
                 jax.profiler.start_trace("/tmp/tensorboard")
+
+            # --- prep_batch timing ---
+            t0 = time.perf_counter()
             inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
+            t1 = time.perf_counter()
+
             # print("train_epoch: Prepared batch inputs shape:", inputs[0].shape)
             # print("train_epoch: Prepared batch labels shape:", labels.shape)
             # print("train_epoch: Inputs 0:5:", inputs[0][0,0:5,:])
             rng, drop_rng = jax.random.split(rng)
 
-            
-            # state,loss=train_step_rnn(                
+
+            # state,loss=train_step_rnn(
             #     state,
             #     drop_rng,
             #     inputs,
@@ -693,7 +706,8 @@ def train_epoch(
             #     batchnorm,
             #     init_hiddens)
 
-            # print("Gets to train")
+            # --- train_step timing ---
+            t2 = time.perf_counter()
             state, loss, ce, logits = train_step(
                 state,
                 drop_rng,
@@ -703,6 +717,11 @@ def train_epoch(
                 batchnorm,
                 ignore_times,
             )
+            # Force sync to measure actual GPU time
+            if debug_timing:
+                loss.block_until_ready()
+            t3 = time.perf_counter()
+
             if debug_profiler:
                 loss.block_until_ready()
             # print("completes train step")
@@ -716,10 +735,13 @@ def train_epoch(
             #     np.set_printoptions()
             #     print('Done Printing')
 
+            # --- loss_sync timing ---
+            t4 = time.perf_counter()
             # losses are already averaged across devices (--> should be all the same here)
             batch_losses.append(loss[0])
             if log_ce_tables:
                 cross_entropies.append(ce)
+            t5 = time.perf_counter()
 
             # DISABLED: Per-step wandb logging causes ~10% slowdown even at 1000-step intervals
             # Only using per-epoch logging in train.py instead
@@ -733,8 +755,28 @@ def train_epoch(
             #         "train/lr": float(current_lr),
             #     })
 
+            # --- lr_update timing ---
+            t6 = time.perf_counter()
             lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
             state, step = update_learning_rate_per_step(lr_params, state)
+            t7 = time.perf_counter()
+
+            t_total_end = time.perf_counter()
+
+            # Record timing stats
+            if debug_timing and batches_processed < 30:
+                timing_stats['prep_batch'].append(t1 - t0)
+                timing_stats['train_step'].append(t3 - t2)
+                timing_stats['loss_sync'].append(t5 - t4)
+                timing_stats['lr_update'].append(t7 - t6)
+                timing_stats['total'].append(t_total_end - t_total_start)
+
+                # Print per-step timing for first 30 steps
+                print(f"[Step {step-1:3d}] prep_batch: {(t1-t0)*1000:6.1f}ms | "
+                      f"train_step: {(t3-t2)*1000:6.1f}ms | "
+                      f"loss_sync: {(t5-t4)*1000:6.1f}ms | "
+                      f"lr_update: {(t7-t6)*1000:6.1f}ms | "
+                      f"total: {(t_total_end-t_total_start)*1000:6.1f}ms")
 
             # Increment batch counter
             batches_processed += 1
@@ -757,6 +799,29 @@ def train_epoch(
         
     
         
+    # Print timing summary at end of epoch/segment
+    if debug_timing and len(timing_stats['total']) > 0:
+        import numpy as onp_timing
+        print("\n" + "="*80)
+        print("TIMING SUMMARY (first 30 steps, with block_until_ready sync):")
+        print("="*80)
+        for key in ['prep_batch', 'train_step', 'loss_sync', 'lr_update', 'total']:
+            vals = onp_timing.array(timing_stats[key]) * 1000  # to ms
+            print(f"  {key:12s}: mean={onp_timing.mean(vals):6.1f}ms | "
+                  f"median={onp_timing.median(vals):6.1f}ms | "
+                  f"std={onp_timing.std(vals):6.1f}ms | "
+                  f"min={onp_timing.min(vals):6.1f}ms | "
+                  f"max={onp_timing.max(vals):6.1f}ms")
+
+        # Calculate percentage breakdown
+        total_mean = onp_timing.mean(timing_stats['total']) * 1000
+        print("-"*80)
+        print("PERCENTAGE BREAKDOWN:")
+        for key in ['prep_batch', 'train_step', 'loss_sync', 'lr_update']:
+            pct = onp_timing.mean(timing_stats[key]) * 1000 / total_mean * 100
+            print(f"  {key:12s}: {pct:5.1f}%")
+        print("="*80 + "\n")
+
     # Return average loss over batches
     if log_ce_tables:
         ce_means=np.mean(np.concatenate(cross_entropies,axis=0),axis=0)

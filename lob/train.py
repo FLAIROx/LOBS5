@@ -455,6 +455,7 @@ def train(args):
                 process_index=args.process_index,
                 max_batches=max_batches,  # Limit batches for this segment
                 start_batch_idx=segment_start_batch,  # Show correct batch numbers in tqdm
+                debug_timing=getattr(args, 'debug_timing', False),  # Enable timing profiler
             )
 
             # Update lr_params with new step count

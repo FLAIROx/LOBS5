@@ -134,6 +134,13 @@ echo "[Wrapper] Data mode: DATA_MODE=$DATA_MODE"
 TOKEN_MODE=${TOKEN_MODE:-22}
 echo "[Wrapper] Token mode: TOKEN_MODE=$TOKEN_MODE"
 
+# **************** Debug Timing Configuration ****************
+# DEBUG_TIMING: True/False (default: False)
+#   Enable timing profiler to measure prep_batch/train_step/lr_update overhead
+# Usage: DEBUG_TIMING=True MODEL_PRESET=55M sbatch ...
+DEBUG_TIMING=${DEBUG_TIMING:-False}
+echo "[Wrapper] Debug timing: DEBUG_TIMING=$DEBUG_TIMING"
+
 # Set data directories based on DATA_MODE
 if [ "$DATA_MODE" = "encoded" ]; then
     DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021'
@@ -168,6 +175,7 @@ python -u -B run_train.py \
         --num_devices=4 --n_data_workers=4 \
         --debug_loading=False \
         --enable_profiler=False \
+        --debug_timing=$DEBUG_TIMING \
         --random_offsets_train=True \
         --shuffle_train=True \
         --debug_overfit=False \
