@@ -22,6 +22,7 @@ from lob.dataloading import create_lobster_prediction_dataset, create_lobster_tr
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import reduce_lr_on_plateau, linear_warmup, \
     cosine_annealing, constant_lr, train_epoch, validate
+# from lob.batch_prefetcher import BatchPrefetcher  # Not needed - DataLoader prefetch_factor=4 already works
 
 
 
@@ -395,8 +396,8 @@ def train(args):
         print('Training on', args.num_devices, 'devices.')
 
         # ===== Intra-Epoch Evaluation Setup =====
-        # num_evals_per_epoch = 5  # Original: 5 segments per epoch with mid-epoch validation
-        num_evals_per_epoch = 1    # Modified: 1 segment = no mid-epoch validation, only end-of-epoch
+        num_evals_per_epoch = 5      # Original: 5 segments per epoch with mid-epoch validation
+        # num_evals_per_epoch = 1    # Modified: 1 segment = no mid-epoch validation, only end-of-epoch
         eval_interval = steps_per_epoch // num_evals_per_epoch
         print(f"[*] Intra-epoch evaluation: {num_evals_per_epoch} evals, interval={eval_interval} steps")
 
