@@ -817,30 +817,24 @@ class ESJaxLOBTrainer:
         # - quant_executed: cumulative quantity executed by policy
         # - task_size: target quantity to execute (from config)
         # - done: True when task_done OR max_steps reached
-        # - Use while_loop for early termination when task is complete
+        # - When quant_executed >= task_size, set qty=0 (no more orders)
+        # - Use jax.lax.scan with fixed steps (like JaxMARL-HFT IPPO training)
         # ============================================================
 
         # Initialize execution tracking
         task_size = jnp.int32(config.task_size)
-        max_steps = jnp.int32(config.n_steps)
 
         # ============================================================
-        # WHILE_LOOP IMPLEMENTATION (like JaxMARL-HFT)
+        # JAX.LAX.SCAN IMPLEMENTATION (like JaxMARL-HFT IPPO training)
         # ============================================================
-        # State tuple for while_loop:
-        # (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-        #  book_feat, order_id, quant_executed, step_counter, done)
+        # Note: JaxMARL-HFT uses scan for training, while_loop only for timing tests.
+        # Scan is more efficient for fixed-step training.
+        # When task is complete, we set qty=0 to stop new orders.
 
-        def cond_fn(state):
-            """Continue while not done."""
-            *_, step_counter, done = state
-            # Continue if: not done AND step_counter < max_steps
-            return ~done & (step_counter < max_steps)
-
-        def body_fn(state):
+        def step_fn(carry, step_idx):
             """Single step: World Model messages → Policy action."""
             (key, msg_history, hiddens_world, hiddens_policy,
-             sim_state, book_feat, order_id, quant_executed, step_counter, _) = state
+             sim_state, book_feat, order_id, quant_executed) = carry
 
             key, key_world, key_policy = jax.random.split(key, 3)
 
@@ -948,33 +942,19 @@ class ESJaxLOBTrainer:
             book_feat = transform_L2_state_wrapper(sim_state)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
             order_id = order_id + 1
-            step_counter = step_counter + 1
-
-            # ============================================================
-            # CHECK TERMINATION (like JaxMARL-HFT is_terminal)
-            # ============================================================
-            # task_done: executed >= task_size
-            # step_done: step_counter >= max_steps (checked in cond_fn)
-            task_done = quant_executed >= task_size
-            done = task_done
-            # ============================================================
 
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-                    book_feat, order_id, quant_executed, step_counter, done)
+                    book_feat, order_id, quant_executed), None
 
-        # Initialize state for while_loop
-        init_state = (
-            key, msg_history, hiddens_world, hiddens_policy, sim_state,
-            book_feat, order_id_counter,
-            jnp.int32(0),  # quant_executed
-            jnp.int32(0),  # step_counter
-            jnp.bool_(False),  # done
+        # Run episode with jax.lax.scan (fixed steps, like JaxMARL-HFT IPPO)
+        (_, _, _, _, final_state, _, final_order_id, final_quant_executed), _ = jax.lax.scan(
+            step_fn,
+            (key, msg_history, hiddens_world, hiddens_policy, sim_state,
+             book_feat, order_id_counter, jnp.int32(0)),  # quant_executed starts at 0
+            jnp.arange(config.n_steps),
+            length=config.n_steps,
         )
-
-        # Run episode with while_loop (early termination when task complete)
-        final_loop_state = jax.lax.while_loop(cond_fn, body_fn, init_state)
-        (_, _, _, _, final_state, _, final_order_id,
-         final_quant_executed, final_step_counter, _) = final_loop_state
+        final_step_counter = config.n_steps  # Fixed step count
 
         # ============================================================
         # FORCE MARKET ORDER AT EPISODE END (like JaxMARL-HFT)
