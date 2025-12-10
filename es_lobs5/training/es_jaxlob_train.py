@@ -321,24 +321,135 @@ def get_sim_msg_es(
     return sim_msg, msg_decoded
 
 
-def extract_book_features(sim_state: 'LobState', l2_depth: int = 10) -> jnp.ndarray:
+def transform_L2_state_wrapper(
+    sim_state: 'LobState',
+    price_levels: int = 500,
+    tick_size: int = 100,
+) -> jnp.ndarray:
     """
-    Extract book features from JaxLOB state for model input.
+    Wrapper to convert JaxLOB sim_state to model book input.
+
+    ════════════════════════════════════════════════════════════════════
+    OVERALL ARCHITECTURE - Where This Function Fits
+    ════════════════════════════════════════════════════════════════════
+
+    ES Training Episode (100 steps):
+
+    ┌──────────────────────────────────────────────────────────┐
+    │  [Init] _create_initial_sim_state()                      │
+    │    ↓                                                     │
+    │  initial_sim_state (JaxLOB with real L2 book)            │
+    │  initial_msg_history (500 msgs, 12000 tokens)            │
+    └──────────────────────────────────────────────────────────┘
+                            ↓
+    ┌──────────────────────────────────────────────────────────┐
+    │  [Loop] For each step (1-100):                           │
+    │                                                          │
+    │    1. World Model generates K background messages        │
+    │       ├─ Forward: (msg_history, book_feat) → log_probs   │
+    │       ├─ Sample: tokens                                  │
+    │       ├─ Execute: JaxLOB updates sim_state               │
+    │       └─ Update: book_feat = THIS FUNCTION ◄─────────┐   │
+    │                                                          │
+    │    2. Policy generates 1 trading message                 │
+    │       ├─ Forward: (msg_history, book_feat) → log_probs   │
+    │       ├─ Sample: tokens                                  │
+    │       ├─ Execute: JaxLOB updates sim_state               │
+    │       └─ Update: book_feat = THIS FUNCTION ◄─────────┘   │
+    └──────────────────────────────────────────────────────────┘
+                            ↓
+    ┌──────────────────────────────────────────────────────────┐
+    │  [Fitness] Compute PnL from final_state.trades           │
+    └──────────────────────────────────────────────────────────┘
+
+    ════════════════════════════════════════════════════════════════════
+    LOCAL VIEW - Detailed Function Call Chain (One Step)
+    ════════════════════════════════════════════════════════════════════
+
+    After JaxLOB executes a message:
+
+         sim_state (updated)
+              ↓
+    ┌─────────────────────────────────────────┐
+    │  transform_L2_state_wrapper()           │  ◄── THIS FUNCTION
+    │                                         │
+    │  Step 1: Extract L2 arrays              │
+    │    ├─ get_L2_state(asks, bids, 10)      │
+    │    └─ Output: (40,) raw L2              │
+    │         [ask_p0, ask_q0, bid_p0, ...]   │
+    │                                         │
+    │  Step 2: Add metadata                   │
+    │    ├─ mid_diff = 0                      │
+    │    ├─ time_s = 34200                    │
+    │    ├─ time_ns = 0                       │
+    │    └─ Concat → (43,) input              │
+    │                                         │
+    │  Step 3: Apply training transform       │
+    │    └─ transform_L2_state()              │
+    │        (from preproc.py)                │
+    │        ├─ Price → indices               │
+    │        ├─ Build volume image (500)      │
+    │        ├─ Norm time                     │
+    │        └─ Output: (503,)                │
+    └─────────────────────────────────────────┘
+              ↓
+         book_feat (503,)
+              ↓
+    ┌─────────────────────────────────────────┐
+    │  ES_PaddedLobPredModel._forward_step()  │
+    │                                         │
+    │  Inputs:                                │
+    │    - msg_history[-24:]                  │
+    │    - book_feat[None, :] ◄── NEEDS (503,)│
+    └─────────────────────────────────────────┘
+
+    ════════════════════════════════════════════════════════════════════
+    WHY WRAPPER IS NEEDED
+    ════════════════════════════════════════════════════════════════════
+
+    Can't use transform_L2_state() directly because:
+
+    Training data format (from LOBSTER files):
+      book_row = [mid_diff, time_s, time_ns, ask_p0, ask_q0, ...]  (43,)
+                  ↓
+      transform_L2_state(book_row) → (503,)
+
+    ES inference has different source (JaxLOB simulator):
+      sim_state = LobState(asks, bids, trades)  ← Different structure!
+                  ↓ Need to convert first
+      book_row = wrapper extracts and formats → (43,)
+                  ↓ Then apply same transform
+      transform_L2_state(book_row) → (503,)
+
+    ════════════════════════════════════════════════════════════════════
+    Reference: preproc.py:transform_L2_state() (lines 18-63)
+              lobster_dataloader.py:523 calls transform_L2_state_numpy()
+              Training config: --book_transform=True --book_depth=500
 
     Args:
-        sim_state: JaxLOB LobState
-        l2_depth: Number of price levels to include
+        sim_state: JaxLOB LobState (asks, bids, trades arrays)
+        price_levels: Volume image size (default 500, matches training)
+        tick_size: Tick size in cents (default 100)
 
     Returns:
-        book_feat: (d_book,) book feature vector
+        book_feat: (503,) = [mid_diff, time_s_norm, time_ns_norm, volume_image(500)]
     """
-    # Extract L2 book state (simplified)
-    # This should match the book feature format expected by the model
-    # The actual implementation depends on your data preprocessing
+    _lazy_import_jaxlob()
+    from gymnax_exchange.jaxob.JaxOrderBookArrays import get_L2_state
+    from preproc import transform_L2_state  # Reuse training transform
 
-    # Placeholder - extract bid/ask prices and quantities
-    # In practice, this should match your LOBS5 book encoding
-    return jnp.zeros((503,), dtype=jnp.float32)  # d_book default
+    # Extract L2 from JaxLOB: (40,) = [ask_p0, ask_q0, bid_p0, bid_q0, ...]
+    l2_state = get_L2_state(sim_state.asks, sim_state.bids, 10)
+
+    # Construct (43,) input: [mid_diff, time_s, time_ns, L2(40)]
+    # Use fixed values for simplicity (mid_diff and time are less critical for ES)
+    book_input = jnp.concatenate([
+        jnp.array([0, 34200, 0], dtype=jnp.int32),  # [mid_diff=0, time_s=34200, time_ns=0]
+        l2_state
+    ])
+
+    # Apply training transform: (43,) → (503,)
+    return transform_L2_state(book_input, price_levels, tick_size)
 
 
 def get_mid_price(sim_state: 'LobState', tick_size: int = 100) -> int:
@@ -653,7 +764,7 @@ class ESJaxLOBTrainer:
         else:
             msg_history = jnp.zeros((context_len,), dtype=jnp.int32)
 
-        book_feat = extract_book_features(sim_state)
+        book_feat = transform_L2_state_wrapper(sim_state, price_levels=500, tick_size=config.tick_size)
         order_id_counter = 500  # Start from 500 to avoid collision with replayed messages
 
         # ============================================================
@@ -702,7 +813,7 @@ class ESJaxLOBTrainer:
                 sim_st = self.sim.process_order_array(sim_st, sim_msg)
 
                 # Update for next iteration
-                book_f = extract_book_features(sim_st)
+                book_f = transform_L2_state_wrapper(sim_st)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], world_msg])
                 oid = oid + 1
 
@@ -740,7 +851,7 @@ class ESJaxLOBTrainer:
             sim_state = self.sim.process_order_array(sim_state, sim_msg)
 
             # Update state for next step
-            book_feat = extract_book_features(sim_state)
+            book_feat = transform_L2_state_wrapper(sim_state)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
             order_id = order_id + 1
 
