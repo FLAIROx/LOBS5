@@ -244,6 +244,7 @@ def get_sim_msg_es(
     order_id: int,
     tick_size: int,
     encoder: Dict,
+    trader_id: int = -88,  # FIX: Allow specifying trader_id (policy=-1000, world=-2000)
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Convert predicted message tokens to JaxLOB format.
@@ -342,7 +343,7 @@ def get_sim_msg_es(
         safe_quantity,
         p_abs,
         order_id,
-        -88,  # trader_id placeholder
+        trader_id,  # FIX: Use specified trader_id (policy=-1000, world=-2000)
         time_s,
         time_ns,
     ], dtype=jnp.int32)
@@ -511,8 +512,10 @@ def get_mid_price(sim_state: 'LobState', tick_size: int = 100) -> int:
     # Fault tolerance: check for invalid prices
     # get_best_bid_and_ask returns 999999999 for empty asks, -1 for empty bids
     # Note: In JAX, we use jnp.where for branching within JIT
-    bid_valid = (best_bid > 0) & (best_bid < 1000000)
-    ask_valid = (best_ask > 0) & (best_ask < 1000000)
+    # FIX: LOBSTER prices can be ~7720700 ($77.20), need higher threshold
+    # 999999999 is the empty marker, so use 900000000 as upper bound
+    bid_valid = (best_bid > 0) & (best_bid < 900000000)
+    ask_valid = (best_ask > 0) & (best_ask < 900000000)
 
     best_bid = jnp.where(bid_valid, best_bid, DEFAULT_MID - tick_size)
     best_ask = jnp.where(ask_valid, best_ask, DEFAULT_MID + tick_size)
@@ -808,6 +811,41 @@ class ESJaxLOBTrainer:
         #      We choose 500 to match the training distribution
         context_len = msg_len * 500  # 500 messages = 12000 tokens
 
+        # ============================================================
+        # ORDER ID DESIGN (FIX for trader identification)
+        # ============================================================
+        # Use distinct order_id ranges for policy vs world:
+        # - Policy orders: 1000000, 1000001, 1000002, ...
+        # - World orders:  2000000, 2000001, 2000002, ...
+        # This allows easy identification in trades array
+        # ============================================================
+        POLICY_ORDER_ID_START = 1000000
+        WORLD_ORDER_ID_START = 2000000
+
+        # ============================================================
+        # CRITICAL FIX: Clear trades array from historical replay
+        # ============================================================
+        # _create_initial_sim_state() replays 500 historical messages,
+        # which produces trades with old order_ids (9M+).
+        # These must be cleared before starting ES training,
+        # otherwise fitness calculation includes historical trades.
+        # NOTE: Only clear trades, NOT asks/bids (order book needs liquidity!)
+        # ============================================================
+        sim_state = sim_state._replace(
+            trades=(jnp.ones((sim_state.trades.shape[0], 6)) * -1).astype(jnp.int32)
+        )
+
+        # FIX: Calculate init_mid_price BEFORE debug print
+        init_mid_price = get_mid_price(sim_state, config.tick_size)
+
+        # === DEBUG: Check order book after clearing trades ===
+        n_asks = jnp.sum(sim_state.asks[:, 0] != -1)
+        n_bids = jnp.sum(sim_state.bids[:, 0] != -1)
+        jax.debug.print(
+            "[DEBUG INIT] After clearing trades: n_asks={}, n_bids={}, init_mid_price={}",
+            n_asks, n_bids, init_mid_price
+        )
+
         # Use provided msg_history if available, otherwise zeros
         if initial_msg_history is not None:
             msg_history = initial_msg_history
@@ -815,13 +853,11 @@ class ESJaxLOBTrainer:
             msg_history = jnp.zeros((context_len,), dtype=jnp.int32)
 
         book_feat = transform_L2_state_wrapper(sim_state, price_levels=500, tick_size=config.tick_size)
-        order_id_counter = 500  # Start from 500 to avoid collision with replayed messages
 
         # ============================================================
         # POLICY ORDER ID TRACKING & EXECUTION TRACKING
         # ============================================================
-        # Track initial mid price for PnL calculation
-        init_mid_price = get_mid_price(sim_state, config.tick_size)
+        # (init_mid_price already calculated above for debug print)
 
         # Policy order IDs follow a predictable pattern:
         # Each step: world_msgs_per_step world orders, then 1 policy order
@@ -849,13 +885,13 @@ class ESJaxLOBTrainer:
         def step_fn(carry, step_idx):
             """Single step: World Model messages → Policy action."""
             (key, msg_history, hiddens_world, hiddens_policy,
-             sim_state, book_feat, order_id, quant_executed) = carry
+             sim_state, book_feat, world_oid_offset, quant_executed) = carry
 
             key, key_world, key_policy = jax.random.split(key, 3)
 
             # ====== 1. World Model generates K background messages ======
-            def world_msg_step(wcarry, _):
-                key, msg_hist, hidden, sim_st, book_f, oid = wcarry
+            def world_msg_step(wcarry, world_msg_idx):
+                key, msg_hist, hidden, sim_st, book_f, oid_offset = wcarry
                 key, sample_key = jax.random.split(key)
 
                 # World Model forward (no noise)
@@ -874,22 +910,25 @@ class ESJaxLOBTrainer:
 
                 # Convert to JaxLOB format and process
                 mid_price = get_mid_price(sim_st, config.tick_size)
+                # FIX: World order_id from WORLD range (2000000 + offset)
+                world_order_id = WORLD_ORDER_ID_START + oid_offset
                 sim_msg, _ = get_sim_msg_es(
-                    world_msg, self.sim, sim_st, mid_price, oid, config.tick_size, self.encoder
+                    world_msg, self.sim, sim_st, mid_price, world_order_id, config.tick_size, self.encoder,
+                    trader_id=-2000  # FIX: World Model trader ID
                 )
                 sim_st = self.sim.process_order_array(sim_st, sim_msg)
 
                 # Update for next iteration
                 book_f = transform_L2_state_wrapper(sim_st)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], world_msg])
-                oid = oid + 1
+                oid_offset = oid_offset + 1
 
-                return (key, msg_hist, hidden, sim_st, book_f, oid), world_msg
+                return (key, msg_hist, hidden, sim_st, book_f, oid_offset), world_msg
 
             # Generate world_msgs_per_step background messages
-            (key_world, msg_history, hiddens_world, sim_state, book_feat, order_id), _ = jax.lax.scan(
+            (key_world, msg_history, hiddens_world, sim_state, book_feat, world_oid_offset), _ = jax.lax.scan(
                 world_msg_step,
-                (key_world, msg_history, hiddens_world, sim_state, book_feat, order_id),
+                (key_world, msg_history, hiddens_world, sim_state, book_feat, world_oid_offset),
                 None,
                 length=config.world_msgs_per_step,
             )
@@ -912,8 +951,11 @@ class ESJaxLOBTrainer:
 
             # Convert to JaxLOB format
             mid_price = get_mid_price(sim_state, config.tick_size)
+            # FIX: Policy order_id from POLICY range (1000000 + step_idx)
+            policy_order_id = POLICY_ORDER_ID_START + step_idx
             sim_msg, msg_decoded = get_sim_msg_es(
-                policy_msg, self.sim, sim_state, mid_price, order_id, config.tick_size, self.encoder
+                policy_msg, self.sim, sim_state, mid_price, policy_order_id, config.tick_size, self.encoder,
+                trader_id=-1000  # FIX: Policy trader ID (all policy orders have same trader)
             )
 
             # ============================================================
@@ -924,6 +966,13 @@ class ESJaxLOBTrainer:
             original_qty = sim_msg[2]
             truncated_qty = jnp.minimum(original_qty, jnp.maximum(quant_remaining, 0))
             sim_msg = sim_msg.at[2].set(truncated_qty)
+
+            # === DEBUG: Check policy message ===
+            jax.debug.print(
+                "[DEBUG POLICY MSG] step={}, oid={}, qty={} (orig={}), price={}, quant_remaining={}",
+                step_idx, policy_order_id, truncated_qty, original_qty, sim_msg[3], quant_remaining,
+                ordered=True
+            )
             # ============================================================
 
             # Process order
@@ -932,44 +981,40 @@ class ESJaxLOBTrainer:
             # ============================================================
             # TRACK EXECUTED QUANTITY
             # ============================================================
-            # Check new trades for this policy order
-            # Policy order ID for this step
-            policy_order_id = order_id
-
+            # Check new trades for this policy order (already defined above as policy_order_id)
             # Find trades where policy is seller (sell task) or buyer (buy task)
-            # trades[:, 2] = buyer_id, trades[:, 3] = seller_id
+            # trades[:, 2] = passive_oid, trades[:, 3] = aggr_oid
             trades = sim_state.trades
             is_new_trade = (trades[:, 0] != -1)  # valid trade
 
-            # For sell task: policy is seller (trades[:, 3] == policy_order_id)
-            # For buy task: policy is buyer (trades[:, 2] == policy_order_id)
-            # Check both as policy could be on either side
-            is_policy_seller = (trades[:, 3] == policy_order_id) & is_new_trade
-            is_policy_buyer = (trades[:, 2] == policy_order_id) & is_new_trade
-            is_policy_trade = is_policy_seller | is_policy_buyer
+            # Check if policy_order_id appears in either passive or aggressor position
+            is_policy_in_trade = ((trades[:, 2] == policy_order_id) | (trades[:, 3] == policy_order_id)) & is_new_trade
 
             # Sum executed quantity from this step's trades
-            step_executed = jnp.sum(jnp.where(is_policy_trade, trades[:, 1], 0))
+            step_executed = jnp.sum(jnp.where(is_policy_in_trade, jnp.abs(trades[:, 1]), 0))
             quant_executed = quant_executed + step_executed
             # ============================================================
 
             # Update state for next step
             book_feat = transform_L2_state_wrapper(sim_state)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
-            order_id = order_id + 1
 
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-                    book_feat, order_id, quant_executed), None
+                    book_feat, world_oid_offset, quant_executed), None
 
         # Run episode with jax.lax.scan (fixed steps, like JaxMARL-HFT IPPO)
-        (_, _, _, _, final_state, _, final_order_id, final_quant_executed), _ = jax.lax.scan(
+        (_, _, _, _, final_state, _, final_world_oid_offset, final_quant_executed), _ = jax.lax.scan(
             step_fn,
             (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-             book_feat, order_id_counter, jnp.int32(0)),  # quant_executed starts at 0
+             book_feat, jnp.int32(0), jnp.int32(0)),  # world_oid_offset=0, quant_executed=0
             jnp.arange(config.n_steps),
             length=config.n_steps,
         )
         final_step_counter = config.n_steps  # Fixed step count
+
+        # FIX: Calculate final_order_id for capacity check
+        # Max order_id used is the last policy order
+        final_order_id = POLICY_ORDER_ID_START + config.n_steps - 1
 
         # ============================================================
         # FORCE MARKET ORDER AT EPISODE END (like JaxMARL-HFT)
@@ -1111,49 +1156,47 @@ class ESJaxLOBTrainer:
         is_doom_trade = (trades[:, 2] == -666666) | (trades[:, 3] == -666666)
         is_doom_trade = is_doom_trade & valid_trades_mask
 
-        # Check if trade involves policy as seller (for sell task)
-        # trades[:, 3] = seller_order_id
-        seller_ids = trades[:, 3]
-        # Policy order check: (id - K) % (K+1) == 0 and id >= K
-        is_policy_seller_id = ((seller_ids - K) % (K + 1) == 0) & (seller_ids >= K)
-        is_policy_seller = is_policy_seller_id & valid_trades_mask
+        # ============================================================
+        # IDENTIFY POLICY TRADES (FIX: Use order_id ranges)
+        # ============================================================
+        # trades[:, 2] = passive_oid, trades[:, 3] = aggr_oid
+        # Policy orders have IDs in range [1000000, 2000000)
+        # World orders have IDs in range [2000000, ...)
+        # ============================================================
+        passive_ids = trades[:, 2]
+        aggr_ids = trades[:, 3]
 
-        # Check if trade involves policy as buyer (for buy task)
-        # trades[:, 2] = buyer_order_id
-        buyer_ids = trades[:, 2]
-        is_policy_buyer_id = ((buyer_ids - K) % (K + 1) == 0) & (buyer_ids >= K)
-        is_policy_buyer = is_policy_buyer_id & valid_trades_mask
-
-        # Include doom trades as agent trades (for the appropriate task type)
-        is_sell_task = (config.task == 'sell')
-        if is_sell_task:
-            is_policy_seller = is_policy_seller | is_doom_trade
-        else:
-            is_policy_buyer = is_policy_buyer | is_doom_trade
+        # Check if passive or aggressor is a policy order
+        is_policy_passive = (passive_ids >= POLICY_ORDER_ID_START) & (passive_ids < WORLD_ORDER_ID_START) & valid_trades_mask
+        is_policy_aggr = (aggr_ids >= POLICY_ORDER_ID_START) & (aggr_ids < WORLD_ORDER_ID_START) & valid_trades_mask
+        is_policy_trade = is_policy_passive | is_policy_aggr
 
         # === DEBUG: Policy trade detection ===
         jax.debug.print(
-            "[DEBUG POLICY] K={}, n_policy_seller={}, n_policy_buyer={}, n_doom={}",
-            K, jnp.sum(is_policy_seller), jnp.sum(is_policy_buyer), jnp.sum(is_doom_trade)
+            "[DEBUG POLICY] K={}, n_policy_trade={}, n_doom={}",
+            K, jnp.sum(is_policy_trade), jnp.sum(is_doom_trade)
         )
 
-        # Compute metrics for both sell and buy scenarios
-        # FIX: Use jnp.abs() for quantity (JaxMARL-HFT uses jnp.abs(otherTrades[:, 1]))
-        # Sell task: policy is seller, revenue = price * qty
-        sell_revenue = jnp.sum(
-            jnp.where(is_policy_seller, trades[:, 0] * jnp.abs(trades[:, 1]), 0)
-        )
-        sell_quantity = jnp.sum(
-            jnp.where(is_policy_seller, jnp.abs(trades[:, 1]), 0)
-        )
+        # ============================================================
+        # COMPUTE REVENUE/COST (Simplified: assume all policy trades match task direction)
+        # ============================================================
+        # Since trades array doesn't store buy/sell direction explicitly,
+        # we assume all policy trades are in the task direction (sell or buy)
+        # ============================================================
+        is_sell_task = (config.task == 'sell')
 
-        # Buy task: policy is buyer, cost = price * qty
-        buy_cost = jnp.sum(
-            jnp.where(is_policy_buyer, trades[:, 0] * jnp.abs(trades[:, 1]), 0)
-        )
-        buy_quantity = jnp.sum(
-            jnp.where(is_policy_buyer, jnp.abs(trades[:, 1]), 0)
-        )
+        if is_sell_task:
+            # Sell task: all policy trades are sells
+            sell_revenue = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
+            sell_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
+            buy_cost = 0
+            buy_quantity = 0
+        else:
+            # Buy task: all policy trades are buys
+            sell_revenue = 0
+            sell_quantity = 0
+            buy_cost = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
+            buy_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
 
         # Total agent quantity (either as seller or buyer)
         agent_quantity = sell_quantity + buy_quantity
@@ -1182,7 +1225,7 @@ class ESJaxLOBTrainer:
 
         # Also compute total trade count for monitoring
         total_trades = jnp.sum(valid_trades_mask)
-        agent_trades = jnp.sum(is_policy_seller | is_policy_buyer)
+        agent_trades = jnp.sum(is_policy_trade)
 
         # ============================================================
         # VWAP AND ADVANTAGE CALCULATION (like JaxMARL-HFT)
@@ -1193,7 +1236,7 @@ class ESJaxLOBTrainer:
         # ============================================================
 
         # Identify other trades (not policy, not doom)
-        is_other_trade = valid_trades_mask & ~is_policy_seller & ~is_policy_buyer & ~is_doom_trade
+        is_other_trade = valid_trades_mask & ~is_policy_trade & ~is_doom_trade
         n_other_trades = jnp.sum(is_other_trade)
 
         # Compute VWAP of other trades
@@ -1228,6 +1271,35 @@ class ESJaxLOBTrainer:
 
         # Advantage vs init_mid_price (current PnL calculation)
         advantage_init = pnl  # Already computed above
+
+        # ============================================================
+        # CONVERT TO BASIS POINTS (bp) for financial interpretation
+        # ============================================================
+        # 1 bp = 0.01% = 0.0001
+        # Advantage (bp) = (price_diff / base_price) × 10000
+        #
+        # For VWAP advantage:
+        #   agent_avg_price vs vwap → (agent_avg_price - vwap) / vwap × 10000 bp
+        # For init_mid advantage:
+        #   agent_avg_price vs init_mid → (agent_avg_price - init_mid) / init_mid × 10000 bp
+        # ============================================================
+
+        # Advantage in bp (vs VWAP)
+        # Price difference per unit: (agent_avg_price - vwap)
+        # As percentage of vwap: (agent_avg_price - vwap) / vwap
+        # In basis points: × 10000
+        advantage_vwap_bp = jnp.where(
+            (agent_quantity > 0) & (vwap > 0),
+            ((agent_avg_price - vwap) / vwap) * 10000,  # bp
+            0.0
+        )
+
+        # Advantage in bp (vs init_mid_price)
+        advantage_init_bp = jnp.where(
+            (agent_quantity > 0) & (init_mid_price > 0),
+            ((agent_avg_price - init_mid_price) / init_mid_price) * 10000,  # bp
+            0.0
+        )
 
         # ============================================================
 
@@ -1282,10 +1354,16 @@ class ESJaxLOBTrainer:
         info = {
             'fitness': fitness,
             'pnl': pnl,
+            # Advantage in dollar units (USD × 1e6 scale)
             'advantage_vwap': advantage_vwap,
             'advantage_init': advantage_init,
+            # Advantage in basis points (bp)
+            'advantage_vwap_bp': advantage_vwap_bp,
+            'advantage_init_bp': advantage_init_bp,
+            # Price benchmarks
             'vwap': vwap,
             'init_mid_price': init_mid_price,
+            # Execution metrics
             'agent_quantity': agent_quantity,
             'agent_avg_price': agent_avg_price,
             'doom_quantity': doom_quantity,
@@ -1507,9 +1585,13 @@ class ESJaxLOBTrainer:
                     'pnl/n_zero': n_zero,
                     'pnl/positive_ratio': n_positive / n if n > 0 else 0,
 
-                    # Advantage metrics (like JaxMARL-HFT)
-                    'advantage/vs_vwap': float(epoch_info['advantage_vwap']),
-                    'advantage/vs_init_mid': float(epoch_info['advantage_init']),
+                    # Advantage metrics in USD (× 1e6 scale)
+                    'advantage/vs_vwap_usd': float(epoch_info['advantage_vwap']),
+                    'advantage/vs_init_mid_usd': float(epoch_info['advantage_init']),
+                    # Advantage metrics in basis points (bp)
+                    'advantage/vs_vwap_bp': float(epoch_info['advantage_vwap_bp']),
+                    'advantage/vs_init_mid_bp': float(epoch_info['advantage_init_bp']),
+                    # Price benchmarks (raw units: price × 10000)
                     'advantage/vwap': float(epoch_info['vwap']),
                     'advantage/init_mid_price': float(epoch_info['init_mid_price']),
 

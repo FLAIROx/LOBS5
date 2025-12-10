@@ -125,10 +125,10 @@ python -u -B -m es_lobs5.training.es_jaxlob_train \
     --sigma=0.01 \
     --lr=0.001 \
     --lora_rank=1 \
-    --n_threads=16 \
+    --n_threads=100 \
     --n_epochs=1000 \
-    --n_steps=10 \
-    --world_msgs_per_step=2 \
+    --n_steps=100 \
+    --world_msgs_per_step=100 \
     --task=sell \
     --task_size=50 \
     --tick_size=100 \
