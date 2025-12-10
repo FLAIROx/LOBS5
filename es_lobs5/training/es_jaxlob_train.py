@@ -669,15 +669,18 @@ class ESJaxLOBTrainer:
         total_trades = jnp.sum(valid_trades_mask)
         agent_trades = jnp.sum(is_policy_seller | is_policy_buyer)
 
-        # DEBUG: Use total_trades as fitness placeholder to verify training works
-        # TODO: Switch back to PnL once order matching is debugged
-        #
-        # The real PnL fitness is computed above but not used yet because
-        # we need to debug why no trades are happening first.
-        #
-        # Current placeholder: total trade count (normalized)
-        # This was working before, so if it still works, the issue is in order matching
-        fitness = jnp.float32(total_trades)
+        # Use PnL as fitness if agent has trades, otherwise use total trade count as fallback
+        # If total_trades > 0 but agent_trades == 0, use total_trades as proxy
+        # This handles the case where the order book is matching but agent orders aren't hitting
+        fitness = jnp.where(
+            agent_quantity > 0,
+            pnl,
+            jnp.where(
+                total_trades > 0,
+                jnp.float32(total_trades) / 100.0,  # Normalized trade count as fallback
+                -0.1  # Small penalty if no trades at all
+            )
+        )
 
         # ============================================================
         # FAULT TOLERANCE: Handle NaN/Inf in fitness
