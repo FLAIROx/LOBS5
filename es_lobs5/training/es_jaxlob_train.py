@@ -669,16 +669,18 @@ class ESJaxLOBTrainer:
         total_trades = jnp.sum(valid_trades_mask)
         agent_trades = jnp.sum(is_policy_seller | is_policy_buyer)
 
-        # Use PnL as fitness if agent has trades, otherwise use total trade count as fallback
-        # If total_trades > 0 but agent_trades == 0, use total_trades as proxy
-        # This handles the case where the order book is matching but agent orders aren't hitting
+        # Use PnL as fitness if agent has trades, otherwise penalize
+        # Penalty logic:
+        #   - If market has trades but agent didn't participate → light penalty (-0.05)
+        #   - If market has no trades at all → heavier penalty (-0.1)
+        # This encourages agent to actively participate in trading
         fitness = jnp.where(
             agent_quantity > 0,
-            pnl,
+            pnl,                    # Agent has trades → use PnL
             jnp.where(
                 total_trades > 0,
-                jnp.float32(total_trades) / 100.0,  # Normalized trade count as fallback
-                -0.1  # Small penalty if no trades at all
+                -0.05,              # Market active but agent didn't trade → light penalty
+                -0.1                # Market dead → heavier penalty
             )
         )
 
