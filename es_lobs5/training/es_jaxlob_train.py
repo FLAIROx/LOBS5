@@ -183,6 +183,8 @@ def create_es_jaxlob_config():
     # Other
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output_dir', type=str, default='./es_jaxlob_checkpoints')
+    parser.add_argument('--token_mode', type=int, default=22, choices=[22, 24],
+                        help='Token mode: 22 (single token size) or 24 (base-100 size)')
 
     # W&B logging
     parser.add_argument('--wandb_project', type=str, default=None,
@@ -609,11 +611,11 @@ class ESJaxLOBTrainer:
         self.sim = OrderBook(nOrders=n_orders, nTrades=n_trades)
         # Create encoder from Vocab class
         from lob.encoding import Vocab
-        # vocab = Vocab()  # Default token_mode=22
-        # FIX: Use token_mode=24 to match checkpoint training
-        # Checkpoint lobs5_d1024_l12_b16_bsz13x4_seed42_jid1684154 was trained with 24tok
-        vocab = Vocab(token_mode=24)
+        # Use token_mode from config (default=22 for backward compatibility)
+        # Try both modes to find which one the checkpoint was trained with
+        vocab = Vocab(token_mode=self.config.token_mode)
         self.encoder = vocab.ENCODING  # Dict[str, Tuple[jax.Array, jax.Array]]
+        print(f"[INIT] Using token_mode={self.config.token_mode}, vocab_size={len(vocab)}")
         
         
         
@@ -769,6 +771,7 @@ class ESJaxLOBTrainer:
         policy_common_params: CommonParams,
         sim_state: 'LobState',
         initial_msg_history: Optional[jnp.ndarray] = None,
+        thread_id: int = -1,  # For debug printing (only print thread 0)
     ) -> float:
         """
         Run a complete episode with step-by-step interleaved simulation.
@@ -779,6 +782,7 @@ class ESJaxLOBTrainer:
             policy_common_params: Policy params (ES perturbed)
             sim_state: Initial JaxLOB state
             initial_msg_history: (480,) optional initial message history from real data
+            thread_id: Thread ID for debug printing (only thread 0 prints)
 
         Returns:
             fitness: total_revenue (PnL)
@@ -920,10 +924,24 @@ class ESJaxLOBTrainer:
                 mid_price = get_mid_price(sim_st, config.tick_size)
                 # FIX: World order_id from WORLD range (2000000 + offset)
                 world_order_id = WORLD_ORDER_ID_START + oid_offset
-                sim_msg, _ = get_sim_msg_es(
+                sim_msg, msg_decoded = get_sim_msg_es(
                     world_msg, self.sim, sim_st, mid_price, world_order_id, config.tick_size, self.encoder,
                     trader_id=-2000  # FIX: World Model trader ID
                 )
+
+                # === DEBUG: Print world model orders (only thread 0, first few steps) ===
+                jax.lax.cond(
+                    (thread_id == 0) & (step_idx < 5) & (world_msg_idx < 3),
+                    lambda: jax.debug.print(
+                        "[WORLD] step={}, world_msg={}, oid={}, event={}, side={}, qty={}, price={}, tokens[4:6]={}",
+                        step_idx, world_msg_idx, world_order_id,
+                        msg_decoded[1], msg_decoded[2], msg_decoded[5], sim_msg[3],
+                        world_msg[4:6],
+                        ordered=True
+                    ),
+                    lambda: None,
+                )
+
                 sim_st = self.sim.process_order_array(sim_st, sim_msg)
 
                 # Update for next iteration
@@ -937,7 +955,7 @@ class ESJaxLOBTrainer:
             (key_world, msg_history, hiddens_world, sim_state, book_feat, world_oid_offset), _ = jax.lax.scan(
                 world_msg_step,
                 (key_world, msg_history, hiddens_world, sim_state, book_feat, world_oid_offset),
-                None,
+                jnp.arange(config.world_msgs_per_step),  # Pass world_msg_idx for debug
                 length=config.world_msgs_per_step,
             )
 
@@ -975,11 +993,19 @@ class ESJaxLOBTrainer:
             truncated_qty = jnp.minimum(original_qty, jnp.maximum(quant_remaining, 0))
             sim_msg = sim_msg.at[2].set(truncated_qty)
 
-            # === DEBUG: Check policy message ===
-            jax.debug.print(
-                "[DEBUG POLICY MSG] step={}, oid={}, qty={} (orig={}), price={}, quant_remaining={}",
-                step_idx, policy_order_id, truncated_qty, original_qty, sim_msg[3], quant_remaining,
-                ordered=True
+            # === DEBUG: Print policy orders (only thread 0, first 10 steps) ===
+            jax.lax.cond(
+                (thread_id == 0) & (step_idx < 10),
+                lambda: jax.debug.print(
+                    "[POLICY] step={}, oid={}, event={}, side={}, qty={} (orig={}), price={}, tokens[4:6]={}",
+                    step_idx, policy_order_id,
+                    msg_decoded[1], msg_decoded[2],  # event_type, direction
+                    truncated_qty, original_qty,     # qty after/before truncation
+                    sim_msg[3],                      # price
+                    policy_msg[4:6],                 # size_high, size_low tokens
+                    ordered=True
+                ),
+                lambda: None,
             )
             # ============================================================
 
@@ -1408,7 +1434,8 @@ class ESJaxLOBTrainer:
         policy_common_params = self.create_policy_common_params(epoch, thread_id)
 
         return self.simulate_episode(
-            key, world_common_params, policy_common_params, initial_sim_state, initial_msg_history
+            key, world_common_params, policy_common_params, initial_sim_state, initial_msg_history,
+            thread_id=thread_id  # Pass thread_id for debug printing
         )
 
     def train_epoch(

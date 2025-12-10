@@ -132,6 +132,7 @@ python -u -B -m es_lobs5.training.es_jaxlob_train \
     --task=sell \
     --task_size=50 \
     --tick_size=100 \
+    --token_mode=24 \
     --seed=42 \
     --output_dir="${OUTPUT_DIR}" \
     --wandb_project=lobs5-es-jaxlob \

@@ -242,8 +242,17 @@ class Vocab:
     NA_TOK = 2
     START_TOK= 3
 
-    def __init__(self) -> None:
+    def __init__(self, token_mode: int = 24) -> None:
+        """
+        Initialize vocabulary with specified token mode.
+
+        Args:
+            token_mode: 22 or 24
+                - 22: Single token for size (range 0-10000), vocab_size ~12000
+                - 24: Base-100 encoding for size (two tokens), vocab_size ~2100
+        """
         self.counter = 4  # 0: MSK, 1: HID, 2: NAN, 3: START
+        self.token_mode = token_mode
         self.ENCODING = {}
         self.DECODING = {}
         self.DECODING_GLOBAL = {}
@@ -251,8 +260,17 @@ class Vocab:
 
         self._add_field('time', range(1000), [3,6,9,12])
         self._add_field('event_type', range(1,5), None)
-        # Changed: Use base-100 encoding for size (100 tokens instead of 10000)
-        self._add_field('size_digit', range(100), [])  # Shared tokens for size high/low digits
+
+        # Size encoding depends on token_mode
+        if token_mode == 22:
+            # 22tok: Single token for size (range 0-10000)
+            self._add_field('size', range(10000), None)
+        elif token_mode == 24:
+            # 24tok: Base-100 encoding for size (two tokens: high/low digits)
+            self._add_field('size_digit', range(100), [])  # Shared tokens for size high/low digits
+        else:
+            raise ValueError(f"Unsupported token_mode: {token_mode}. Must be 22 or 24.")
+
         self._add_field('price', range(1000), [1])
         self._add_field('sign', [-1, 1], None)
         self._add_field('direction', [0, 1], None)
