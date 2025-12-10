@@ -355,12 +355,59 @@ class ESJaxLOBTrainer:
     def _init_jaxlob(self):
         """Initialize JaxLOB order book simulator."""
         _lazy_import_jaxlob()
-        # Create OrderBook instance
-        self.sim = OrderBook()
+        # Create OrderBook instance with larger capacity for ES training
+        # Each episode: n_steps * (world_msgs + 1) messages
+        # Conservative: allow 2x trades for safety
+        n_orders = max(200, self.config.n_steps * 2)
+        n_trades = max(200, self.config.n_steps * 2)
+        self.sim = OrderBook(nOrders=n_orders, nTrades=n_trades)
         # Create encoder from Vocab class
         from lob.encoding import Vocab
         vocab = Vocab()
         self.encoder = vocab.ENCODING  # Dict[str, Tuple[jax.Array, jax.Array]]
+
+    def _create_initial_sim_state(self) -> 'LobState':
+        """
+        Create initial JaxLOB state with a realistic order book.
+
+        If config.init_book_path is provided, load from file.
+        Otherwise, create a synthetic L2 book with:
+        - Mid price: 10000 (in cents, = $100.00)
+        - Spread: 100 (= 1 tick = $1.00)
+        - 10 levels on each side
+        - Decreasing quantity at each level
+
+        Returns:
+            LobState with initialized order book
+        """
+        config = self.config
+
+        if hasattr(config, 'init_book_path') and config.init_book_path:
+            # Load from file
+            import numpy as np
+            l2_data = np.load(config.init_book_path)
+            return self.sim.reset(jnp.array(l2_data))
+
+        # Create synthetic L2 book
+        n_levels = 10
+        mid_price = 10000  # $100.00 in cents
+        tick_size = config.tick_size  # Usually 100 cents = $1.00
+        base_qty = 100  # Base quantity at best price
+
+        # Build L2 data: format expected by init_msgs_from_l2
+        # The format is: [price, qty] pairs, interleaved asks and bids
+        # asks: price ascending from mid + 1 tick
+        # bids: price descending from mid - 1 tick
+        l2_data = []
+        for i in range(n_levels):
+            ask_price = mid_price + (i + 1) * tick_size
+            bid_price = mid_price - (i + 1) * tick_size
+            # Quantity decreases with distance from mid
+            qty = max(10, base_qty - i * 10)
+            l2_data.extend([ask_price, qty, bid_price, qty])
+
+        l2_book = jnp.array(l2_data, dtype=jnp.int32)
+        return self.sim.reset(l2_book)
 
     def create_world_common_params(self) -> CommonParams:
         """Create CommonParams for World Model (frozen, no noise)."""
@@ -558,9 +605,10 @@ class ESJaxLOBTrainer:
         trades = final_state.trades
         K = config.world_msgs_per_step
 
-        # Generate policy order IDs: K, 2K+1, 3K+2, ...
-        step_indices = jnp.arange(config.n_steps)
-        policy_order_ids = step_indices * (K + 1) + K  # shape: (n_steps,)
+        # Policy order IDs follow pattern: K, 2K+1, 3K+2, ...
+        # Formula: order_id is a policy order if (order_id - K) % (K + 1) == 0
+        # And order_id >= K and order_id < total_orders
+        # This is more JAX-friendly than jnp.isin
 
         # Valid trades mask (price != -1)
         valid_trades_mask = trades[:, 0] != -1
@@ -568,12 +616,15 @@ class ESJaxLOBTrainer:
         # Check if trade involves policy as seller (for sell task)
         # trades[:, 3] = seller_order_id
         seller_ids = trades[:, 3]
-        is_policy_seller = jnp.isin(seller_ids, policy_order_ids) & valid_trades_mask
+        # Policy order check: (id - K) % (K+1) == 0 and id >= K
+        is_policy_seller_id = ((seller_ids - K) % (K + 1) == 0) & (seller_ids >= K)
+        is_policy_seller = is_policy_seller_id & valid_trades_mask
 
         # Check if trade involves policy as buyer (for buy task)
         # trades[:, 2] = buyer_order_id
         buyer_ids = trades[:, 2]
-        is_policy_buyer = jnp.isin(buyer_ids, policy_order_ids) & valid_trades_mask
+        is_policy_buyer_id = ((buyer_ids - K) % (K + 1) == 0) & (buyer_ids >= K)
+        is_policy_buyer = is_policy_buyer_id & valid_trades_mask
 
         # Compute metrics for both sell and buy scenarios
         # Sell task: policy is seller, revenue = price * qty
@@ -618,13 +669,15 @@ class ESJaxLOBTrainer:
         total_trades = jnp.sum(valid_trades_mask)
         agent_trades = jnp.sum(is_policy_seller | is_policy_buyer)
 
-        # Use PnL as fitness, with trade count as fallback if no trades
-        # If no agent trades, use a small penalty to encourage trading
-        fitness = jnp.where(
-            agent_quantity > 0,
-            pnl,
-            -0.1  # Small penalty for no trades (not too harsh)
-        )
+        # DEBUG: Use total_trades as fitness placeholder to verify training works
+        # TODO: Switch back to PnL once order matching is debugged
+        #
+        # The real PnL fitness is computed above but not used yet because
+        # we need to debug why no trades are happening first.
+        #
+        # Current placeholder: total trade count (normalized)
+        # This was working before, so if it still works, the issue is in order matching
+        fitness = jnp.float32(total_trades)
 
         # ============================================================
         # FAULT TOLERANCE: Handle NaN/Inf in fitness
@@ -758,9 +811,9 @@ class ESJaxLOBTrainer:
             )
             print(f"W&B initialized: {wandb_run.url}")
 
-        # Get initial JaxLOB state
-        # In practice, load from your data
-        initial_sim_state = self.sim.reset()  # Placeholder
+        # Get initial JaxLOB state with realistic order book
+        initial_sim_state = self._create_initial_sim_state()
+        print(f"Initial order book created with {self.sim.nOrders} order slots, {self.sim.nTrades} trade slots")
 
         # Training loop
         best_fitness = -float('inf')

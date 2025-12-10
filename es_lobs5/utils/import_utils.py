@@ -99,14 +99,59 @@ def get_noiser_modules():
     return _loaded_modules['noisers']
 
 
+def _create_fixed_eggroll(base_eggroll_cls):
+    """
+    Create a fixed EggRoll class that correctly handles JAX PRNG key shapes.
+
+    The original EggRoll._do_update checks `len(base_key.shape) == 0` to determine
+    if base_key is a scalar vs array. But JAX PRNG keys always have shape (2,),
+    so this check is never True.
+
+    Fix: Check `base_key.ndim == 1` instead (single key has ndim=1, batched has ndim=2).
+    """
+    import jax
+    import jax.numpy as jnp
+
+    class FixedEggRoll(base_eggroll_cls):
+        @classmethod
+        def _do_update(cls, param, base_key, fitnesses, iterinfos, map_classification, sigma, frozen_noiser_params, **kwargs):
+            # Get update function based on map classification
+            # [_simple_full_update, _simple_lora_update, _noop_update, _noop_update]
+            update_fn = [
+                base_eggroll_cls._do_update.__func__.__globals__['_simple_full_update'],
+                base_eggroll_cls._do_update.__func__.__globals__['_simple_lora_update'],
+                base_eggroll_cls._do_update.__func__.__globals__['_noop_update'],
+                base_eggroll_cls._do_update.__func__.__globals__['_noop_update'],
+            ][map_classification]
+
+            # FIX: Use ndim instead of len(shape) to check for single key
+            # JAX PRNG keys have shape (2,), so ndim=1 for single key, ndim=2 for batched
+            if base_key.ndim == 1:
+                new_grad = update_fn(sigma, param, base_key, fitnesses, iterinfos, frozen_noiser_params)
+            else:
+                new_grad = jax.lax.scan(
+                    lambda _, x: (0, update_fn(sigma, x[0], x[1], fitnesses, iterinfos, frozen_noiser_params)),
+                    0,
+                    xs=(param, base_key)
+                )[1]
+
+            return -(new_grad * jnp.sqrt(fitnesses.size)).astype(param.dtype)
+
+    return FixedEggRoll
+
+
 def get_all_noisers():
     """Return dict of all available noisers."""
     noisers = get_noiser_modules()
+
+    # Create fixed EggRoll that handles JAX PRNG key shapes correctly
+    FixedEggRoll = _create_fixed_eggroll(noisers['eggroll'].EggRoll)
+
     return {
         "noop": noisers['base_noiser'].Noiser,
         "open_es": noisers['open_es'].OpenES,
-        "eggroll": noisers['eggroll'].EggRoll,
+        "eggroll": FixedEggRoll,  # Use fixed version
         "eggrollbs": noisers['eggroll_bs'].EggRollBS,
-        "reeggroll": noisers['eggroll'].EggRoll,
+        "reeggroll": FixedEggRoll,  # Use fixed version
         "sparse": noisers['sparse'].Sparse,
     }
