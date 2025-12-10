@@ -1080,6 +1080,7 @@ class ESJaxLOBTrainer:
 
         trades = final_state.trades
         K = config.world_msgs_per_step
+        tick_size = config.tick_size  # For price normalization
 
         # Policy order IDs follow pattern: K, 2K+1, 3K+2, ...
         # Formula: order_id is a policy order if (order_id - K) % (K + 1) == 0
@@ -1088,6 +1089,18 @@ class ESJaxLOBTrainer:
 
         # Valid trades mask (price != -1)
         valid_trades_mask = trades[:, 0] != -1
+        n_valid_trades = jnp.sum(valid_trades_mask)
+
+        # === DEBUG: Trades array structure ===
+        jax.debug.print(
+            "[DEBUG TRADES] n_valid={}, first 5 trades:\n"
+            "  prices: {}\n"
+            "  qtys: {}\n"
+            "  col2 (passive_oid): {}\n"
+            "  col3 (aggr_oid): {}",
+            n_valid_trades,
+            trades[:5, 0], trades[:5, 1], trades[:5, 2], trades[:5, 3]
+        )
 
         # ============================================================
         # DOOM TRADE DETECTION (like JaxMARL-HFT)
@@ -1118,21 +1131,28 @@ class ESJaxLOBTrainer:
         else:
             is_policy_buyer = is_policy_buyer | is_doom_trade
 
+        # === DEBUG: Policy trade detection ===
+        jax.debug.print(
+            "[DEBUG POLICY] K={}, n_policy_seller={}, n_policy_buyer={}, n_doom={}",
+            K, jnp.sum(is_policy_seller), jnp.sum(is_policy_buyer), jnp.sum(is_doom_trade)
+        )
+
         # Compute metrics for both sell and buy scenarios
+        # FIX: Use jnp.abs() for quantity (JaxMARL-HFT uses jnp.abs(otherTrades[:, 1]))
         # Sell task: policy is seller, revenue = price * qty
         sell_revenue = jnp.sum(
-            jnp.where(is_policy_seller, trades[:, 0] * trades[:, 1], 0)
+            jnp.where(is_policy_seller, trades[:, 0] * jnp.abs(trades[:, 1]), 0)
         )
         sell_quantity = jnp.sum(
-            jnp.where(is_policy_seller, trades[:, 1], 0)
+            jnp.where(is_policy_seller, jnp.abs(trades[:, 1]), 0)
         )
 
         # Buy task: policy is buyer, cost = price * qty
         buy_cost = jnp.sum(
-            jnp.where(is_policy_buyer, trades[:, 0] * trades[:, 1], 0)
+            jnp.where(is_policy_buyer, trades[:, 0] * jnp.abs(trades[:, 1]), 0)
         )
         buy_quantity = jnp.sum(
-            jnp.where(is_policy_buyer, trades[:, 1], 0)
+            jnp.where(is_policy_buyer, jnp.abs(trades[:, 1]), 0)
         )
 
         # Total agent quantity (either as seller or buyer)
@@ -1174,11 +1194,19 @@ class ESJaxLOBTrainer:
 
         # Identify other trades (not policy, not doom)
         is_other_trade = valid_trades_mask & ~is_policy_seller & ~is_policy_buyer & ~is_doom_trade
+        n_other_trades = jnp.sum(is_other_trade)
 
         # Compute VWAP of other trades
-        other_volume = jnp.sum(jnp.where(is_other_trade, trades[:, 1], 0))
-        other_value = jnp.sum(jnp.where(is_other_trade, trades[:, 0] * trades[:, 1], 0))
+        # NOTE: Use absolute value for quantity (like JaxMARL-HFT)
+        other_volume = jnp.sum(jnp.where(is_other_trade, jnp.abs(trades[:, 1]), 0))
+        other_value = jnp.sum(jnp.where(is_other_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
         vwap = jnp.where(other_volume > 0, other_value / other_volume, init_mid_price)
+
+        # === DEBUG: VWAP calculation ===
+        jax.debug.print(
+            "[DEBUG VWAP] n_other_trades={}, other_volume={}, other_value={}, vwap={}, init_mid_price={}",
+            n_other_trades, other_volume, other_value, vwap, init_mid_price
+        )
 
         # Agent's average execution price
         agent_revenue = sell_revenue + buy_cost  # Total value traded
@@ -1191,6 +1219,12 @@ class ESJaxLOBTrainer:
         # For sell: advantage = revenue - vwap * quantity (sold higher than market avg)
         # For buy: advantage = vwap * quantity - cost (bought lower than market avg)
         advantage_vwap = direction_switch * (sell_revenue - vwap * sell_quantity + vwap * buy_quantity - buy_cost) / 1e6
+
+        # === DEBUG: Advantage calculation ===
+        jax.debug.print(
+            "[DEBUG ADVANTAGE] sell_rev={}, sell_qty={}, buy_cost={}, buy_qty={}, vwap*sell_qty={}, advantage_vwap={}",
+            sell_revenue, sell_quantity, buy_cost, buy_quantity, vwap * sell_quantity, advantage_vwap
+        )
 
         # Advantage vs init_mid_price (current PnL calculation)
         advantage_init = pnl  # Already computed above

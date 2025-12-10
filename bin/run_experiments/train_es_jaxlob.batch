@@ -126,7 +126,7 @@ python -u -B -m es_lobs5.training.es_jaxlob_train \
     --lr=0.001 \
     --lora_rank=1 \
     --n_threads=16 \
-    --n_epochs=5 \
+    --n_epochs=1000 \
     --n_steps=10 \
     --world_msgs_per_step=2 \
     --task=sell \
