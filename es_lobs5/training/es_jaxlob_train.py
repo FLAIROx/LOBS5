@@ -193,18 +193,47 @@ def create_es_jaxlob_config():
     return parser
 
 
-# Import helper functions from lob/inference_no_errcorr.py for data loading
-def _lazy_import_inference_helpers():
-    """Lazy import inference helpers to avoid circular dependencies."""
-    global msg_to_jnp, msgs_to_jnp
-    if 'msg_to_jnp' not in globals():
-        import sys
-        from pathlib import Path
-        lob_path = Path(__file__).parent.parent / 'lob'
-        sys.path.insert(0, str(lob_path.parent))
-        from lob.inference_no_errcorr import msg_to_jnp as _msg_to_jnp, msgs_to_jnp as _msgs_to_jnp
-        msg_to_jnp = _msg_to_jnp
-        msgs_to_jnp = _msgs_to_jnp
+# Helper function to convert decoded messages to JaxLOB format
+# Reference: lob/inference_no_errcorr.py:112-131 (msg_to_jnp, msgs_to_jnp)
+# Copied here to avoid import issues with inference_no_errcorr.py
+@jax.jit
+def decoded_msg_to_jaxlob_format(msg_decoded: jax.Array) -> jax.Array:
+    """
+    Convert 14-column decoded message to 8-column JaxLOB format.
+
+    Reference: lob/inference_no_errcorr.py:msg_to_jnp() (lines 112-129)
+
+    Args:
+        msg_decoded: (14,) decoded message
+                     [order_id, event_type, direction, price_abs, price_rel, size,
+                      delta_t_s, delta_t_ns, time_s, time_ns, ...]
+
+    Returns:
+        (8,) JaxLOB message [type, side, qty, price, trade_id, order_id, time_s, time_ns]
+    """
+    # Column indices
+    ORDER_ID_i = 0
+    EVENT_TYPE_i = 1
+    DIRECTION_i = 2
+    PRICE_ABS_i = 3
+    SIZE_i = 5
+    TIMEs_i = 8
+    TIMEns_i = 9
+
+    return jnp.array([
+        msg_decoded[EVENT_TYPE_i],
+        (msg_decoded[DIRECTION_i] * 2) - 1,  # 0/1 → -1/1
+        msg_decoded[SIZE_i],
+        msg_decoded[PRICE_ABS_i],
+        0,  # trade_id
+        msg_decoded[ORDER_ID_i],
+        msg_decoded[TIMEs_i],
+        msg_decoded[TIMEns_i],
+    ], dtype=jnp.int32)
+
+
+# Vectorized version for batch conversion
+msgs_to_jnp = jax.jit(jax.vmap(decoded_msg_to_jaxlob_format))
 
 
 def get_sim_msg_es(
@@ -441,15 +470,20 @@ def transform_L2_state_wrapper(
     # Extract L2 from JaxLOB: (40,) = [ask_p0, ask_q0, bid_p0, bid_q0, ...]
     l2_state = get_L2_state(sim_state.asks, sim_state.bids, 10)
 
+    # Ensure l2_state is the right type for concatenation
+    l2_state = jnp.asarray(l2_state, dtype=jnp.int32)
+
     # Construct (43,) input: [mid_diff, time_s, time_ns, L2(40)]
     # Use fixed values for simplicity (mid_diff and time are less critical for ES)
-    book_input = jnp.concatenate([
-        jnp.array([0, 34200, 0], dtype=jnp.int32),  # [mid_diff=0, time_s=34200, time_ns=0]
-        l2_state
-    ])
+    metadata = jnp.array([0, 34200, 0], dtype=jnp.int32)  # [mid_diff, time_s, time_ns]
+    book_input = jnp.concatenate([metadata, l2_state])
 
-    # Apply training transform: (43,) → (503,)
-    return transform_L2_state(book_input, price_levels, tick_size)
+    # Apply training transform
+    # Note: transform_L2_state is vmapped, expects (batch, 43) input
+    # We have (43,), so add batch dimension then squeeze
+    book_input_batched = book_input[None, :]  # (1, 43)
+    book_feat_batched = transform_L2_state(book_input_batched, price_levels, tick_size)  # (1, 503)
+    return book_feat_batched[0]  # (503,)
 
 
 def get_mid_price(sim_state: 'LobState', tick_size: int = 100) -> int:
@@ -548,10 +582,12 @@ class ESJaxLOBTrainer:
         """Initialize JaxLOB order book simulator."""
         _lazy_import_jaxlob()
         # Create OrderBook instance with larger capacity for ES training
-        # Each episode: n_steps * (world_msgs + 1) messages
-        # Conservative: allow 2x trades for safety
-        n_orders = max(200, self.config.n_steps * 2)
-        n_trades = max(200, self.config.n_steps * 2)
+        # Each episode: n_steps * (world_msgs_per_step + 1) orders
+        # Plus 500 from replayed messages
+        # Conservative: allow buffer for safety
+        expected_orders = 500 + self.config.n_steps * (self.config.world_msgs_per_step + 1)
+        n_orders = max(1000, int(expected_orders * 1.5))  # 1.5x buffer
+        n_trades = max(500, self.config.n_steps * 2)  # Trades usually << orders
         self.sim = OrderBook(nOrders=n_orders, nTrades=n_trades)
         # Create encoder from Vocab class
         from lob.encoding import Vocab
@@ -620,7 +656,6 @@ class ESJaxLOBTrainer:
         import glob
         from lob.encoding import encode_msgs
 
-        _lazy_import_inference_helpers()
         config = self.config
 
         # Data directory (configurable or default to GOOG 2016)
@@ -652,8 +687,8 @@ class ESJaxLOBTrainer:
         init_l2_book = jnp.array(ob[0, 3:43], dtype=jnp.int32)  # (40,)
 
         # Initialize JaxLOB with initial L2 book
-        start_time = jnp.array([ob[0, 1], ob[0, 2]], dtype=jnp.int32)
-        sim_state = self.sim.reset(init_l2_book, start_time)
+        # Note: JaxLOB reset() only takes l2_book, not start_time
+        sim_state = self.sim.reset(init_l2_book)
 
         # Replay first 500 messages (or fewer if data is shorter)
         n_replay = min(500, len(msg))
