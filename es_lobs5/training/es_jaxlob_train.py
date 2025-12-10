@@ -866,6 +866,25 @@ class ESJaxLOBTrainer:
         )
 
         # ============================================================
+        # CAPACITY CHECK: Warn if JaxLOB arrays near full
+        # ============================================================
+        # JaxLOB uses fixed-size arrays. When full, it silently overwrites
+        # the last row (see JaxOrderBookArrays.py:35-36).
+        # We dynamically size arrays in _init_jaxlob(), but check usage here.
+        #
+        # JaxLOB array overflow
+        # ============================================================
+        n_trades_used = jnp.sum(final_state.trades[:, 0] != -1)
+
+        # Warning thresholds (non-blocking, just for monitoring)
+        jax.debug.print(
+            "JaxLOB capacity: orders={}/{}, trades={}/{}",
+            final_order_id, self.sim.nOrders,
+            n_trades_used, self.sim.nTrades,
+            ordered=True
+        )
+
+        # ============================================================
         # FITNESS FUNCTION: Real PnL Computation
         # ============================================================
         #
