@@ -4,6 +4,73 @@ ES Training with JaxLOB (Pure ES, Step-by-Step Interleaved).
 This module implements Evolution Strategies training for trading policies
 using JaxLOB as the execution environment.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    DATA INITIALIZATION FLOW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Reference: lob/inference_no_errcorr.py (originally designed for sliding window)
+
+IMPORTANT: The reference implementation was designed for sliding window mode
+(window_size=500 → predict 1 message). However, LOBS5 is NOW trained as
+FULL AUTOREGRESSIVE (no sliding window), so the data loading needs adaptation.
+
+[1] Load Historical Data (LOBSTER preproc format)
+    ┌─────────────────────────────────────────────┐
+    │ Files:                                      │
+    │   - orderbook_10_proc.npy  (N+1, 43)        │
+    │     [0]: mid_diff (ticks)                   │
+    │     [1]: time_s                             │
+    │     [2]: time_ns                            │
+    │     [3:43]: L2 book (40 values)             │
+    │              [ask_p0, ask_q0, bid_p0, bid_q0,│
+    │               ask_p1, ask_q1, bid_p1, bid_q1,│
+    │               ...]                          │
+    │                                             │
+    │   - message_10_proc.npy    (N, 14)          │
+    │     Decoded message fields (NOT 24 tokens!) │
+    └─────────────────────────────────────────────┘
+
+[2] Initialize Order Book
+    ┌─────────────────────────────────────────────┐
+    │ init_l2_book = book[0, 3:43]  (40 values)   │
+    │ sim_state = sim.reset(init_l2_book)         │
+    │                                             │
+    │ Result: JaxLOB with 10 price levels         │
+    └─────────────────────────────────────────────┘
+
+[3] Replay Historical Messages (e.g., 500 messages)
+    ┌─────────────────────────────────────────────┐
+    │ messages[0:500] (14-column decoded)         │
+    │   → encode to 24 tokens                     │
+    │   → convert to JaxLOB format (8 values)     │
+    │   → replay in simulator                     │
+    │                                             │
+    │ for msg in messages[0:500]:                 │
+    │     tokens = encode_msg(msg)  # 14 → 24     │
+    │     sim_msg = to_jaxlob(tokens)  # 24 → 8   │
+    │     sim_state = sim.process_order_array(    │
+    │                     sim_state, sim_msg)     │
+    └─────────────────────────────────────────────┘
+
+[4] Prepare Context for Generation
+    ┌─────────────────────────────────────────────┐
+    │ msg_history = last 20 messages (480 tokens) │
+    │             = messages[480:500] encoded     │
+    │                                             │
+    │ book_feat = extract_book_features(sim_state)│
+    │           = current L2 state (40 values)    │
+    └─────────────────────────────────────────────┘
+
+[5] Generation Phase (Step 501+)
+    ┌─────────────────────────────────────────────┐
+    │ World Model + Policy start generating       │
+    │   - Use msg_history as context              │
+    │   - Use book_feat as current state          │
+    │   - Generate new messages autoregressively  │
+    └─────────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 Architecture (Step-by-Step):
     For each step t:
         1. World Model (frozen) generates K background market messages
@@ -18,7 +85,7 @@ Key Features:
 - Both World Model and Policy initialized from same LOBS5 checkpoint
 - World Model stays frozen (iterinfo=None), Policy trained with EGGROLL
 - Policy can observe market changes before making decisions
-- Fitness = total_revenue (PnL)
+- Fitness = PnL (profit/loss based on execution quality)
 """
 
 import jax
@@ -124,6 +191,20 @@ def create_es_jaxlob_config():
                         help='Weights & Biases entity/username')
 
     return parser
+
+
+# Import helper functions from lob/inference_no_errcorr.py for data loading
+def _lazy_import_inference_helpers():
+    """Lazy import inference helpers to avoid circular dependencies."""
+    global msg_to_jnp, msgs_to_jnp
+    if 'msg_to_jnp' not in globals():
+        import sys
+        from pathlib import Path
+        lob_path = Path(__file__).parent.parent / 'lob'
+        sys.path.insert(0, str(lob_path.parent))
+        from lob.inference_no_errcorr import msg_to_jnp as _msg_to_jnp, msgs_to_jnp as _msgs_to_jnp
+        msg_to_jnp = _msg_to_jnp
+        msgs_to_jnp = _msgs_to_jnp
 
 
 def get_sim_msg_es(
@@ -366,48 +447,122 @@ class ESJaxLOBTrainer:
         vocab = Vocab()
         self.encoder = vocab.ENCODING  # Dict[str, Tuple[jax.Array, jax.Array]]
 
-    def _create_initial_sim_state(self) -> 'LobState':
+    def _create_initial_sim_state(self) -> Tuple['LobState', jnp.ndarray]:
         """
-        Create initial JaxLOB state with a realistic order book.
+        Load initial JaxLOB state and message history from LOBSTER data.
 
-        If config.init_book_path is provided, load from file.
-        Otherwise, create a synthetic L2 book with:
-        - Mid price: 10000 (in cents, = $100.00)
-        - Spread: 100 (= 1 tick = $1.00)
-        - 10 levels on each side
-        - Decreasing quantity at each level
+        ════════════════════════════════════════════════════════════════════
+        WHY THIS FUNCTION EXISTS - Role in Overall Training Flow
+        ════════════════════════════════════════════════════════════════════
+
+        ES training needs a REALISTIC starting point for World Model and Policy:
+
+        [Problem 1] Empty order book → No trades possible
+          - If we start with sim.reset() (empty book), there are no orders
+          - World Model generates messages but nothing matches
+          - Policy can't execute trades → fitness always 0
+
+        [Problem 2] Synthetic book → Unrealistic market
+          - Manually created L2 (e.g., mid=10000, spread=100) is artificial
+          - Model was trained on REAL LOBSTER data distributions
+          - Mismatch between training and inference distributions
+
+        [Problem 3] No message history → Cold start
+          - Autoregressive model needs context to generate coherent messages
+          - Without history, model doesn't know current market state/trend
+          - Like asking GPT to continue a story without showing the beginning
+
+        [Solution] Warm start with real historical data:
+          1. Load real L2 book from LOBSTER data → realistic initial spread/depth
+          2. Replay 500 real messages → build up realistic order flow
+          3. Use those 500 messages as context → model sees real market history
+
+        This is the SAME approach used in inference_no_errcorr.py for evaluation.
+
+        ════════════════════════════════════════════════════════════════════
+        Reference Implementation
+        ════════════════════════════════════════════════════════════════════
+
+        lob/inference_no_errcorr.py:get_sim() does the same thing but with
+        parameterized window size (n_inp_msgs). We use 500 to match
+        training configuration (msg_seq_len=500).
+        
+        CAUTION: [< 500 >] is context length, it can be changed.
+
+        Difference:
+          - inference_no_errcorr.py: uses moving_window for evaluation
+          - This function: fixed 500 messages for generation warm-start
+
+        ════════════════════════════════════════════════════════════════════
+
+        Process:
+          1. Load orderbook_10_proc.npy: book[0, 3:43] → init_l2_book (40 values)
+          2. Load message_10_proc.npy: messages[0:500] → replay to JaxLOB
+          3. Encode all 500 messages → msg_history (12000 tokens)
 
         Returns:
-            LobState with initialized order book
+            (sim_state, msg_history)
+            - sim_state: JaxLOB state after replaying 500 historical messages
+            - msg_history: (12000,) all 500 messages encoded as tokens
         """
+        import numpy as np
+        import glob
+        from lob.encoding import encode_msgs
+
+        _lazy_import_inference_helpers()
         config = self.config
 
-        if hasattr(config, 'init_book_path') and config.init_book_path:
-            # Load from file
-            import numpy as np
-            l2_data = np.load(config.init_book_path)
-            return self.sim.reset(jnp.array(l2_data))
+        # Data directory (configurable or default to GOOG 2016)
+        if hasattr(config, 'data_dir') and config.data_dir:
+            data_dir = config.data_dir
+        else:
+            data_dir = "/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2016"
 
-        # Create synthetic L2 book
-        n_levels = 10
-        mid_price = 10000  # $100.00 in cents
-        tick_size = config.tick_size  # Usually 100 cents = $1.00
-        base_qty = 100  # Base quantity at best price
+        # Find all data files
+        orderbook_files = sorted(glob.glob(f"{data_dir}/*orderbook_10_proc.npy"))
+        message_files = sorted(glob.glob(f"{data_dir}/*message_10_proc.npy"))
 
-        # Build L2 data: format expected by init_msgs_from_l2
-        # The format is: [price, qty] pairs, interleaved asks and bids
-        # asks: price ascending from mid + 1 tick
-        # bids: price descending from mid - 1 tick
-        l2_data = []
-        for i in range(n_levels):
-            ask_price = mid_price + (i + 1) * tick_size
-            bid_price = mid_price - (i + 1) * tick_size
-            # Quantity decreases with distance from mid
-            qty = max(10, base_qty - i * 10)
-            l2_data.extend([ask_price, qty, bid_price, qty])
+        if len(orderbook_files) == 0:
+            raise FileNotFoundError(f"No orderbook files found in {data_dir}")
 
-        l2_book = jnp.array(l2_data, dtype=jnp.int32)
-        return self.sim.reset(l2_book)
+        # Randomly select a data file (or use config.file_idx if provided)
+        if hasattr(config, 'file_idx'):
+            file_idx = config.file_idx % len(orderbook_files)
+        else:
+            file_idx = np.random.randint(0, len(orderbook_files))
+
+        print(f"Loading data from file {file_idx}: {orderbook_files[file_idx]}")
+
+        # Load data
+        ob = np.load(orderbook_files[file_idx])   # (N+1, 43)
+        msg = np.load(message_files[file_idx])    # (N, 14)
+
+        # Extract initial L2 book (row 0, columns 3-43)
+        init_l2_book = jnp.array(ob[0, 3:43], dtype=jnp.int32)  # (40,)
+
+        # Initialize JaxLOB with initial L2 book
+        start_time = jnp.array([ob[0, 1], ob[0, 2]], dtype=jnp.int32)
+        sim_state = self.sim.reset(init_l2_book, start_time)
+
+        # Replay first 500 messages (or fewer if data is shorter)
+        n_replay = min(500, len(msg))
+        replay_msgs_raw = msg[:n_replay]  # (n_replay, 14)
+
+        # Convert to JaxLOB format and replay
+        replay_jaxlob = msgs_to_jnp(replay_msgs_raw)  # (n_replay, 8)
+        sim_state = self.sim.process_orders_array(sim_state, replay_jaxlob)
+
+        # Encode all 500 messages as context (match training msg_seq_len=500)
+        # Why use all 500:
+        #   - Training uses msg_seq_len=500
+        #   - Full autoregressive model needs full context
+        #   - inference_no_errcorr.py uses moving_window but we use fixed 500
+        tokens = encode_msgs(replay_msgs_raw, self.encoder)  # (500, 24)
+        msg_history = tokens.flatten()  # (12000,) = 500 × 24
+
+        print(f"  Initialized with {n_replay} messages, context size: {msg_history.shape}")
+
+        return sim_state, msg_history
 
     def create_world_common_params(self) -> CommonParams:
         """Create CommonParams for World Model (frozen, no noise)."""
@@ -441,6 +596,7 @@ class ESJaxLOBTrainer:
         world_common_params: CommonParams,
         policy_common_params: CommonParams,
         sim_state: 'LobState',
+        initial_msg_history: Optional[jnp.ndarray] = None,
     ) -> float:
         """
         Run a complete episode with step-by-step interleaved simulation.
@@ -450,6 +606,7 @@ class ESJaxLOBTrainer:
             world_common_params: World Model params (frozen)
             policy_common_params: Policy params (ES perturbed)
             sim_state: Initial JaxLOB state
+            initial_msg_history: (480,) optional initial message history from real data
 
         Returns:
             fitness: total_revenue (PnL)
@@ -481,10 +638,23 @@ class ESJaxLOBTrainer:
 
         # Initialize episode state
         msg_len = 24  # tokens per message
-        context_len = msg_len * 20  # 20 messages context
-        msg_history = jnp.zeros((context_len,), dtype=jnp.int32)
+
+        # Context length: 500 messages to match training (msg_seq_len=500)
+        # Why 500:
+        #   1. Matches training configuration (run_lobster_padded_large.sh:123)
+        #   2. Provides full market history (~several minutes of trading)
+        #   3. inference_no_errcorr.py uses parameterized n_inp_msgs (no hardcoded value)
+        #      We choose 500 to match the training distribution
+        context_len = msg_len * 500  # 500 messages = 12000 tokens
+
+        # Use provided msg_history if available, otherwise zeros
+        if initial_msg_history is not None:
+            msg_history = initial_msg_history
+        else:
+            msg_history = jnp.zeros((context_len,), dtype=jnp.int32)
+
         book_feat = extract_book_features(sim_state)
-        order_id_counter = 0
+        order_id_counter = 500  # Start from 500 to avoid collision with replayed messages
 
         # ============================================================
         # POLICY ORDER ID TRACKING
@@ -706,6 +876,7 @@ class ESJaxLOBTrainer:
         thread_id: int,
         epoch: int,
         initial_sim_state: 'LobState',
+        initial_msg_history: Optional[jnp.ndarray] = None,
     ) -> float:
         """
         Evaluate one perturbed policy on a single episode.
@@ -715,6 +886,7 @@ class ESJaxLOBTrainer:
             thread_id: Thread ID for noise generation
             epoch: Current epoch
             initial_sim_state: Initial JaxLOB state
+            initial_msg_history: (480,) optional initial message history
 
         Returns:
             Fitness score (PnL)
@@ -723,7 +895,7 @@ class ESJaxLOBTrainer:
         policy_common_params = self.create_policy_common_params(epoch, thread_id)
 
         return self.simulate_episode(
-            key, world_common_params, policy_common_params, initial_sim_state
+            key, world_common_params, policy_common_params, initial_sim_state, initial_msg_history
         )
 
     def train_epoch(
@@ -731,6 +903,7 @@ class ESJaxLOBTrainer:
         key: jnp.ndarray,
         epoch: int,
         initial_sim_state: 'LobState',
+        initial_msg_history: Optional[jnp.ndarray] = None,
     ) -> Tuple[float, jnp.ndarray]:
         """
         Run one training epoch.
@@ -739,6 +912,7 @@ class ESJaxLOBTrainer:
             key: JAX random key
             epoch: Current epoch number
             initial_sim_state: Initial JaxLOB state
+            initial_msg_history: (480,) optional initial message history
 
         Returns:
             (mean_fitness, all_fitnesses)
@@ -754,6 +928,7 @@ class ESJaxLOBTrainer:
             self.eval_single_thread,
             epoch=epoch,
             initial_sim_state=initial_sim_state,
+            initial_msg_history=initial_msg_history,
         )
 
         fitnesses = jax.vmap(eval_fn)(keys, thread_ids)
@@ -816,9 +991,10 @@ class ESJaxLOBTrainer:
             )
             print(f"W&B initialized: {wandb_run.url}")
 
-        # Get initial JaxLOB state with realistic order book
-        initial_sim_state = self._create_initial_sim_state()
-        print(f"Initial order book created with {self.sim.nOrders} order slots, {self.sim.nTrades} trade slots")
+        # Get initial JaxLOB state and message history from real data
+        initial_sim_state, initial_msg_history = self._create_initial_sim_state()
+        print(f"Loaded initial order book with {self.sim.nOrders} order slots, {self.sim.nTrades} trade slots")
+        print(f"Replayed 500 historical messages, msg_history shape: {initial_msg_history.shape}")
 
         # Training loop
         best_fitness = -float('inf')
@@ -826,7 +1002,7 @@ class ESJaxLOBTrainer:
             key, epoch_key = jax.random.split(key)
 
             mean_fitness, fitnesses = self.train_epoch(
-                epoch_key, epoch, initial_sim_state
+                epoch_key, epoch, initial_sim_state, initial_msg_history
             )
 
             if mean_fitness > best_fitness:
