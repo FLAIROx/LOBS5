@@ -143,7 +143,8 @@ echo "[Wrapper] Debug timing: DEBUG_TIMING=$DEBUG_TIMING"
 
 # Set data directories based on DATA_MODE
 if [ "$DATA_MODE" = "encoded" ]; then
-    DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021'
+    DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2022'
+    # DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021'
     TEST_DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_encoded'
 else
     DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021'

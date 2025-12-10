@@ -268,7 +268,10 @@ class ESJaxLOBTrainer:
         self.sim = OrderBook()
         # Create encoder from Vocab class
         from lob.encoding import Vocab
-        vocab = Vocab()
+        # vocab = Vocab()  # Default token_mode=22
+        # FIX: Use token_mode=24 to match checkpoint training
+        # Checkpoint lobs5_d1024_l12_b16_bsz13x4_seed42_jid1684154 was trained with 24tok
+        vocab = Vocab(token_mode=24)
         self.encoder = vocab.ENCODING  # Dict[str, Tuple[jax.Array, jax.Array]]
 
     def create_world_common_params(self) -> CommonParams:

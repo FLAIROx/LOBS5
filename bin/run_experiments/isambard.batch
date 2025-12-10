@@ -2,11 +2,11 @@
 #SBATCH --job-name=lobs5
 #SBATCH --output=logs_%j.out
 #SBATCH --error=logs_%j.err
-#SBATCH --nodes=2
+#SBATCH --nodes=20
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
-#SBATCH --time=01:00:00
+#SBATCH --time=23:00:00
 #SBATCH --contiguous
 #SBATCH --exclude=nid[010696-010716],nid010718
 
