@@ -542,25 +542,40 @@ class ESJaxLOBTrainer:
         Args:
             config: Namespace with training configuration
         """
+        print("[INIT] ========================================")
+        print("[INIT] Starting ESJaxLOBTrainer initialization")
+        print("[INIT] ========================================")
+
         self.config = config
+
+        print("[INIT] Step 1/4: Lazy importing JaxLOB...")
         _lazy_import_jaxlob()
+        print("[INIT] Step 1/4: JaxLOB imported OK")
 
         # Load LOBS5 checkpoint (same for both models)
-        print(f"Loading LOBS5 checkpoint from {config.lobs5_checkpoint}")
+        print(f"[INIT] Step 2/4: Loading LOBS5 checkpoint from {config.lobs5_checkpoint}")
         self.lobs5_init, self.es_tree_key = load_checkpoint_for_es(
             config.lobs5_checkpoint,
         )
+        print("[INIT] Step 2/4: Checkpoint loaded OK")
 
         # Initialize noiser for Policy
+        print("[INIT] Step 3/4: Initializing noiser...")
         self._init_noiser()
+        print("[INIT] Step 3/4: Noiser initialized OK")
 
         # Initialize JaxLOB simulator
+        print("[INIT] Step 4/4: Initializing JaxLOB simulator...")
         self._init_jaxlob()
+        print("[INIT] Step 4/4: JaxLOB simulator initialized OK")
 
-        print(f"ESJaxLOBTrainer initialized:")
-        print(f"  - n_threads: {config.n_threads}")
-        print(f"  - n_steps per episode: {config.n_steps}")
-        print(f"  - world_msgs_per_step: {config.world_msgs_per_step}")
+        print("[INIT] ========================================")
+        print(f"[INIT] ESJaxLOBTrainer initialization COMPLETE")
+        print(f"[INIT]   - n_threads: {config.n_threads}")
+        print(f"[INIT]   - n_steps per episode: {config.n_steps}")
+        print(f"[INIT]   - world_msgs_per_step: {config.world_msgs_per_step}")
+        print(f"[INIT]   - task_size: {config.task_size}")
+        print("[INIT] ========================================")
 
     def _init_noiser(self):
         """Initialize EGGROLL noiser for Policy."""
@@ -1295,6 +1310,9 @@ class ESJaxLOBTrainer:
         Returns:
             (mean_fitness, all_fitnesses, aggregated_info)
         """
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: Starting first epoch (JIT compilation happens here)...")
+
         n_threads = self.config.n_threads
 
         # Generate keys for all threads
@@ -1302,6 +1320,8 @@ class ESJaxLOBTrainer:
         thread_ids = jnp.arange(n_threads)
 
         # Evaluate all threads in parallel with vmap
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: Creating eval_fn partial...")
         eval_fn = partial(
             self.eval_single_thread,
             epoch=epoch,
@@ -1310,7 +1330,11 @@ class ESJaxLOBTrainer:
         )
 
         # vmap returns (fitnesses, infos) where infos is a dict of arrays
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: Running vmap over {n_threads} threads (JIT compiling)...")
         fitnesses, infos = jax.vmap(eval_fn)(keys, thread_ids)
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: vmap complete, fitnesses shape: {fitnesses.shape}")
 
         # ES gradient update
         iterinfos = (
@@ -1319,10 +1343,14 @@ class ESJaxLOBTrainer:
         )
 
         # Normalize and update
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: Converting fitnesses...")
         normalized_fitnesses = self.noiser_cls.convert_fitnesses(
             self.frozen_noiser_params, self.noiser_params, fitnesses
         )
 
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: Running ES gradient update (do_updates)...")
         self.noiser_params, updated_params = self.noiser_cls.do_updates(
             self.frozen_noiser_params,
             self.noiser_params,
@@ -1334,6 +1362,8 @@ class ESJaxLOBTrainer:
         )
         # Update only the params, keep the ESInitResult structure
         self.lobs5_init.params = updated_params
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: Params updated")
 
         # Aggregate info across all threads (mean values)
         aggregated_info = {k: jnp.mean(v) for k, v in infos.items()}
@@ -1350,10 +1380,16 @@ class ESJaxLOBTrainer:
         Returns:
             Final policy params
         """
+        print("[TRAIN] ========================================")
+        print("[TRAIN] Starting training loop")
+        print("[TRAIN] ========================================")
+
         n_epochs = n_epochs or self.config.n_epochs
         key = jax.random.PRNGKey(self.config.seed)
+        print(f"[TRAIN] n_epochs: {n_epochs}")
 
         # Initialize W&B if configured
+        print("[TRAIN] Step 1: Initializing W&B...")
         wandb_run = None
         if hasattr(self.config, 'wandb_project') and self.config.wandb_project:
             import wandb
@@ -1371,12 +1407,18 @@ class ESJaxLOBTrainer:
                     'checkpoint': self.config.lobs5_checkpoint,
                 }
             )
-            print(f"W&B initialized: {wandb_run.url}")
+            print(f"[TRAIN] Step 1: W&B initialized: {wandb_run.url}")
+        else:
+            print("[TRAIN] Step 1: W&B disabled (no project configured)")
 
         # Get initial JaxLOB state and message history from real data
+        print("[TRAIN] Step 2: Creating initial sim state from LOBSTER data...")
         initial_sim_state, initial_msg_history = self._create_initial_sim_state()
-        print(f"Loaded initial order book with {self.sim.nOrders} order slots, {self.sim.nTrades} trade slots")
-        print(f"Replayed 500 historical messages, msg_history shape: {initial_msg_history.shape}")
+        print(f"[TRAIN] Step 2: Initial order book created with {self.sim.nOrders} order slots, {self.sim.nTrades} trade slots")
+
+        print("[TRAIN] ========================================")
+        print("[TRAIN] Step 3: Starting epoch loop...")
+        print("[TRAIN] ========================================")
 
         # Training loop
         best_fitness = -float('inf')

@@ -91,18 +91,46 @@ mkdir -p logs_es_real
 # ============================================
 # Run Real ES Training with JaxLOB
 # ============================================
+# python -u -B -m es_lobs5.training.es_jaxlob_train \
+#     --lobs5_checkpoint="${CHECKPOINT_PATH}" \
+#     --noiser=eggroll \
+#     --sigma=0.01 \
+#     --lr=0.001 \
+#     # --lora_rank=4 \            # ORIGINAL
+#     # --n_threads=1800 \         # ORIGINAL: 1792 threads for full training
+#     # --n_epochs=1000 \          # ORIGINAL: 1000 epochs for full training
+#     # --n_steps=100 \            # ORIGINAL: 100 steps per episode
+#     # --world_msgs_per_step=10 \ # ORIGINAL: 10 world messages per step
+#     # --task_size=500 \          # ORIGINAL: 500 shares to execute
+#     --lora_rank=1 \              # DEBUG: small rank for fast testing
+#     --n_threads=16 \             # DEBUG: small population for fast testing
+#     --n_epochs=5 \               # DEBUG: few epochs to verify training works
+#     --n_steps=10 \               # DEBUG: short episodes for fast iteration
+#     --world_msgs_per_step=2 \    # DEBUG: fewer world messages per step
+#     --task=sell \
+#     --task_size=50 \             # DEBUG: small task size matching short episode
+#     --tick_size=100 \
+#     --seed=42 \
+#     --output_dir="${OUTPUT_DIR}" \
+#     --wandb_project=lobs5-es-jaxlob \
+#     --wandb_entity=kang-oxford \
+#     2>&1 | tee logs_es_real/training_${SLURM_JOB_ID}.log
+
+# ============================================
+# DEBUG: Run Real ES Training with JaxLOB
+# ============================================
 python -u -B -m es_lobs5.training.es_jaxlob_train \
     --lobs5_checkpoint="${CHECKPOINT_PATH}" \
     --noiser=eggroll \
     --sigma=0.01 \
     --lr=0.001 \
-    --lora_rank=4 \
-    --n_threads=1792 \
-    --n_epochs=1000 \
-    --n_steps=100 \
-    --world_msgs_per_step=10 \
+    --lora_rank=1 \
+    --n_threads=16 \
+    --n_epochs=5 \
+    --n_steps=10 \
+    --world_msgs_per_step=2 \
     --task=sell \
-    --task_size=500 \
+    --task_size=50 \
     --tick_size=100 \
     --seed=42 \
     --output_dir="${OUTPUT_DIR}" \
