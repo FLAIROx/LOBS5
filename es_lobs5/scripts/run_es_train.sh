@@ -1,147 +1,146 @@
 #!/bin/bash
-#SBATCH --job-name=es_lobs5
-#SBATCH --output=logs/es_lobs5_%j.out
-#SBATCH --error=logs/es_lobs5_%j.err
+#SBATCH --job-name=lobs5_es_real
+#SBATCH --output=logs_es_real/lobs5_es_%j.out
+#SBATCH --error=logs_es_real/lobs5_es_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
-#SBATCH --time=48:00:00
-#SBATCH --partition=gpu
+#SBATCH --mem=0
+#SBATCH --time=12:00:00
+#SBATCH --contiguous
 
-# ES Training Script for LOBS5
-# Based on HyperscaleES framework
+# ============================================
+# LOBS5 Real ES Training with Eggroll
+# ============================================
+# Based on binary search results: max population ~1824
+# Using 1792 for safety (448 per GPU × 4)
+# ============================================
 
-set -e
+echo "============================================"
+echo "Job started at: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Running on nodes: $SLURM_JOB_NODELIST"
+echo "GPUs: 4"
+echo "============================================"
+echo ""
 
-# ==============================================================================
-# Environment Setup
-# ==============================================================================
+# Create logs directory
+mkdir -p logs_es_real
 
-# Activate conda environment
+# Change to working directory
+cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+
+# ============================================
+# Launch Real ES Training
+# ============================================
+echo "[*] Starting REAL ES training at: $(date)"
+echo "============================================"
+echo ""
+
+# Source conda
 source ~/miniforge3/etc/profile.d/conda.sh
 conda activate lobs5
 
-# CUDA setup
-module load cuda/12.6 2>/dev/null || true
+# Load CUDA
+module load cuda/12.6
 
-# JAX configuration
+# Set LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nvshmem/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+
+# JAX memory management
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 export TF_GPU_ALLOCATOR=cuda_malloc_async
+export TF_ENABLE_ONEDNN_OPTS=0
+export TF_CPP_MIN_LOG_LEVEL=1
 
-# Suppress warnings
-export TF_CPP_MIN_LOG_LEVEL=2
+# CUDA cache
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+if [ -n "$SLURM_TMPDIR" ]; then
+    export TMPDIR="$SLURM_TMPDIR"
+    export CUDA_CACHE_PATH="$SLURM_TMPDIR/.nv/ComputeCache"
+else
+    export CUDA_CACHE_PATH="$HOME/.nv/ComputeCache"
+fi
+mkdir -p "$CUDA_CACHE_PATH" || true
 
-# ==============================================================================
-# Training Configuration
-# ==============================================================================
+echo "[*] Available GPUs:"
+nvidia-smi --list-gpus | head -4
 
-# Data paths
-DATA_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG"
-OUTPUT_DIR="./es_checkpoints/$(date +%Y%m%d_%H%M%S)"
+# ============================================
+# Real ES Training Configuration
+# ============================================
+CHECKPOINT_PATH="checkpoints/lobs5_d1024_l12_b16_bsz13x4_seed42_jid1704172_htdogyoh"
+OUTPUT_DIR="es_checkpoints/real_$(date +%Y%m%d_%H%M%S)"
 
-# Model architecture (smaller than gradient training for ES efficiency)
-D_MODEL=512
-D_OUTPUT=150  # Vocab size
-D_BOOK=503
-N_MESSAGE_LAYERS=2
-N_FUSED_LAYERS=4
-N_BOOK_PRE_LAYERS=1
-N_BOOK_POST_LAYERS=1
-SSM_SIZE=512
-BLOCKS=16
+echo ""
+echo "[*] ============================================"
+echo "[*] Real ES Training Configuration:"
+echo "[*]   Checkpoint: $CHECKPOINT_PATH"
+echo "[*]   Output: $OUTPUT_DIR"
+echo "[*]   Noiser: eggroll"
+echo "[*]   Population: 1792 (448 per GPU × 4)"
+echo "[*]   Epochs: 1000"
+echo "[*]   Steps per episode: 100"
+echo "[*] ============================================"
+echo ""
 
-# SSM configuration
-C_INIT="trunc_standard_normal"
-DISCRETIZATION="zoh"
-DT_MIN=0.001
-DT_MAX=0.1
-ACTIVATION="half_glu1"
+mkdir -p "$OUTPUT_DIR"
+mkdir -p logs_es_real
 
-# ES configuration
-NOISER="eggroll"  # Options: open_es, eggroll, eggrollbs, sparse
-SIGMA=0.01        # Noise standard deviation
-LR=0.001          # Learning rate
-LORA_RANK=4       # LORA rank for eggroll
-THREADS_PER_GPU=64  # Number of perturbations per GPU
+# ============================================
+# Run Real ES Training with JaxLOB
+# ============================================
+# python -u -B -m es_lobs5.training.es_jaxlob_train \
+#     --lobs5_checkpoint="${CHECKPOINT_PATH}" \
+#     --noiser=eggroll \
+#     --sigma=0.01 \
+#     --lr=0.001 \
+#     # --lora_rank=4 \            # ORIGINAL
+#     # --n_threads=1800 \         # ORIGINAL: 1792 threads for full training
+#     # --n_epochs=1000 \          # ORIGINAL: 1000 epochs for full training
+#     # --n_steps=100 \            # ORIGINAL: 100 steps per episode
+#     # --world_msgs_per_step=10 \ # ORIGINAL: 10 world messages per step
+#     # --task_size=500 \          # ORIGINAL: 500 shares to execute
+#     --lora_rank=1 \              # DEBUG: small rank for fast testing
+#     --n_threads=16 \             # DEBUG: small population for fast testing
+#     --n_epochs=5 \               # DEBUG: few epochs to verify training works
+#     --n_steps=10 \               # DEBUG: short episodes for fast iteration
+#     --world_msgs_per_step=2 \    # DEBUG: fewer world messages per step
+#     --task=sell \
+#     --task_size=50 \             # DEBUG: small task size matching short episode
+#     --tick_size=100 \
+#     --seed=42 \
+#     --output_dir="${OUTPUT_DIR}" \
+#     --wandb_project=lobs5-es-jaxlob \
+#     --wandb_entity=kang-oxford \
+#     2>&1 | tee logs_es_real/training_${SLURM_JOB_ID}.log
 
-# Training configuration
-NUM_EPOCHS=1000
-MSG_SEQ_LEN=500
-SEED=42
-VALIDATE_EVERY=50
-SAVE_EVERY=100
-
-# Precision
-USE_BF16=true
-
-# W&B logging (optional)
-WANDB_PROJECT=""  # Set to enable W&B logging
-WANDB_ENTITY=""
-
-# Checkpoint initialization (optional)
-# Set to gradient-trained checkpoint path to initialize from pretrained weights
-INIT_CHECKPOINT=""  # e.g., "/path/to/checkpoints/lobs5_d3072_xxx/"
-
-# ==============================================================================
-# Create output directory
-# ==============================================================================
-
-mkdir -p "${OUTPUT_DIR}"
-mkdir -p logs
-
-echo "=============================================="
-echo "ES Training for LOBS5"
-echo "=============================================="
-echo "Output directory: ${OUTPUT_DIR}"
-echo "Data directory: ${DATA_DIR}"
-echo "Model: d_model=${D_MODEL}, ssm_size=${SSM_SIZE}, blocks=${BLOCKS}"
-echo "ES: noiser=${NOISER}, sigma=${SIGMA}, lr=${LR}, rank=${LORA_RANK}"
-echo "Threads per GPU: ${THREADS_PER_GPU}"
-echo "=============================================="
-
-# ==============================================================================
-# Run Training
-# ==============================================================================
-
-cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
-
-python -m es_lobs5.training.es_train \
-    --data_dir="${DATA_DIR}" \
+# ============================================
+# DEBUG: Run Real ES Training with JaxLOB
+# ============================================
+python -u -B -m es_lobs5.training.es_jaxlob_train \
+    --lobs5_checkpoint="${CHECKPOINT_PATH}" \
+    --noiser=eggroll \
+    --sigma=0.01 \
+    --lr=0.001 \
+    --lora_rank=1 \
+    --n_threads=100 \
+    --n_epochs=1000 \
+    --n_steps=100 \
+    --world_msgs_per_step=1 \
+    --task=sell \
+    --task_size=50 \
+    --tick_size=100 \
+    --seed=42 \
     --output_dir="${OUTPUT_DIR}" \
-    --d_model=${D_MODEL} \
-    --d_output=${D_OUTPUT} \
-    --d_book=${D_BOOK} \
-    --n_message_layers=${N_MESSAGE_LAYERS} \
-    --n_fused_layers=${N_FUSED_LAYERS} \
-    --n_book_pre_layers=${N_BOOK_PRE_LAYERS} \
-    --n_book_post_layers=${N_BOOK_POST_LAYERS} \
-    --ssm_size=${SSM_SIZE} \
-    --blocks=${BLOCKS} \
-    --C_init="${C_INIT}" \
-    --discretization="${DISCRETIZATION}" \
-    --dt_min=${DT_MIN} \
-    --dt_max=${DT_MAX} \
-    --activation="${ACTIVATION}" \
-    --prenorm=True \
-    --mode="none" \
-    --noiser="${NOISER}" \
-    --sigma=${SIGMA} \
-    --lr=${LR} \
-    --lora_rank=${LORA_RANK} \
-    --threads_per_gpu=${THREADS_PER_GPU} \
-    --num_epochs=${NUM_EPOCHS} \
-    --msg_seq_len=${MSG_SEQ_LEN} \
-    --seed=${SEED} \
-    --validate_every=${VALIDATE_EVERY} \
-    --save_every=${SAVE_EVERY} \
-    --use_bf16=${USE_BF16} \
-    --ignore_time_tokens=True \
-    ${WANDB_PROJECT:+--wandb_project="${WANDB_PROJECT}"} \
-    ${WANDB_ENTITY:+--wandb_entity="${WANDB_ENTITY}"} \
-    ${INIT_CHECKPOINT:+--init_checkpoint="${INIT_CHECKPOINT}"}
+    --wandb_project=lobs5-es-jaxlob \
+    --wandb_entity=kang-oxford \
+    2>&1 | tee logs_es_real/training_${SLURM_JOB_ID}.log
 
-echo "=============================================="
-echo "Training Complete!"
-echo "Checkpoints saved to: ${OUTPUT_DIR}"
-echo "=============================================="
+echo ""
+echo "[*] ============================================"
+echo "[*] Real ES Training Completed!"
+echo "[*] Results saved to: $OUTPUT_DIR"
+echo "[*] Total runtime: $SECONDS seconds"
+echo "[*] ============================================"
