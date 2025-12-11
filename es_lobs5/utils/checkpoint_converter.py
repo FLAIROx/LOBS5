@@ -645,6 +645,10 @@ def load_checkpoint_for_es(
         'ssm_size': ssm_size,
         'conj_sym': conj_sym,
         'mode': config.get('mode', 'ema'),
+        # Runtime configuration from checkpoint metadata
+        'msg_seq_len': msg_seq_len,
+        'book_depth': book_depth,
+        'token_mode': token_mode,
         # Nested structures for submodules
         'message_encoder': message_encoder_fp,
         'book_encoder': book_encoder_fp,

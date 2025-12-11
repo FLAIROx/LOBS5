@@ -817,13 +817,14 @@ class ESJaxLOBTrainer:
         # msg_len must match token_mode: 22 for tok22, 24 for tok24
         msg_len = 22 if config.token_mode == 22 else 24
 
-        # Context length: 500 messages to match training (msg_seq_len=500)
-        # Why 500:
-        #   1. Matches training configuration (run_lobster_padded_large.sh:123)
-        #   2. Provides full market history (~several minutes of trading)
-        #   3. inference_no_errcorr.py uses parameterized n_inp_msgs (no hardcoded value)
-        #      We choose 500 to match the training distribution
-        context_len = msg_len * 500  # 500 messages = 11000 (tok22) or 12000 (tok24) tokens
+        # Context length: extract from checkpoint metadata (msg_seq_len)
+        # Why msg_seq_len from checkpoint:
+        #   1. Matches training configuration exactly
+        #   2. Ensures consistency between training and inference
+        #   3. Allows flexibility for different model sizes
+        msg_seq_len = fp.get('msg_seq_len', 500)  # Extract from checkpoint metadata
+        context_len = msg_len * msg_seq_len
+        print(f"[EPISODE] msg_len={msg_len}, msg_seq_len={msg_seq_len}, context_len={context_len}")
 
         # ============================================================
         # ORDER ID DESIGN (FIX for trader identification)
@@ -866,7 +867,9 @@ class ESJaxLOBTrainer:
         else:
             msg_history = jnp.zeros((context_len,), dtype=jnp.int32)
 
-        book_feat = transform_L2_state_wrapper(sim_state, price_levels=500, tick_size=config.tick_size)
+        # Extract book_depth from checkpoint metadata
+        book_depth = fp.get('book_depth', 500)
+        book_feat = transform_L2_state_wrapper(sim_state, price_levels=book_depth, tick_size=config.tick_size)
 
         # ============================================================
         # POLICY ORDER ID TRACKING & EXECUTION TRACKING
@@ -972,7 +975,7 @@ class ESJaxLOBTrainer:
                 sim_st = self.sim.process_order_array(sim_st, sim_msg)
 
                 # Update for next iteration
-                book_f = transform_L2_state_wrapper(sim_st)
+                book_f = transform_L2_state_wrapper(sim_st, price_levels=book_depth, tick_size=config.tick_size)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], world_msg])
                 oid_offset = oid_offset + 1
 
@@ -1079,7 +1082,7 @@ class ESJaxLOBTrainer:
             # ============================================================
 
             # Update state for next step
-            book_feat = transform_L2_state_wrapper(sim_state)
+            book_feat = transform_L2_state_wrapper(sim_state, price_levels=book_depth, tick_size=config.tick_size)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
 
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
