@@ -186,6 +186,13 @@ def create_es_jaxlob_config():
     parser.add_argument('--token_mode', type=int, default=22, choices=[22, 24],
                         help='Token mode: 22 (single token size) or 24 (base-100 size)')
 
+    # Background model configuration
+    parser.add_argument('--background_mode', type=str, default='world_model',
+                        choices=['world_model', 'historical_replay'],
+                        help='Background message generation mode: world_model (autoregressive) or historical_replay (from data)')
+    parser.add_argument('--replay_data_path', type=str, default=None,
+                        help='Path to historical data directory for replay mode (e.g., /path/to/GOOG/2016/)')
+
     # W&B logging
     parser.add_argument('--wandb_project', type=str, default=None,
                         help='Weights & Biases project name')
@@ -571,9 +578,14 @@ class ESJaxLOBTrainer:
         print("[INIT] Step 3/4: Noiser initialized OK")
 
         # Initialize JaxLOB simulator
-        print("[INIT] Step 4/4: Initializing JaxLOB simulator...")
+        print("[INIT] Step 4/5: Initializing JaxLOB simulator...")
         self._init_jaxlob()
-        print("[INIT] Step 4/4: JaxLOB simulator initialized OK")
+        print("[INIT] Step 4/5: JaxLOB simulator initialized OK")
+
+        # Initialize historical replay data (if mode is historical_replay)
+        print("[INIT] Step 5/5: Initializing historical replay data...")
+        self._init_historical_replay_data()
+        print("[INIT] Step 5/5: Historical replay data initialized OK")
 
         print("[INIT] ========================================")
         print(f"[INIT] ESJaxLOBTrainer initialization COMPLETE")
@@ -617,11 +629,44 @@ class ESJaxLOBTrainer:
         vocab = Vocab(token_mode=self.config.token_mode)
         self.encoder = vocab.ENCODING  # Dict[str, Tuple[jax.Array, jax.Array]]
         print(f"[INIT] Using token_mode={self.config.token_mode}, vocab_size={len(vocab)}")
-        
-        
-        
 
+    def _init_historical_replay_data(self):
+        """Pre-load historical data for replay mode."""
+        if self.config.background_mode != 'historical_replay':
+            self.replay_data_raw = None
+            self.replay_tokens = None
+            print(f"[INIT]   Background mode: {self.config.background_mode} (no replay data needed)")
+            return
 
+        # Validate path
+        if self.config.replay_data_path is None:
+            raise ValueError("--replay_data_path required when background_mode=historical_replay")
+
+        data_path = self.config.replay_data_path
+        print(f"[INIT]   Background mode: historical_replay")
+        print(f"[INIT]   Loading replay data from: {data_path}")
+
+        # Find message files
+        import os
+        import glob
+        message_files = sorted(glob.glob(os.path.join(data_path, '*message*proc.npy')))
+
+        if len(message_files) == 0:
+            raise FileNotFoundError(f"No message files found in {data_path}")
+
+        # Load first file (can be configurable later)
+        import numpy as np
+        msg_raw = np.load(message_files[0])  # (N, 14)
+        print(f"[INIT]   Loaded {msg_raw.shape[0]} raw messages from {os.path.basename(message_files[0])}")
+
+        # Pre-encode all messages to tokens upfront (avoids encoding in JIT loop)
+        from lob.encoding import encode_msgs
+        self.replay_tokens = encode_msgs(msg_raw, self.encoder, token_mode=self.config.token_mode)  # (N, 22/24)
+        self.replay_data_raw = jnp.array(msg_raw)  # Keep raw for JaxLOB conversion
+
+        print(f"[INIT]   Pre-encoded {self.replay_tokens.shape[0]} messages to tokens")
+        print(f"[INIT]   Token shape per message: {self.replay_tokens.shape[1]}")
+        print(f"[INIT]   Replay data ready for sequential playback")
 
     def _create_initial_sim_state(self) -> Tuple['LobState', jnp.ndarray]:
         """
@@ -906,9 +951,61 @@ class ESJaxLOBTrainer:
 
             key, key_world, key_policy = jax.random.split(key, 3)
 
+            # ====== 1. BACKGROUND MODEL: Historical Replay or World Model ======
+            # ============================================================
+            # HISTORICAL REPLAY MODE: Load pre-encoded messages from data
+            # ============================================================
+            def historical_replay_step(wcarry, world_msg_idx):
+                """
+                Sequential replay of historical market messages (no forward pass).
+
+                CRITICAL DESIGN: This replaces world model's 2200 forward passes/step
+                with direct data lookup, achieving ~100x speedup for background generation.
+                """
+                key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr = wcarry
+
+                # Get pre-encoded token sequence (no model inference needed!)
+                world_msg = self.replay_tokens[replay_ptr]  # (msg_len,)
+
+                # Get raw message for JaxLOB conversion
+                msg_raw = self.replay_data_raw[replay_ptr]  # (14,)
+
+                # Convert to JaxLOB format using existing decoder
+                # NOTE: Using the same conversion as world model for consistency
+                sim_msg = decoded_msg_to_jaxlob_format(msg_raw)
+
+                # Override order_id and trader_id for tracking
+                world_order_id = WORLD_ORDER_ID_START + oid_offset
+                sim_msg = sim_msg.at[4].set(world_order_id)  # order_id
+                sim_msg = sim_msg.at[5].set(-2000)           # trader_id (world/background)
+
+                # Process in simulator
+                sim_st = self.sim.process_order_array(sim_st, sim_msg)
+
+                # Update book features
+                book_f = transform_L2_state_wrapper(sim_st, price_levels=book_depth, tick_size=config.tick_size)
+
+                # Update msg_history with replayed tokens (keep context consistent with training)
+                msg_hist = jnp.concatenate([msg_hist[msg_len:], world_msg])
+
+                # Advance replay pointer
+                new_replay_ptr = replay_ptr + 1
+
+                # Handle data exhaustion: loop back to start (after warmup messages)
+                n_replay_msgs = self.replay_tokens.shape[0]
+                new_replay_ptr = jnp.where(
+                    new_replay_ptr >= n_replay_msgs,
+                    jnp.int32(500),  # Loop back to message 500 (after warmup)
+                    new_replay_ptr
+                )
+
+                oid_offset = oid_offset + 1
+
+                return (key, msg_hist, hidden, sim_st, book_f, oid_offset, new_replay_ptr), world_msg
+
             # ====== 1. World Model generates K background messages ======
             def world_msg_step(wcarry, world_msg_idx):
-                key, msg_hist, hidden, sim_st, book_f, oid_offset = wcarry
+                key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr = wcarry
 
                 # ============================================================
                 # AUTOREGRESSIVE TOKEN-BY-TOKEN SAMPLING (FIX)
@@ -979,7 +1076,7 @@ class ESJaxLOBTrainer:
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], world_msg])
                 oid_offset = oid_offset + 1
 
-                return (key, msg_hist, hidden, sim_st, book_f, oid_offset), world_msg
+                return (key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr), world_msg
 
             # ============================================================
             # Generate world_msgs_per_step background messages SEQUENTIALLY
@@ -990,10 +1087,23 @@ class ESJaxLOBTrainer:
             #   3. Each message is also autoregressive (22 tokens sequentially)
             # Total sequential operations: 100 world msgs × 22 tokens = 2200 forward passes
             # ============================================================
-            (key_world, msg_history, hiddens_world, sim_state, book_feat, world_oid_offset), _ = jax.lax.scan(
-                world_msg_step,
-                (key_world, msg_history, hiddens_world, sim_state, book_feat, world_oid_offset),
-                jnp.arange(config.world_msgs_per_step),  # Pass world_msg_idx for debug
+            # MODE SWITCH: Select background message generation function
+            # ============================================================
+            background_mode = config.background_mode
+            if background_mode == 'historical_replay':
+                step_fn_background = historical_replay_step
+                # Initialize replay pointer (from step counter + warmup offset)
+                replay_ptr_init = jnp.int32(500 + step_idx * config.world_msgs_per_step)
+            else:  # world_model (default)
+                step_fn_background = world_msg_step
+                replay_ptr_init = jnp.int32(0)  # Not used but kept for interface consistency
+
+            # Generate background messages (world_model or historical_replay)
+            (key_world, msg_history, hiddens_world, sim_state, book_feat,
+             world_oid_offset, replay_ptr_final), _ = jax.lax.scan(
+                step_fn_background,
+                (key_world, msg_history, hiddens_world, sim_state, book_feat, world_oid_offset, replay_ptr_init),
+                jnp.arange(config.world_msgs_per_step),
                 length=config.world_msgs_per_step,
             )
 

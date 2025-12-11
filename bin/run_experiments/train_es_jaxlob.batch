@@ -133,6 +133,7 @@ python -u -B -m es_lobs5.training.es_jaxlob_train \
     --task_size=50 \
     --tick_size=100 \
     --token_mode=22 \
+    --background_mode=world_model \
     --seed=42 \
     --output_dir="${OUTPUT_DIR}" \
     --wandb_project=lobs5-es-jaxlob \
