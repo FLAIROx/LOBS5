@@ -394,7 +394,33 @@ class LOBSTER_Dataset(Dataset):
 
         self.n_cache_files = n_cache_files
         self._message_cache = OrderedDict()
+
+        # ============================================================
+        # CRITICAL: Explicit token_mode to avoid training bugs
+        # ============================================================
+        # Store token_mode for consistency checks
+        self.token_mode = token_mode
         self.vocab = Vocab(token_mode=token_mode)
+
+        # Log initialization for debugging/verification
+        print(f"[DATALOADER] Initialized Vocab with token_mode={self.token_mode}, "
+              f"vocab_size={len(self.vocab)}, MSG_LEN={Message_Tokenizer.MSG_LEN}")
+
+        # Verify consistency
+        if self.token_mode == 22:
+            expected_vocab_size = 12012
+        elif self.token_mode == 24:
+            expected_vocab_size = 2112
+        else:
+            raise ValueError(f"Invalid token_mode: {self.token_mode}")
+
+        if len(self.vocab) != expected_vocab_size:
+            raise ValueError(
+                f"Vocab size mismatch! token_mode={self.token_mode} expects "
+                f"vocab_size={expected_vocab_size}, but got {len(self.vocab)}"
+            )
+        # ============================================================
+
         self.mask_fn = mask_fn
         if self.mask_fn==LOBSTER_Dataset.no_mask or self.mask_fn==LOBSTER_Dataset.inference_mask:
             self.seq_len=self.n_messages* Message_Tokenizer.MSG_LEN
@@ -494,7 +520,11 @@ class LOBSTER_Dataset(Dataset):
             # Data is raw (shape: N, 14), need to encode
             X_raw = np.array(X[seq_start: seq_end])
             # print(X_raw[0])
-            # encode message (using token_mode from self.vocab)
+            # ============================================================
+            # CRITICAL: Pass token_mode explicitly to encode_msgs
+            # ============================================================
+            # Must match self.vocab.token_mode to avoid encoding bugs
+            # ============================================================
             X = encode_msgs(X_raw, self.vocab.ENCODING, token_mode=self.token_mode)
         # print(f"lobster_dataloader.py: First loaded message from batch is \n  {X_raw[0]}\n which is \n {X[0]}\nafter encoding.")
 

@@ -154,6 +154,17 @@ echo "[Wrapper] Train dir: $DIR_NAME"
 echo "[Wrapper] Test dir: $TEST_DIR_NAME"
 # **************** Data Mode Configuration ****************
 
+# ============================================================
+# PRE-TRAINING CONSISTENCY CHECK
+# ============================================================
+echo "[Wrapper] Running pre-training consistency check..."
+bash check_training_consistency.sh || {
+    echo "❌ Consistency check failed! Fix issues before training."
+    exit 1
+}
+echo "[Wrapper] ✓ Consistency check passed"
+# ============================================================
+
 # Run Python with all arguments passed through
 # -u: unbuffered output for real-time logging
 # -B: don't write .pyc files
