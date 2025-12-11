@@ -981,7 +981,15 @@ class ESJaxLOBTrainer:
 
                 return (key, msg_hist, hidden, sim_st, book_f, oid_offset), world_msg
 
-            # Generate world_msgs_per_step background messages
+            # ============================================================
+            # Generate world_msgs_per_step background messages SEQUENTIALLY
+            # ============================================================
+            # IMPORTANT: Sequential generation (not parallel) because:
+            #   1. Each message modifies orderbook state
+            #   2. Message N+1 depends on book state after message N
+            #   3. Each message is also autoregressive (22 tokens sequentially)
+            # Total sequential operations: 100 world msgs × 22 tokens = 2200 forward passes
+            # ============================================================
             (key_world, msg_history, hiddens_world, sim_state, book_feat, world_oid_offset), _ = jax.lax.scan(
                 world_msg_step,
                 (key_world, msg_history, hiddens_world, sim_state, book_feat, world_oid_offset),
@@ -991,7 +999,10 @@ class ESJaxLOBTrainer:
 
             # ====== 2. Policy observes and generates action ======
             # ============================================================
-            # AUTOREGRESSIVE TOKEN-BY-TOKEN SAMPLING (FIX)
+            # AUTOREGRESSIVE TOKEN-BY-TOKEN SAMPLING (SEQUENTIAL)
+            # ============================================================
+            # Policy generates 1 action message with 22 tokens sequentially
+            # Sequential operations: 22 forward passes for policy message
             # ============================================================
             def sample_policy_token(token_carry, _):
                 """Sample one policy token autoregressively."""
@@ -1088,7 +1099,15 @@ class ESJaxLOBTrainer:
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
                     book_feat, world_oid_offset, quant_executed), None
 
-        # Run episode with jax.lax.scan (fixed steps, like JaxMARL-HFT IPPO)
+        # ============================================================
+        # Run episode with jax.lax.scan (SEQUENTIAL, fixed steps)
+        # ============================================================
+        # 3-level sequential nesting:
+        #   1. Steps loop: 100 steps (sequential via jax.lax.scan)
+        #   2. World messages: 100 background msgs per step (sequential via jax.lax.scan)
+        #   3. Token generation: 22 tokens per message (autoregressive via jax.lax.scan)
+        # Total forward passes per episode: 100 steps × (100 world + 1 policy) × 22 tokens = 222,200
+        # ============================================================
         (_, _, _, _, final_state, _, final_world_oid_offset, final_quant_executed), _ = jax.lax.scan(
             step_fn,
             (key, msg_history, hiddens_world, hiddens_policy, sim_state,
