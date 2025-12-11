@@ -1,0 +1,57 @@
+#!/bin/bash
+#SBATCH --job-name=lobs5_es_test
+#SBATCH --output=logs_es_test/lobs5_es_%j.out
+#SBATCH --error=logs_es_test/lobs5_es_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --mem=0
+#SBATCH --time=00:30:00
+#SBATCH --contiguous
+
+# ============================================
+# LOBS5 ES Training Test with Eggroll
+# ============================================
+# Usage:
+#   sbatch bin/run_experiments/test_es_eggroll.batch
+# ============================================
+
+echo "============================================"
+echo "Job started at: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Running on nodes: $SLURM_JOB_NODELIST"
+echo "Number of nodes: $SLURM_NNODES"
+echo "GPUs per node (requested): 4"
+echo "Total GPUs (expected): $((SLURM_NNODES * 4))"
+echo "============================================"
+echo ""
+
+# Create logs directory
+mkdir -p logs_es_test
+
+# Change to working directory
+cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+
+# ============================================
+# Launch ES Training Test
+# ============================================
+echo "[*] Starting ES training test at: $(date)"
+echo "============================================"
+echo ""
+
+# Run ES training test
+bash /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/bin/run_experiments/run_es_jaxlob_test.sh \
+    2>&1 | tee logs_es_test/training_${SLURM_JOB_ID}.log
+
+echo ""
+echo "============================================"
+echo "Training completed at: $(date)"
+echo "Total runtime: $SECONDS seconds"
+
+# Calculate hours, minutes, seconds
+hours=$((SECONDS / 3600))
+minutes=$(((SECONDS % 3600) / 60))
+seconds=$((SECONDS % 60))
+
+echo "Total runtime: ${hours}h ${minutes}m ${seconds}s"
+echo "============================================"

@@ -386,6 +386,7 @@ class Vocab:
         assert token_mode in [22, 24], f"token_mode must be 22 or 24, got {token_mode}"
         self.token_mode = token_mode
         self.counter = 4  # 0: MSK, 1: HID, 2: NAN, 3: START
+        self.token_mode = token_mode
         self.ENCODING = {}
         self.DECODING = {}
         self.DECODING_GLOBAL = {}
@@ -396,11 +397,13 @@ class Vocab:
 
         # Size encoding depends on token_mode
         if token_mode == 22:
-            # 22-token mode: single token, base-10000 (original)
+            # 22tok: Single token for size (range 0-10000)
             self._add_field('size', range(10000), [])
-        else:
-            # 24-token mode: two tokens, base-100
+        elif token_mode == 24:
+            # 24tok: Base-100 encoding for size (two tokens: high/low digits)
             self._add_field('size_digit', range(100), [])  # Shared tokens for size high/low digits
+        else:
+            raise ValueError(f"Unsupported token_mode: {token_mode}. Must be 22 or 24.")
 
         self._add_field('price', range(1000), [1])
         self._add_field('sign', [-1, 1], None)

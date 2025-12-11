@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=test_ckpt
+#SBATCH --output=logs_es_test/test_ckpt_%j.out
+#SBATCH --error=logs_es_test/test_ckpt_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --mem=0
+#SBATCH --time=00:05:00
+
+# ============================================
+# 简单测试：能不能 load checkpoint for ES
+# ============================================
+
+echo "============================================"
+echo "测试开始: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "============================================"
+
+mkdir -p logs_es_test
+cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+
+# Source conda
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate lobs5
+
+# 设置 JAX 用 CPU (快速测试)
+export JAX_PLATFORMS=cpu
+
+echo ""
+echo "运行 checkpoint 加载测试..."
+echo ""
+
+# 运行之前创建的测试脚本
+python test_eggroll_checkpoint.py
+
+echo ""
+echo "============================================"
+echo "测试完成: $(date)"
+echo "============================================"

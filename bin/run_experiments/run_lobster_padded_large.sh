@@ -243,7 +243,7 @@ python -u -B run_train.py \
         # --data_mode='encoded' \
         # ························································
         # --dir_name='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded' \
-        # ============= Original Large Model Config (3072x32) =================
+        # =============  (3072x32) =================
         # --blocks=48 --d_model=3072 --n_layers=32 --ssm_size_base=3072 \
         # --epochs=20 --USE_WANDB=True --wandb_project=lobs5-3072x32-tok24 \
         # =========================================================

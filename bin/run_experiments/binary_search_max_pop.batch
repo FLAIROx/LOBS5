@@ -1,0 +1,27 @@
+#!/bin/bash
+#SBATCH --job-name=es_maxpop
+#SBATCH --output=logs_es_test/maxpop_%A_%a.out
+#SBATCH --error=logs_es_test/maxpop_%A_%a.err
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --mem=0
+#SBATCH --time=00:15:00
+#SBATCH --array=0-10
+
+# Binary Search for Maximum Population Size
+# Tests: 128, 256, 512, 1024, 2048, 3072, 4096, etc.
+
+# Define test points (you can adjust these)
+TEST_SIZES=(128 192 256 384 512 768 1024 1536 2048 3072 4096)
+
+N_THREADS=${TEST_SIZES[$SLURM_ARRAY_TASK_ID]}
+
+echo "============================================"
+echo "Testing n_threads=$N_THREADS (task $SLURM_ARRAY_TASK_ID)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "============================================"
+
+cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+
+bash bin/run_experiments/test_max_population.sh $N_THREADS

@@ -4,6 +4,73 @@ ES Training with JaxLOB (Pure ES, Step-by-Step Interleaved).
 This module implements Evolution Strategies training for trading policies
 using JaxLOB as the execution environment.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    DATA INITIALIZATION FLOW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Reference: lob/inference_no_errcorr.py (originally designed for sliding window)
+
+IMPORTANT: The reference implementation was designed for sliding window mode
+(window_size=500 → predict 1 message). However, LOBS5 is NOW trained as
+FULL AUTOREGRESSIVE (no sliding window), so the data loading needs adaptation.
+
+[1] Load Historical Data (LOBSTER preproc format)
+    ┌─────────────────────────────────────────────┐
+    │ Files:                                      │
+    │   - orderbook_10_proc.npy  (N+1, 43)        │
+    │     [0]: mid_diff (ticks)                   │
+    │     [1]: time_s                             │
+    │     [2]: time_ns                            │
+    │     [3:43]: L2 book (40 values)             │
+    │              [ask_p0, ask_q0, bid_p0, bid_q0,│
+    │               ask_p1, ask_q1, bid_p1, bid_q1,│
+    │               ...]                          │
+    │                                             │
+    │   - message_10_proc.npy    (N, 14)          │
+    │     Decoded message fields (NOT 24 tokens!) │
+    └─────────────────────────────────────────────┘
+
+[2] Initialize Order Book
+    ┌─────────────────────────────────────────────┐
+    │ init_l2_book = book[0, 3:43]  (40 values)   │
+    │ sim_state = sim.reset(init_l2_book)         │
+    │                                             │
+    │ Result: JaxLOB with 10 price levels         │
+    └─────────────────────────────────────────────┘
+
+[3] Replay Historical Messages (e.g., 500 messages)
+    ┌─────────────────────────────────────────────┐
+    │ messages[0:500] (14-column decoded)         │
+    │   → encode to 24 tokens                     │
+    │   → convert to JaxLOB format (8 values)     │
+    │   → replay in simulator                     │
+    │                                             │
+    │ for msg in messages[0:500]:                 │
+    │     tokens = encode_msg(msg)  # 14 → 24     │
+    │     sim_msg = to_jaxlob(tokens)  # 24 → 8   │
+    │     sim_state = sim.process_order_array(    │
+    │                     sim_state, sim_msg)     │
+    └─────────────────────────────────────────────┘
+
+[4] Prepare Context for Generation
+    ┌─────────────────────────────────────────────┐
+    │ msg_history = last 20 messages (480 tokens) │
+    │             = messages[480:500] encoded     │
+    │                                             │
+    │ book_feat = extract_book_features(sim_state)│
+    │           = current L2 state (40 values)    │
+    └─────────────────────────────────────────────┘
+
+[5] Generation Phase (Step 501+)
+    ┌─────────────────────────────────────────────┐
+    │ World Model + Policy start generating       │
+    │   - Use msg_history as context              │
+    │   - Use book_feat as current state          │
+    │   - Generate new messages autoregressively  │
+    └─────────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 Architecture (Step-by-Step):
     For each step t:
         1. World Model (frozen) generates K background market messages
@@ -18,7 +85,7 @@ Key Features:
 - Both World Model and Policy initialized from same LOBS5 checkpoint
 - World Model stays frozen (iterinfo=None), Policy trained with EGGROLL
 - Policy can observe market changes before making decisions
-- Fitness = total_revenue (PnL)
+- Fitness = PnL (profit/loss based on execution quality)
 """
 
 import jax
@@ -42,6 +109,7 @@ OrderBook = None
 LobState = None
 Message_Tokenizer = None
 encoding = None
+get_best_bid_and_ask = None  # From JaxOrderBookArrays
 
 all_noisers = get_all_noisers()
 
@@ -50,15 +118,17 @@ __all__ = ['ESJaxLOBTrainer', 'create_es_jaxlob_config', 'es_jaxlob_train']
 
 def _lazy_import_jaxlob():
     """Lazy import JaxLOB to avoid import errors when not using this mode."""
-    global OrderBook, LobState, Message_Tokenizer, encoding
+    global OrderBook, LobState, Message_Tokenizer, encoding, get_best_bid_and_ask
     if OrderBook is None:
         from gymnax_exchange.jaxob.jorderbook import OrderBook as _OrderBook, LobState as _LobState
+        from gymnax_exchange.jaxob.JaxOrderBookArrays import get_best_bid_and_ask as _get_best_bid_and_ask
         from lob.encoding import Message_Tokenizer as _Message_Tokenizer
         import lob.encoding as _encoding
         OrderBook = _OrderBook
         LobState = _LobState
         Message_Tokenizer = _Message_Tokenizer
         encoding = _encoding
+        get_best_bid_and_ask = _get_best_bid_and_ask
 
 
 class EpisodeState(NamedTuple):
@@ -113,8 +183,59 @@ def create_es_jaxlob_config():
     # Other
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output_dir', type=str, default='./es_jaxlob_checkpoints')
+    parser.add_argument('--token_mode', type=int, default=22, choices=[22, 24],
+                        help='Token mode: 22 (single token size) or 24 (base-100 size)')
+
+    # W&B logging
+    parser.add_argument('--wandb_project', type=str, default=None,
+                        help='Weights & Biases project name')
+    parser.add_argument('--wandb_entity', type=str, default=None,
+                        help='Weights & Biases entity/username')
 
     return parser
+
+
+# Helper function to convert decoded messages to JaxLOB format
+# Reference: lob/inference_no_errcorr.py:112-131 (msg_to_jnp, msgs_to_jnp)
+# Copied here to avoid import issues with inference_no_errcorr.py
+@jax.jit
+def decoded_msg_to_jaxlob_format(msg_decoded: jax.Array) -> jax.Array:
+    """
+    Convert 14-column decoded message to 8-column JaxLOB format.
+
+    Reference: lob/inference_no_errcorr.py:msg_to_jnp() (lines 112-129)
+
+    Args:
+        msg_decoded: (14,) decoded message
+                     [order_id, event_type, direction, price_abs, price_rel, size,
+                      delta_t_s, delta_t_ns, time_s, time_ns, ...]
+
+    Returns:
+        (8,) JaxLOB message [type, side, qty, price, trade_id, order_id, time_s, time_ns]
+    """
+    # Column indices
+    ORDER_ID_i = 0
+    EVENT_TYPE_i = 1
+    DIRECTION_i = 2
+    PRICE_ABS_i = 3
+    SIZE_i = 5
+    TIMEs_i = 8
+    TIMEns_i = 9
+
+    return jnp.array([
+        msg_decoded[EVENT_TYPE_i],
+        (msg_decoded[DIRECTION_i] * 2) - 1,  # 0/1 → -1/1
+        msg_decoded[SIZE_i],
+        msg_decoded[PRICE_ABS_i],
+        0,  # trade_id
+        msg_decoded[ORDER_ID_i],
+        msg_decoded[TIMEs_i],
+        msg_decoded[TIMEns_i],
+    ], dtype=jnp.int32)
+
+
+# Vectorized version for batch conversion
+msgs_to_jnp = jax.jit(jax.vmap(decoded_msg_to_jaxlob_format))
 
 
 def get_sim_msg_es(
@@ -125,11 +246,36 @@ def get_sim_msg_es(
     order_id: int,
     tick_size: int,
     encoder: Dict,
+    trader_id: int = -88,  # FIX: Allow specifying trader_id (policy=-1000, world=-2000)
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Convert predicted message tokens to JaxLOB format.
 
     Simplified version of inference_no_errcorr.get_sim_msg for ES training.
+
+    ============================================================
+    FAULT TOLERANCE DESIGN (ES training without action/state space)
+    ============================================================
+
+    In ES training, there's no action space validation layer:
+    - Traditional RL: action ∈ [-1, 1] → env.step() validates
+    - ES: policy outputs token logits → direct execution
+
+    Potential failure points:
+    1. Token sampling: categorical() can sample any token 0..vocab_size
+    2. Decoding: tokens → message fields may produce invalid values
+    3. JaxLOB execution: invalid messages can corrupt orderbook state
+
+    Fault tolerance strategy (JAX-compatible, no try/except):
+    - Clamp decoded values to valid ranges
+    - Use jnp.where() for conditional fallback
+    - Invalid message → NOOP (event_type=0, qty=0)
+
+    Why we DON'T use try/except:
+    - JAX traces functions for JIT compilation
+    - Python exceptions break tracing
+    - Must use jnp.where() for conditional logic
+    ============================================================
 
     Args:
         pred_msg_tokens: (24,) int32 - predicted message tokens
@@ -158,18 +304,48 @@ def get_sim_msg_es(
     time_s = msg_decoded[8]      # TIMEs_i
     time_ns = msg_decoded[9]     # TIMEns_i
 
+    # ============================================================
+    # FAULT TOLERANCE: Validate and clamp decoded values
+    # ============================================================
+
+    # Valid event types: 1=new_order, 2=modify, 3=delete, 4=execute
+    # Invalid → treat as NOOP (will set qty=0 later)
+    is_valid_event = (event_type >= 1) & (event_type <= 4)
+
+    # Valid side: 0=sell, 1=buy → mapped to -1, 1 for JaxLOB
+    is_valid_side = (side >= 0) & (side <= 1)
+
+    # Quantity must be positive for valid trade
+    is_valid_qty = quantity > 0
+
+    # Price must be within reasonable range (±1000 ticks from mid)
+    is_valid_price = (rel_price >= -1000) & (rel_price <= 1000)
+
+    # Combined validity check
+    is_valid_msg = is_valid_event & is_valid_side & is_valid_qty & is_valid_price
+
+    # If invalid, create NOOP message (qty=0 means no trade happens)
+    # This is safe: JaxLOB will process but nothing changes
+    safe_event_type = jnp.where(is_valid_msg, event_type, 0)
+    safe_quantity = jnp.where(is_valid_msg, quantity, 0)
+    safe_side = jnp.where(is_valid_msg, side, 0)
+    safe_rel_price = jnp.where(is_valid_msg, rel_price, 0)
+
     # Calculate absolute price
-    p_abs = mid_price + rel_price * tick_size
+    p_abs = mid_price + safe_rel_price * tick_size
+
+    # Clamp price to positive (JaxLOB requirement)
+    p_abs = jnp.maximum(p_abs, tick_size)
 
     # Construct JaxLOB message
     # Format: [type, side*2-1, qty, price, order_id, trader_id, time_s, time_ns]
     sim_msg = jnp.array([
-        event_type,
-        (side * 2) - 1,
-        quantity,
+        safe_event_type,
+        (safe_side * 2) - 1,
+        safe_quantity,
         p_abs,
         order_id,
-        -88,  # trader_id placeholder
+        trader_id,  # FIX: Use specified trader_id (policy=-1000, world=-2000)
         time_s,
         time_ns,
     ], dtype=jnp.int32)
@@ -177,32 +353,180 @@ def get_sim_msg_es(
     return sim_msg, msg_decoded
 
 
-def extract_book_features(sim_state: 'LobState', l2_depth: int = 10) -> jnp.ndarray:
+def transform_L2_state_wrapper(
+    sim_state: 'LobState',
+    price_levels: int = 500,
+    tick_size: int = 100,
+) -> jnp.ndarray:
     """
-    Extract book features from JaxLOB state for model input.
+    Wrapper to convert JaxLOB sim_state to model book input.
+
+    ════════════════════════════════════════════════════════════════════
+    OVERALL ARCHITECTURE - Where This Function Fits
+    ════════════════════════════════════════════════════════════════════
+
+    ES Training Episode (100 steps):
+
+    ┌──────────────────────────────────────────────────────────┐
+    │  [Init] _create_initial_sim_state()                      │
+    │    ↓                                                     │
+    │  initial_sim_state (JaxLOB with real L2 book)            │
+    │  initial_msg_history (500 msgs, 12000 tokens)            │
+    └──────────────────────────────────────────────────────────┘
+                            ↓
+    ┌──────────────────────────────────────────────────────────┐
+    │  [Loop] For each step (1-100):                           │
+    │                                                          │
+    │    1. World Model generates K background messages        │
+    │       ├─ Forward: (msg_history, book_feat) → log_probs   │
+    │       ├─ Sample: tokens                                  │
+    │       ├─ Execute: JaxLOB updates sim_state               │
+    │       └─ Update: book_feat = THIS FUNCTION ◄─────────┐   │
+    │                                                          │
+    │    2. Policy generates 1 trading message                 │
+    │       ├─ Forward: (msg_history, book_feat) → log_probs   │
+    │       ├─ Sample: tokens                                  │
+    │       ├─ Execute: JaxLOB updates sim_state               │
+    │       └─ Update: book_feat = THIS FUNCTION ◄─────────┘   │
+    └──────────────────────────────────────────────────────────┘
+                            ↓
+    ┌──────────────────────────────────────────────────────────┐
+    │  [Fitness] Compute PnL from final_state.trades           │
+    └──────────────────────────────────────────────────────────┘
+
+    ════════════════════════════════════════════════════════════════════
+    LOCAL VIEW - Detailed Function Call Chain (One Step)
+    ════════════════════════════════════════════════════════════════════
+
+    After JaxLOB executes a message:
+
+         sim_state (updated)
+              ↓
+    ┌─────────────────────────────────────────┐
+    │  transform_L2_state_wrapper()           │  ◄── THIS FUNCTION
+    │                                         │
+    │  Step 1: Extract L2 arrays              │
+    │    ├─ get_L2_state(asks, bids, 10)      │
+    │    └─ Output: (40,) raw L2              │
+    │         [ask_p0, ask_q0, bid_p0, ...]   │
+    │                                         │
+    │  Step 2: Add metadata                   │
+    │    ├─ mid_diff = 0                      │
+    │    ├─ time_s = 34200                    │
+    │    ├─ time_ns = 0                       │
+    │    └─ Concat → (43,) input              │
+    │                                         │
+    │  Step 3: Apply training transform       │
+    │    └─ transform_L2_state()              │
+    │        (from preproc.py)                │
+    │        ├─ Price → indices               │
+    │        ├─ Build volume image (500)      │
+    │        ├─ Norm time                     │
+    │        └─ Output: (503,)                │
+    └─────────────────────────────────────────┘
+              ↓
+         book_feat (503,)
+              ↓
+    ┌─────────────────────────────────────────┐
+    │  ES_PaddedLobPredModel._forward_step()  │
+    │                                         │
+    │  Inputs:                                │
+    │    - msg_history[-24:]                  │
+    │    - book_feat[None, :] ◄── NEEDS (503,)│
+    └─────────────────────────────────────────┘
+
+    ════════════════════════════════════════════════════════════════════
+    WHY WRAPPER IS NEEDED
+    ════════════════════════════════════════════════════════════════════
+
+    Can't use transform_L2_state() directly because:
+
+    Training data format (from LOBSTER files):
+      book_row = [mid_diff, time_s, time_ns, ask_p0, ask_q0, ...]  (43,)
+                  ↓
+      transform_L2_state(book_row) → (503,)
+
+    ES inference has different source (JaxLOB simulator):
+      sim_state = LobState(asks, bids, trades)  ← Different structure!
+                  ↓ Need to convert first
+      book_row = wrapper extracts and formats → (43,)
+                  ↓ Then apply same transform
+      transform_L2_state(book_row) → (503,)
+
+    ════════════════════════════════════════════════════════════════════
+    Reference: preproc.py:transform_L2_state() (lines 18-63)
+              lobster_dataloader.py:523 calls transform_L2_state_numpy()
+              Training config: --book_transform=True --book_depth=500
 
     Args:
-        sim_state: JaxLOB LobState
-        l2_depth: Number of price levels to include
+        sim_state: JaxLOB LobState (asks, bids, trades arrays)
+        price_levels: Volume image size (default 500, matches training)
+        tick_size: Tick size in cents (default 100)
 
     Returns:
-        book_feat: (d_book,) book feature vector
+        book_feat: (503,) = [mid_diff, time_s_norm, time_ns_norm, volume_image(500)]
     """
-    # Extract L2 book state (simplified)
-    # This should match the book feature format expected by the model
-    # The actual implementation depends on your data preprocessing
+    _lazy_import_jaxlob()
+    from gymnax_exchange.jaxob.JaxOrderBookArrays import get_L2_state
+    from preproc import transform_L2_state  # Reuse training transform
 
-    # Placeholder - extract bid/ask prices and quantities
-    # In practice, this should match your LOBS5 book encoding
-    return jnp.zeros((503,), dtype=jnp.float32)  # d_book default
+    # Extract L2 from JaxLOB: (40,) = [ask_p0, ask_q0, bid_p0, bid_q0, ...]
+    l2_state = get_L2_state(sim_state.asks, sim_state.bids, 10)
+
+    # Ensure l2_state is the right type for concatenation
+    l2_state = jnp.asarray(l2_state, dtype=jnp.int32)
+
+    # Construct (43,) input: [mid_diff, time_s, time_ns, L2(40)]
+    # Use fixed values for simplicity (mid_diff and time are less critical for ES)
+    metadata = jnp.array([0, 34200, 0], dtype=jnp.int32)  # [mid_diff, time_s, time_ns]
+    book_input = jnp.concatenate([metadata, l2_state])
+
+    # Apply training transform
+    # Note: transform_L2_state is vmapped, expects (batch, 43) input
+    # We have (43,), so add batch dimension then squeeze
+    book_input_batched = book_input[None, :]  # (1, 43)
+    book_feat_batched = transform_L2_state(book_input_batched, price_levels, tick_size)  # (1, 503)
+    return book_feat_batched[0]  # (503,)
 
 
 def get_mid_price(sim_state: 'LobState', tick_size: int = 100) -> int:
-    """Get current mid price from order book state."""
-    # Simplified - should extract from sim_state
-    best_bid = sim_state.best_bid if hasattr(sim_state, 'best_bid') else 100000
-    best_ask = sim_state.best_ask if hasattr(sim_state, 'best_ask') else 100100
+    """
+    Get current mid price from order book state.
+
+    ============================================================
+    FAULT TOLERANCE: Handle edge cases
+    ============================================================
+    - Empty order book: Return default mid price (10000)
+    - Invalid state: Return last known good price or default
+    - NaN/Inf: Replace with default
+
+    This ensures simulate_episode() never gets NaN mid_price.
+    ============================================================
+    """
+    _lazy_import_jaxlob()  # Ensure get_best_bid_and_ask is imported
+    DEFAULT_MID = 10000  # Safe fallback
+
+    # Extract best bid/ask from order book arrays using JaxLOB utility
+    # asks[:, 0] = prices (sorted ascending, -1 for empty slots)
+    # bids[:, 0] = prices (sorted descending, -1 for empty slots)
+    best_ask, best_bid = get_best_bid_and_ask(sim_state.asks, sim_state.bids)
+
+    # Fault tolerance: check for invalid prices
+    # get_best_bid_and_ask returns 999999999 for empty asks, -1 for empty bids
+    # Note: In JAX, we use jnp.where for branching within JIT
+    # FIX: LOBSTER prices can be ~7720700 ($77.20), need higher threshold
+    # 999999999 is the empty marker, so use 900000000 as upper bound
+    bid_valid = (best_bid > 0) & (best_bid < 900000000)
+    ask_valid = (best_ask > 0) & (best_ask < 900000000)
+
+    best_bid = jnp.where(bid_valid, best_bid, DEFAULT_MID - tick_size)
+    best_ask = jnp.where(ask_valid, best_ask, DEFAULT_MID + tick_size)
+
     mid = (best_bid + best_ask) // 2
+
+    # Final safety: ensure mid is finite and positive
+    mid = jnp.where((mid > 0) & jnp.isfinite(mid), mid, DEFAULT_MID)
+
     return (mid // tick_size) * tick_size
 
 
@@ -223,25 +547,40 @@ class ESJaxLOBTrainer:
         Args:
             config: Namespace with training configuration
         """
+        print("[INIT] ========================================")
+        print("[INIT] Starting ESJaxLOBTrainer initialization")
+        print("[INIT] ========================================")
+
         self.config = config
+
+        print("[INIT] Step 1/4: Lazy importing JaxLOB...")
         _lazy_import_jaxlob()
+        print("[INIT] Step 1/4: JaxLOB imported OK")
 
         # Load LOBS5 checkpoint (same for both models)
-        print(f"Loading LOBS5 checkpoint from {config.lobs5_checkpoint}")
+        print(f"[INIT] Step 2/4: Loading LOBS5 checkpoint from {config.lobs5_checkpoint}")
         self.lobs5_init, self.es_tree_key = load_checkpoint_for_es(
             config.lobs5_checkpoint,
         )
+        print("[INIT] Step 2/4: Checkpoint loaded OK")
 
         # Initialize noiser for Policy
+        print("[INIT] Step 3/4: Initializing noiser...")
         self._init_noiser()
+        print("[INIT] Step 3/4: Noiser initialized OK")
 
         # Initialize JaxLOB simulator
+        print("[INIT] Step 4/4: Initializing JaxLOB simulator...")
         self._init_jaxlob()
+        print("[INIT] Step 4/4: JaxLOB simulator initialized OK")
 
-        print(f"ESJaxLOBTrainer initialized:")
-        print(f"  - n_threads: {config.n_threads}")
-        print(f"  - n_steps per episode: {config.n_steps}")
-        print(f"  - world_msgs_per_step: {config.world_msgs_per_step}")
+        print("[INIT] ========================================")
+        print(f"[INIT] ESJaxLOBTrainer initialization COMPLETE")
+        print(f"[INIT]   - n_threads: {config.n_threads}")
+        print(f"[INIT]   - n_steps per episode: {config.n_steps}")
+        print(f"[INIT]   - world_msgs_per_step: {config.world_msgs_per_step}")
+        print(f"[INIT]   - task_size: {config.task_size}")
+        print("[INIT] ========================================")
 
     def _init_noiser(self):
         """Initialize EGGROLL noiser for Policy."""
@@ -249,30 +588,155 @@ class ESJaxLOBTrainer:
         NOISER = all_noisers[config.noiser]
 
         self.noiser_cls = NOISER
-        self.frozen_noiser_params = NOISER.get_frozen_noiser_params(
+        # Use HyperscaleES API: init_noiser returns (frozen_noiser_params, noiser_params)
+        self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
             self.lobs5_init.params,
-            self.lobs5_init.es_map,
-            config.sigma,
-            lora_rank=config.lora_rank,
-        )
-        self.noiser_params = NOISER.get_noiser_params(
-            self.lobs5_init.params,
-            self.lobs5_init.es_map,
-            self.frozen_noiser_params,
+            sigma=config.sigma,
+            lr=config.lr,
+            rank=config.lora_rank,
+            freeze_nonlora=False,
+            noise_reuse=0,
         )
 
     def _init_jaxlob(self):
         """Initialize JaxLOB order book simulator."""
         _lazy_import_jaxlob()
-        # Create OrderBook instance
-        self.sim = OrderBook()
+        # Create OrderBook instance with larger capacity for ES training
+        # Each episode: n_steps * (world_msgs_per_step + 1) orders
+        # Plus 500 from replayed messages
+        # Conservative: allow buffer for safety
+        expected_orders = 500 + self.config.n_steps * (self.config.world_msgs_per_step + 1)
+        n_orders = max(1000, int(expected_orders * 1.5))  # 1.5x buffer
+        n_trades = max(500, self.config.n_steps * 2)  # Trades usually << orders
+        self.sim = OrderBook(nOrders=n_orders, nTrades=n_trades)
         # Create encoder from Vocab class
         from lob.encoding import Vocab
-        # vocab = Vocab()  # Default token_mode=22
-        # FIX: Use token_mode=24 to match checkpoint training
-        # Checkpoint lobs5_d1024_l12_b16_bsz13x4_seed42_jid1684154 was trained with 24tok
-        vocab = Vocab(token_mode=24)
+        # Use token_mode from config (default=22 for backward compatibility)
+        # Try both modes to find which one the checkpoint was trained with
+        vocab = Vocab(token_mode=self.config.token_mode)
         self.encoder = vocab.ENCODING  # Dict[str, Tuple[jax.Array, jax.Array]]
+        print(f"[INIT] Using token_mode={self.config.token_mode}, vocab_size={len(vocab)}")
+        
+        
+        
+
+
+
+    def _create_initial_sim_state(self) -> Tuple['LobState', jnp.ndarray]:
+        """
+        Load initial JaxLOB state and message history from LOBSTER data.
+
+        ════════════════════════════════════════════════════════════════════
+        WHY THIS FUNCTION EXISTS - Role in Overall Training Flow
+        ════════════════════════════════════════════════════════════════════
+
+        ES training needs a REALISTIC starting point for World Model and Policy:
+
+        [Problem 1] Empty order book → No trades possible
+          - If we start with sim.reset() (empty book), there are no orders
+          - World Model generates messages but nothing matches
+          - Policy can't execute trades → fitness always 0
+
+        [Problem 2] Synthetic book → Unrealistic market
+          - Manually created L2 (e.g., mid=10000, spread=100) is artificial
+          - Model was trained on REAL LOBSTER data distributions
+          - Mismatch between training and inference distributions
+
+        [Problem 3] No message history → Cold start
+          - Autoregressive model needs context to generate coherent messages
+          - Without history, model doesn't know current market state/trend
+          - Like asking GPT to continue a story without showing the beginning
+
+        [Solution] Warm start with real historical data:
+          1. Load real L2 book from LOBSTER data → realistic initial spread/depth
+          2. Replay 500 real messages → build up realistic order flow
+          3. Use those 500 messages as context → model sees real market history
+
+        This is the SAME approach used in inference_no_errcorr.py for evaluation.
+
+        ════════════════════════════════════════════════════════════════════
+        Reference Implementation
+        ════════════════════════════════════════════════════════════════════
+
+        lob/inference_no_errcorr.py:get_sim() does the same thing but with
+        parameterized window size (n_inp_msgs). We use 500 to match
+        training configuration (msg_seq_len=500).
+        
+        CAUTION: [< 500 >] is context length, it can be changed.
+
+        Difference:
+          - inference_no_errcorr.py: uses moving_window for evaluation
+          - This function: fixed 500 messages for generation warm-start
+
+        ════════════════════════════════════════════════════════════════════
+
+        Process:
+          1. Load orderbook_10_proc.npy: book[0, 3:43] → init_l2_book (40 values)
+          2. Load message_10_proc.npy: messages[0:500] → replay to JaxLOB
+          3. Encode all 500 messages → msg_history (12000 tokens)
+
+        Returns:
+            (sim_state, msg_history)
+            - sim_state: JaxLOB state after replaying 500 historical messages
+            - msg_history: (12000,) all 500 messages encoded as tokens
+        """
+        import numpy as np
+        import glob
+        from lob.encoding import encode_msgs
+
+        config = self.config
+
+        # Data directory (configurable or default to GOOG 2016)
+        if hasattr(config, 'data_dir') and config.data_dir:
+            data_dir = config.data_dir
+        else:
+            data_dir = "/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2016"
+
+        # Find all data files
+        orderbook_files = sorted(glob.glob(f"{data_dir}/*orderbook_10_proc.npy"))
+        message_files = sorted(glob.glob(f"{data_dir}/*message_10_proc.npy"))
+
+        if len(orderbook_files) == 0:
+            raise FileNotFoundError(f"No orderbook files found in {data_dir}")
+
+        # Randomly select a data file (or use config.file_idx if provided)
+        if hasattr(config, 'file_idx'):
+            file_idx = config.file_idx % len(orderbook_files)
+        else:
+            file_idx = np.random.randint(0, len(orderbook_files))
+
+        print(f"Loading data from file {file_idx}: {orderbook_files[file_idx]}")
+
+        # Load data
+        ob = np.load(orderbook_files[file_idx])   # (N+1, 43)
+        msg = np.load(message_files[file_idx])    # (N, 14)
+
+        # Extract initial L2 book (row 0, columns 3-43)
+        init_l2_book = jnp.array(ob[0, 3:43], dtype=jnp.int32)  # (40,)
+
+        # Initialize JaxLOB with initial L2 book
+        # Note: JaxLOB reset() only takes l2_book, not start_time
+        sim_state = self.sim.reset(init_l2_book)
+
+        # Replay first 500 messages (or fewer if data is shorter)
+        n_replay = min(500, len(msg))
+        replay_msgs_raw = msg[:n_replay]  # (n_replay, 14)
+
+        # Convert to JaxLOB format and replay
+        replay_jaxlob = msgs_to_jnp(replay_msgs_raw)  # (n_replay, 8)
+        sim_state = self.sim.process_orders_array(sim_state, replay_jaxlob)
+
+        # Encode all 500 messages as context (match training msg_seq_len=500)
+        # Why use all 500:
+        #   - Training uses msg_seq_len=500
+        #   - Full autoregressive model needs full context
+        #   - inference_no_errcorr.py uses moving_window but we use fixed 500
+        tokens = encode_msgs(replay_msgs_raw, self.encoder)  # (500, 24)
+        msg_history = tokens.flatten()  # (12000,) = 500 × 24
+
+        print(f"  Initialized with {n_replay} messages, context size: {msg_history.shape}")
+
+        return sim_state, msg_history
 
     def create_world_common_params(self) -> CommonParams:
         """Create CommonParams for World Model (frozen, no noise)."""
@@ -306,6 +770,8 @@ class ESJaxLOBTrainer:
         world_common_params: CommonParams,
         policy_common_params: CommonParams,
         sim_state: 'LobState',
+        initial_msg_history: Optional[jnp.ndarray] = None,
+        thread_id: int = -1,  # For debug printing (only print thread 0)
     ) -> float:
         """
         Run a complete episode with step-by-step interleaved simulation.
@@ -315,6 +781,8 @@ class ESJaxLOBTrainer:
             world_common_params: World Model params (frozen)
             policy_common_params: Policy params (ES perturbed)
             sim_state: Initial JaxLOB state
+            initial_msg_history: (480,) optional initial message history from real data
+            thread_id: Thread ID for debug printing (only thread 0 prints)
 
         Returns:
             fitness: total_revenue (PnL)
@@ -346,113 +814,671 @@ class ESJaxLOBTrainer:
 
         # Initialize episode state
         msg_len = 24  # tokens per message
-        context_len = msg_len * 20  # 20 messages context
-        msg_history = jnp.zeros((context_len,), dtype=jnp.int32)
-        book_feat = extract_book_features(sim_state)
-        order_id_counter = 0
 
-        def step_fn(carry, _):
+        # Context length: 500 messages to match training (msg_seq_len=500)
+        # Why 500:
+        #   1. Matches training configuration (run_lobster_padded_large.sh:123)
+        #   2. Provides full market history (~several minutes of trading)
+        #   3. inference_no_errcorr.py uses parameterized n_inp_msgs (no hardcoded value)
+        #      We choose 500 to match the training distribution
+        context_len = msg_len * 500  # 500 messages = 12000 tokens
+
+        # ============================================================
+        # ORDER ID DESIGN (FIX for trader identification)
+        # ============================================================
+        # Use distinct order_id ranges for policy vs world:
+        # - Policy orders: 1000000, 1000001, 1000002, ...
+        # - World orders:  2000000, 2000001, 2000002, ...
+        # This allows easy identification in trades array
+        # ============================================================
+        POLICY_ORDER_ID_START = 1000000
+        WORLD_ORDER_ID_START = 2000000
+
+        # ============================================================
+        # CRITICAL FIX: Clear trades array from historical replay
+        # ============================================================
+        # _create_initial_sim_state() replays 500 historical messages,
+        # which produces trades with old order_ids (9M+).
+        # These must be cleared before starting ES training,
+        # otherwise fitness calculation includes historical trades.
+        # NOTE: Only clear trades, NOT asks/bids (order book needs liquidity!)
+        # ============================================================
+        sim_state = sim_state._replace(
+            trades=(jnp.ones((sim_state.trades.shape[0], 6)) * -1).astype(jnp.int32)
+        )
+
+        # FIX: Calculate init_mid_price BEFORE debug print
+        init_mid_price = get_mid_price(sim_state, config.tick_size)
+
+        # === DEBUG: Check order book after clearing trades ===
+        n_asks = jnp.sum(sim_state.asks[:, 0] != -1)
+        n_bids = jnp.sum(sim_state.bids[:, 0] != -1)
+        jax.debug.print(
+            "[DEBUG INIT] After clearing trades: n_asks={}, n_bids={}, init_mid_price={}",
+            n_asks, n_bids, init_mid_price
+        )
+
+        # Use provided msg_history if available, otherwise zeros
+        if initial_msg_history is not None:
+            msg_history = initial_msg_history
+        else:
+            msg_history = jnp.zeros((context_len,), dtype=jnp.int32)
+
+        book_feat = transform_L2_state_wrapper(sim_state, price_levels=500, tick_size=config.tick_size)
+
+        # ============================================================
+        # POLICY ORDER ID TRACKING & EXECUTION TRACKING
+        # ============================================================
+        # (init_mid_price already calculated above for debug print)
+
+        # Policy order IDs follow a predictable pattern:
+        # Each step: world_msgs_per_step world orders, then 1 policy order
+        # So policy order IDs are: K, 2K+1, 3K+2, ... where K = world_msgs_per_step
+        # We can compute this at the end instead of tracking explicitly
+        #
+        # Execution tracking (like JaxMARL-HFT exec_env.py):
+        # - quant_executed: cumulative quantity executed by policy
+        # - task_size: target quantity to execute (from config)
+        # - done: True when task_done OR max_steps reached
+        # - When quant_executed >= task_size, set qty=0 (no more orders)
+        # - Use jax.lax.scan with fixed steps (like JaxMARL-HFT IPPO training)
+        # ============================================================
+
+        # Initialize execution tracking
+        task_size = jnp.int32(config.task_size)
+
+        # ============================================================
+        # JAX.LAX.SCAN IMPLEMENTATION (like JaxMARL-HFT IPPO training)
+        # ============================================================
+        # Note: JaxMARL-HFT uses scan for training, while_loop only for timing tests.
+        # Scan is more efficient for fixed-step training.
+        # When task is complete, we set qty=0 to stop new orders.
+
+        def step_fn(carry, step_idx):
             """Single step: World Model messages → Policy action."""
             (key, msg_history, hiddens_world, hiddens_policy,
-             sim_state, book_feat, order_id) = carry
+             sim_state, book_feat, world_oid_offset, quant_executed) = carry
 
             key, key_world, key_policy = jax.random.split(key, 3)
 
             # ====== 1. World Model generates K background messages ======
-            def world_msg_step(wcarry, _):
-                key, msg_hist, hidden, sim_st, book_f, oid = wcarry
+            def world_msg_step(wcarry, world_msg_idx):
+                key, msg_hist, hidden, sim_st, book_f, oid_offset = wcarry
+
+                # ============================================================
+                # AUTOREGRESSIVE TOKEN-BY-TOKEN SAMPLING (FIX)
+                # ============================================================
+                # Model is trained autoregressively: given tokens[0:k], predict token[k+1]
+                # We must sample one token at a time, appending to context
+                # ============================================================
+                def sample_one_token(token_carry, _):
+                    """Sample one token autoregressively."""
+                    key_t, msg_hist_t, hidden_t = token_carry
+                    key_t, sample_key_t = jax.random.split(key_t)
+
+                    # Forward with current context
+                    hidden_t, log_probs_t = ES_PaddedLobPredModel._forward_step(
+                        world_common_params, hidden_t, msg_hist_t[-msg_len:], book_f[None, :]
+                    )
+                    # Keep only last position's hidden
+                    hidden_t = jax.tree.map(lambda h: h[:, -1:, :], hidden_t)
+
+                    # Sample ONLY the last position (next token)
+                    log_probs_t = jnp.nan_to_num(log_probs_t, nan=-1e9, posinf=1e9, neginf=-1e9)
+                    next_token = jax.random.categorical(sample_key_t, log_probs_t[-1])  # Shape: ()
+
+                    # Append to context (sliding window)
+                    msg_hist_t = jnp.concatenate([msg_hist_t[1:], jnp.array([next_token])])
+
+                    return (key_t, msg_hist_t, hidden_t), next_token
+
+                # Sample 24 tokens autoregressively
                 key, sample_key = jax.random.split(key)
-
-                # World Model forward (no noise)
-                hidden, log_probs = ES_PaddedLobPredModel._forward_step(
-                    world_common_params, hidden, msg_hist[-msg_len:], book_f[None, :]
+                (key, msg_hist, hidden), world_msg = jax.lax.scan(
+                    sample_one_token,
+                    (sample_key, msg_hist, hidden),
+                    None,
+                    length=msg_len,  # Sample 24 tokens
                 )
-
-                # Sample next message tokens
-                world_msg = jax.random.categorical(sample_key, log_probs[-msg_len:])
+                # world_msg shape: (24,)
+                # ============================================================
 
                 # Convert to JaxLOB format and process
                 mid_price = get_mid_price(sim_st, config.tick_size)
-                sim_msg, _ = get_sim_msg_es(
-                    world_msg, self.sim, sim_st, mid_price, oid, config.tick_size, self.encoder
+                # FIX: World order_id from WORLD range (2000000 + offset)
+                world_order_id = WORLD_ORDER_ID_START + oid_offset
+                sim_msg, msg_decoded = get_sim_msg_es(
+                    world_msg, self.sim, sim_st, mid_price, world_order_id, config.tick_size, self.encoder,
+                    trader_id=-2000  # FIX: World Model trader ID
                 )
+
+                # === DEBUG: Print world model orders (only thread 0, first few steps) ===
+                jax.lax.cond(
+                    (thread_id == 0) & (step_idx < 5) & (world_msg_idx < 3),
+                    lambda: jax.debug.print(
+                        "[WORLD] step={}, world_msg={}, oid={}, event={}, side={}, qty={}, price={}, tokens[4:6]={}",
+                        step_idx, world_msg_idx, world_order_id,
+                        msg_decoded[1], msg_decoded[2], msg_decoded[5], sim_msg[3],
+                        world_msg[4:6],
+                        ordered=True
+                    ),
+                    lambda: None,
+                )
+
                 sim_st = self.sim.process_order_array(sim_st, sim_msg)
 
                 # Update for next iteration
-                book_f = extract_book_features(sim_st)
+                book_f = transform_L2_state_wrapper(sim_st)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], world_msg])
-                oid = oid + 1
+                oid_offset = oid_offset + 1
 
-                return (key, msg_hist, hidden, sim_st, book_f, oid), world_msg
+                return (key, msg_hist, hidden, sim_st, book_f, oid_offset), world_msg
 
             # Generate world_msgs_per_step background messages
-            (key_world, msg_history, hiddens_world, sim_state, book_feat, order_id), _ = jax.lax.scan(
+            (key_world, msg_history, hiddens_world, sim_state, book_feat, world_oid_offset), _ = jax.lax.scan(
                 world_msg_step,
-                (key_world, msg_history, hiddens_world, sim_state, book_feat, order_id),
-                None,
+                (key_world, msg_history, hiddens_world, sim_state, book_feat, world_oid_offset),
+                jnp.arange(config.world_msgs_per_step),  # Pass world_msg_idx for debug
                 length=config.world_msgs_per_step,
             )
 
             # ====== 2. Policy observes and generates action ======
+            # ============================================================
+            # AUTOREGRESSIVE TOKEN-BY-TOKEN SAMPLING (FIX)
+            # ============================================================
+            def sample_policy_token(token_carry, _):
+                """Sample one policy token autoregressively."""
+                key_p, msg_hist_p, hidden_p = token_carry
+                key_p, sample_key_p = jax.random.split(key_p)
+
+                # Forward with current context (with ES noise)
+                hidden_p, log_probs_p = ES_PaddedLobPredModel._forward_step(
+                    policy_common_params, hidden_p, msg_hist_p[-msg_len:], book_feat[None, :]
+                )
+                # Keep only last position's hidden
+                hidden_p = jax.tree.map(lambda h: h[:, -1:, :], hidden_p)
+
+                # Sample ONLY the last position
+                log_probs_p = jnp.nan_to_num(log_probs_p, nan=-1e9, posinf=1e9, neginf=-1e9)
+                next_token_p = jax.random.categorical(sample_key_p, log_probs_p[-1])  # Shape: ()
+
+                # Append to context
+                msg_hist_p = jnp.concatenate([msg_hist_p[1:], jnp.array([next_token_p])])
+
+                return (key_p, msg_hist_p, hidden_p), next_token_p
+
+            # Sample 24 policy tokens autoregressively
             key_policy, sample_key = jax.random.split(key_policy)
-
-            # Policy forward (with ES noise via iterinfo)
-            hiddens_policy, log_probs = ES_PaddedLobPredModel._forward_step(
-                policy_common_params, hiddens_policy, msg_history[-msg_len:], book_feat[None, :]
+            (key_policy, msg_history, hiddens_policy), policy_msg = jax.lax.scan(
+                sample_policy_token,
+                (sample_key, msg_history, hiddens_policy),
+                None,
+                length=msg_len,  # Sample 24 tokens
             )
+            # policy_msg shape: (24,)
+            # ============================================================
 
-            # Sample action tokens
-            policy_msg = jax.random.categorical(sample_key, log_probs[-msg_len:])
-
-            # Convert to JaxLOB format and process
+            # Convert to JaxLOB format
             mid_price = get_mid_price(sim_state, config.tick_size)
-            sim_msg, _ = get_sim_msg_es(
-                policy_msg, self.sim, sim_state, mid_price, order_id, config.tick_size, self.encoder
+            # FIX: Policy order_id from POLICY range (1000000 + step_idx)
+            policy_order_id = POLICY_ORDER_ID_START + step_idx
+            sim_msg, msg_decoded = get_sim_msg_es(
+                policy_msg, self.sim, sim_state, mid_price, policy_order_id, config.tick_size, self.encoder,
+                trader_id=-1000  # FIX: Policy trader ID (all policy orders have same trader)
             )
+
+            # ============================================================
+            # EXECUTION LIMIT: Truncate quantity to remaining task
+            # ============================================================
+            # sim_msg format: [type, side, qty, price, order_id, trader_id, time_s, time_ns]
+            quant_remaining = task_size - quant_executed
+            original_qty = sim_msg[2]
+            truncated_qty = jnp.minimum(original_qty, jnp.maximum(quant_remaining, 0))
+            sim_msg = sim_msg.at[2].set(truncated_qty)
+
+            # === DEBUG: Print policy orders (only thread 0, first 10 steps) ===
+            jax.lax.cond(
+                (thread_id == 0) & (step_idx < 10),
+                lambda: jax.debug.print(
+                    "[POLICY] step={}, oid={}, event={}, side={}, qty={} (orig={}), price={}, tokens[4:6]={}",
+                    step_idx, policy_order_id,
+                    msg_decoded[1], msg_decoded[2],  # event_type, direction
+                    truncated_qty, original_qty,     # qty after/before truncation
+                    sim_msg[3],                      # price
+                    policy_msg[4:6],                 # size_high, size_low tokens
+                    ordered=True
+                ),
+                lambda: None,
+            )
+            # ============================================================
+
+            # Process order
             sim_state = self.sim.process_order_array(sim_state, sim_msg)
 
+            # ============================================================
+            # TRACK EXECUTED QUANTITY
+            # ============================================================
+            # Check new trades for this policy order (already defined above as policy_order_id)
+            # Find trades where policy is seller (sell task) or buyer (buy task)
+            # trades[:, 2] = passive_oid, trades[:, 3] = aggr_oid
+            trades = sim_state.trades
+            is_new_trade = (trades[:, 0] != -1)  # valid trade
+
+            # Check if policy_order_id appears in either passive or aggressor position
+            is_policy_in_trade = ((trades[:, 2] == policy_order_id) | (trades[:, 3] == policy_order_id)) & is_new_trade
+
+            # Sum executed quantity from this step's trades
+            step_executed = jnp.sum(jnp.where(is_policy_in_trade, jnp.abs(trades[:, 1]), 0))
+            quant_executed = quant_executed + step_executed
+            # ============================================================
+
             # Update state for next step
-            book_feat = extract_book_features(sim_state)
+            book_feat = transform_L2_state_wrapper(sim_state)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
-            order_id = order_id + 1
 
-            return (key, msg_history, hiddens_world, hiddens_policy, sim_state, book_feat, order_id), None
+            return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
+                    book_feat, world_oid_offset, quant_executed), None
 
-        # Run episode
-        (_, _, _, _, final_state, _, _), _ = jax.lax.scan(
+        # Run episode with jax.lax.scan (fixed steps, like JaxMARL-HFT IPPO)
+        (_, _, _, _, final_state, _, final_world_oid_offset, final_quant_executed), _ = jax.lax.scan(
             step_fn,
-            (key, msg_history, hiddens_world, hiddens_policy, sim_state, book_feat, order_id_counter),
-            None,
+            (key, msg_history, hiddens_world, hiddens_policy, sim_state,
+             book_feat, jnp.int32(0), jnp.int32(0)),  # world_oid_offset=0, quant_executed=0
+            jnp.arange(config.n_steps),
             length=config.n_steps,
         )
+        final_step_counter = config.n_steps  # Fixed step count
 
-        # Return PnL as fitness
-        return compute_pnl_fitness(final_state.total_revenue)
+        # FIX: Calculate final_order_id for capacity check
+        # Max order_id used is the last policy order
+        final_order_id = POLICY_ORDER_ID_START + config.n_steps - 1
+
+        # ============================================================
+        # FORCE MARKET ORDER AT EPISODE END (like JaxMARL-HFT)
+        # ============================================================
+        # If episode ends (max_steps reached) but task not complete,
+        # force a "doom trade" at current best price to close position.
+        #
+        # This simulates the market impact of being forced to execute
+        # remaining quantity at unfavorable prices.
+        # ============================================================
+        quant_left = task_size - final_quant_executed
+
+        # Get current best bid/ask for doom price
+        best_ask, best_bid = get_best_bid_and_ask(final_state.asks, final_state.bids)
+
+        # Doom price: for sell task use best_bid (aggressive sell), for buy task use best_ask
+        # Currently assuming sell task (config.task == 'sell')
+        is_sell_task = (config.task == 'sell')
+        doom_price = jnp.where(is_sell_task, best_bid, best_ask)
+
+        # Fallback if order book is empty
+        doom_price = jnp.where(
+            (doom_price > 0) & (doom_price < 999999999),
+            doom_price,
+            init_mid_price  # Use init_mid_price as fallback
+        )
+
+        # Create doom trade if there's remaining quantity
+        # Add to trades array as a synthetic trade
+        def add_doom_trade(state, quant, price):
+            """Add a synthetic doom trade to close remaining position."""
+            trades = state.trades
+            # Find first empty slot
+            empty_mask = trades[:, 0] == -1
+            empty_idx = jnp.argmax(empty_mask)
+
+            # Create doom trade record
+            # Format: [price, quantity, buyer_id, seller_id, time_s, time_ns]
+            # Use special IDs (-666666) to mark as doom trade (like JaxMARL-HFT)
+            doom_trade = jnp.array([
+                price,
+                jnp.abs(quant),
+                -666666,  # buyer_id (doom marker)
+                -666666,  # seller_id (doom marker)
+                0,        # time_s
+                0,        # time_ns
+            ], dtype=jnp.int32)
+
+            # Only add if there's space and quant > 0
+            should_add = (quant > 0) & (empty_idx < trades.shape[0])
+            new_trades = jax.lax.cond(
+                should_add,
+                lambda t: t.at[empty_idx].set(doom_trade),
+                lambda t: t,
+                trades
+            )
+
+            return state._replace(trades=new_trades)
+
+        # Apply doom trade if quant_left > 0
+        final_state = jax.lax.cond(
+            quant_left > 0,
+            lambda s: add_doom_trade(s, quant_left, doom_price),
+            lambda s: s,
+            final_state
+        )
+
+        # Update final_quant_executed to include doom quantity
+        final_quant_executed = final_quant_executed + jnp.maximum(quant_left, 0)
+        # ============================================================
+
+        # ============================================================
+        # CAPACITY CHECK: Warn if JaxLOB arrays near full
+        # ============================================================
+        # JaxLOB uses fixed-size arrays. When full, it silently overwrites
+        # the last row (see JaxOrderBookArrays.py:35-36).
+        # We dynamically size arrays in _init_jaxlob(), but check usage here.
+        #
+        # JaxLOB array overflow
+        # ============================================================
+        n_trades_used = jnp.sum(final_state.trades[:, 0] != -1)
+
+        # Warning thresholds (non-blocking, just for monitoring)
+        jax.debug.print(
+            "JaxLOB capacity: orders={}/{}, trades={}/{}",
+            final_order_id, self.sim.nOrders,
+            n_trades_used, self.sim.nTrades,
+            ordered=True
+        )
+
+        # ============================================================
+        # FITNESS FUNCTION: Real PnL Computation
+        # ============================================================
+        #
+        # Policy Order ID Pattern:
+        #   Each step generates: world_msgs_per_step world orders + 1 policy order
+        #   Policy order IDs: K, 2K+1, 3K+2, ... where K = world_msgs_per_step
+        #   Formula: policy_order_id[i] = i * (K + 1) + K
+        #
+        # Trades array structure (nTrades, 6):
+        #   trades[:, 0]: execution_price
+        #   trades[:, 1]: quantity
+        #   trades[:, 2]: buyer_order_id
+        #   trades[:, 3]: seller_order_id
+        #   trades[:, 4]: timestamp_seconds
+        #   trades[:, 5]: timestamp_nanoseconds
+        # ============================================================
+
+        trades = final_state.trades
+        K = config.world_msgs_per_step
+        tick_size = config.tick_size  # For price normalization
+
+        # Policy order IDs follow pattern: K, 2K+1, 3K+2, ...
+        # Formula: order_id is a policy order if (order_id - K) % (K + 1) == 0
+        # And order_id >= K and order_id < total_orders
+        # This is more JAX-friendly than jnp.isin
+
+        # Valid trades mask (price != -1)
+        valid_trades_mask = trades[:, 0] != -1
+        n_valid_trades = jnp.sum(valid_trades_mask)
+
+        # === DEBUG: Trades array structure ===
+        jax.debug.print(
+            "[DEBUG TRADES] n_valid={}, first 5 trades:\n"
+            "  prices: {}\n"
+            "  qtys: {}\n"
+            "  col2 (passive_oid): {}\n"
+            "  col3 (aggr_oid): {}",
+            n_valid_trades,
+            trades[:5, 0], trades[:5, 1], trades[:5, 2], trades[:5, 3]
+        )
+
+        # ============================================================
+        # DOOM TRADE DETECTION (like JaxMARL-HFT)
+        # ============================================================
+        # Doom trades have special marker ID: -666666
+        # These are forced liquidation trades at episode end
+        # ============================================================
+        is_doom_trade = (trades[:, 2] == -666666) | (trades[:, 3] == -666666)
+        is_doom_trade = is_doom_trade & valid_trades_mask
+
+        # ============================================================
+        # IDENTIFY POLICY TRADES (FIX: Use order_id ranges)
+        # ============================================================
+        # trades[:, 2] = passive_oid, trades[:, 3] = aggr_oid
+        # Policy orders have IDs in range [1000000, 2000000)
+        # World orders have IDs in range [2000000, ...)
+        # ============================================================
+        passive_ids = trades[:, 2]
+        aggr_ids = trades[:, 3]
+
+        # Check if passive or aggressor is a policy order
+        is_policy_passive = (passive_ids >= POLICY_ORDER_ID_START) & (passive_ids < WORLD_ORDER_ID_START) & valid_trades_mask
+        is_policy_aggr = (aggr_ids >= POLICY_ORDER_ID_START) & (aggr_ids < WORLD_ORDER_ID_START) & valid_trades_mask
+        is_policy_trade = is_policy_passive | is_policy_aggr
+
+        # === DEBUG: Policy trade detection ===
+        jax.debug.print(
+            "[DEBUG POLICY] K={}, n_policy_trade={}, n_doom={}",
+            K, jnp.sum(is_policy_trade), jnp.sum(is_doom_trade)
+        )
+
+        # ============================================================
+        # COMPUTE REVENUE/COST (Simplified: assume all policy trades match task direction)
+        # ============================================================
+        # Since trades array doesn't store buy/sell direction explicitly,
+        # we assume all policy trades are in the task direction (sell or buy)
+        # ============================================================
+        is_sell_task = (config.task == 'sell')
+
+        if is_sell_task:
+            # Sell task: all policy trades are sells
+            sell_revenue = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
+            sell_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
+            buy_cost = 0
+            buy_quantity = 0
+        else:
+            # Buy task: all policy trades are buys
+            sell_revenue = 0
+            sell_quantity = 0
+            buy_cost = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
+            buy_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
+
+        # Total agent quantity (either as seller or buyer)
+        agent_quantity = sell_quantity + buy_quantity
+
+        # Track doom quantity for monitoring
+        doom_quantity = jnp.sum(jnp.where(is_doom_trade, trades[:, 1], 0))
+
+        # Compute PnL based on task type
+        # For now, assume sell task (policy wants to sell shares at high prices)
+        # PnL = revenue - expected_revenue = revenue - (init_mid_price * quantity)
+        # Normalized by 1e6 to keep fitness in reasonable range
+
+        # Expected revenue/cost at mid price
+        expected_value = init_mid_price * agent_quantity
+
+        # For sell task: higher revenue = better
+        # PnL = (actual_revenue - expected_revenue) / 1e6
+        sell_pnl = (sell_revenue - init_mid_price * sell_quantity) / 1e6
+
+        # For buy task: lower cost = better
+        # PnL = (expected_cost - actual_cost) / 1e6
+        buy_pnl = (init_mid_price * buy_quantity - buy_cost) / 1e6
+
+        # Combined PnL (both sell and buy activities contribute)
+        pnl = sell_pnl + buy_pnl
+
+        # Also compute total trade count for monitoring
+        total_trades = jnp.sum(valid_trades_mask)
+        agent_trades = jnp.sum(is_policy_trade)
+
+        # ============================================================
+        # VWAP AND ADVANTAGE CALCULATION (like JaxMARL-HFT)
+        # ============================================================
+        # VWAP = Volume Weighted Average Price of all OTHER trades (market benchmark)
+        # Advantage vs VWAP = how much better we did than market average
+        # Advantage vs init_mid = how much better we did than initial price
+        # ============================================================
+
+        # Identify other trades (not policy, not doom)
+        is_other_trade = valid_trades_mask & ~is_policy_trade & ~is_doom_trade
+        n_other_trades = jnp.sum(is_other_trade)
+
+        # Compute VWAP of other trades
+        # NOTE: Use absolute value for quantity (like JaxMARL-HFT)
+        other_volume = jnp.sum(jnp.where(is_other_trade, jnp.abs(trades[:, 1]), 0))
+        other_value = jnp.sum(jnp.where(is_other_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
+        vwap = jnp.where(other_volume > 0, other_value / other_volume, init_mid_price)
+
+        # === DEBUG: VWAP calculation ===
+        jax.debug.print(
+            "[DEBUG VWAP] n_other_trades={}, other_volume={}, other_value={}, vwap={}, init_mid_price={}",
+            n_other_trades, other_volume, other_value, vwap, init_mid_price
+        )
+
+        # Agent's average execution price
+        agent_revenue = sell_revenue + buy_cost  # Total value traded
+        agent_avg_price = jnp.where(agent_quantity > 0, agent_revenue / agent_quantity, 0)
+
+        # Direction switch: +1 for sell (want high price), -1 for buy (want low price)
+        direction_switch = jnp.where(config.task == 'sell', 1.0, -1.0)
+
+        # Advantage vs VWAP (like JaxMARL-HFT)
+        # For sell: advantage = revenue - vwap * quantity (sold higher than market avg)
+        # For buy: advantage = vwap * quantity - cost (bought lower than market avg)
+        advantage_vwap = direction_switch * (sell_revenue - vwap * sell_quantity + vwap * buy_quantity - buy_cost) / 1e6
+
+        # === DEBUG: Advantage calculation ===
+        jax.debug.print(
+            "[DEBUG ADVANTAGE] sell_rev={}, sell_qty={}, buy_cost={}, buy_qty={}, vwap*sell_qty={}, advantage_vwap={}",
+            sell_revenue, sell_quantity, buy_cost, buy_quantity, vwap * sell_quantity, advantage_vwap
+        )
+
+        # Advantage vs init_mid_price (current PnL calculation)
+        advantage_init = pnl  # Already computed above
+
+        # ============================================================
+        # CONVERT TO BASIS POINTS (bp) for financial interpretation
+        # ============================================================
+        # 1 bp = 0.01% = 0.0001
+        # Advantage (bp) = (price_diff / base_price) × 10000
+        #
+        # For VWAP advantage:
+        #   agent_avg_price vs vwap → (agent_avg_price - vwap) / vwap × 10000 bp
+        # For init_mid advantage:
+        #   agent_avg_price vs init_mid → (agent_avg_price - init_mid) / init_mid × 10000 bp
+        # ============================================================
+
+        # Advantage in bp (vs VWAP)
+        # Price difference per unit: (agent_avg_price - vwap)
+        # As percentage of vwap: (agent_avg_price - vwap) / vwap
+        # In basis points: × 10000
+        advantage_vwap_bp = jnp.where(
+            (agent_quantity > 0) & (vwap > 0),
+            ((agent_avg_price - vwap) / vwap) * 10000,  # bp
+            0.0
+        )
+
+        # Advantage in bp (vs init_mid_price)
+        advantage_init_bp = jnp.where(
+            (agent_quantity > 0) & (init_mid_price > 0),
+            ((agent_avg_price - init_mid_price) / init_mid_price) * 10000,  # bp
+            0.0
+        )
+
+        # ============================================================
+
+        # ============================================================
+        # TASK COMPLETION PENALTY
+        # ============================================================
+        # Penalize incomplete execution of task_size
+        # completion_ratio = agent_quantity / task_size
+        # If completion_ratio < 1, apply penalty proportional to shortfall
+        #
+        # Penalty formula (like JaxMARL-HFT):
+        #   shortfall = task_size - agent_quantity
+        #   penalty = -shortfall * init_mid_price / 1e6  (same scale as PnL)
+        #
+        # This encourages agent to complete the full task
+        # ============================================================
+        shortfall = jnp.maximum(config.task_size - agent_quantity, 0)
+        completion_penalty = -shortfall * init_mid_price / 1e6 * 0.1  # 10% of shortfall value
+
+        # Use PnL as fitness if agent has trades, otherwise penalize
+        # Penalty logic:
+        #   - If market has trades but agent didn't participate → light penalty (-0.05)
+        #   - If market has no trades at all → heavier penalty (-0.1)
+        # This encourages agent to actively participate in trading
+        base_fitness = jnp.where(
+            agent_quantity > 0,
+            pnl + completion_penalty,  # PnL + completion penalty
+            jnp.where(
+                total_trades > 0,
+                -0.05,              # Market active but agent didn't trade → light penalty
+                -0.1                # Market dead → heavier penalty
+            )
+        )
+
+        # ============================================================
+        # FAULT TOLERANCE: Handle NaN/Inf in fitness
+        # ============================================================
+        # If fitness is NaN or Inf (shouldn't happen with trade count,
+        # but will be critical when using PnL), return 0 as safe fallback.
+        # This prevents NaN from propagating through ES gradient updates.
+        #
+        # Why 0 instead of -inf:
+        # - -inf would dominate the ES gradient update
+        # - 0 = neutral fitness, episode has no effect on gradients
+        # - Better for training stability
+        # ============================================================
+        fitness = jnp.where(jnp.isfinite(base_fitness), base_fitness, 0.0)
+
+        # ============================================================
+        # BUILD INFO DICT FOR LOGGING
+        # ============================================================
+        info = {
+            'fitness': fitness,
+            'pnl': pnl,
+            # Advantage in dollar units (USD × 1e6 scale)
+            'advantage_vwap': advantage_vwap,
+            'advantage_init': advantage_init,
+            # Advantage in basis points (bp)
+            'advantage_vwap_bp': advantage_vwap_bp,
+            'advantage_init_bp': advantage_init_bp,
+            # Price benchmarks
+            'vwap': vwap,
+            'init_mid_price': init_mid_price,
+            # Execution metrics
+            'agent_quantity': agent_quantity,
+            'agent_avg_price': agent_avg_price,
+            'doom_quantity': doom_quantity,
+            'total_trades': total_trades,
+            'agent_trades': agent_trades,
+            'completion_penalty': completion_penalty,
+            'step_counter': final_step_counter,
+        }
+
+        return fitness, info
 
     def eval_single_thread(
         self,
         key: jnp.ndarray,
-        epoch: int,
         thread_id: int,
+        epoch: int,
         initial_sim_state: 'LobState',
-    ) -> float:
+        initial_msg_history: Optional[jnp.ndarray] = None,
+    ) -> Tuple[float, Dict]:
         """
         Evaluate one perturbed policy on a single episode.
 
         Args:
             key: JAX random key
-            epoch: Current epoch
             thread_id: Thread ID for noise generation
+            epoch: Current epoch
             initial_sim_state: Initial JaxLOB state
+            initial_msg_history: (480,) optional initial message history
 
         Returns:
-            Fitness score (PnL)
+            (fitness, info_dict) - fitness score and detailed metrics
         """
         world_common_params = self.create_world_common_params()
         policy_common_params = self.create_policy_common_params(epoch, thread_id)
 
         return self.simulate_episode(
-            key, world_common_params, policy_common_params, initial_sim_state
+            key, world_common_params, policy_common_params, initial_sim_state, initial_msg_history,
+            thread_id=thread_id  # Pass thread_id for debug printing
         )
 
     def train_epoch(
@@ -460,7 +1486,8 @@ class ESJaxLOBTrainer:
         key: jnp.ndarray,
         epoch: int,
         initial_sim_state: 'LobState',
-    ) -> Tuple[float, jnp.ndarray]:
+        initial_msg_history: Optional[jnp.ndarray] = None,
+    ) -> Tuple[float, jnp.ndarray, Dict]:
         """
         Run one training epoch.
 
@@ -468,10 +1495,14 @@ class ESJaxLOBTrainer:
             key: JAX random key
             epoch: Current epoch number
             initial_sim_state: Initial JaxLOB state
+            initial_msg_history: (480,) optional initial message history
 
         Returns:
-            (mean_fitness, all_fitnesses)
+            (mean_fitness, all_fitnesses, aggregated_info)
         """
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: Starting first epoch (JIT compilation happens here)...")
+
         n_threads = self.config.n_threads
 
         # Generate keys for all threads
@@ -479,13 +1510,21 @@ class ESJaxLOBTrainer:
         thread_ids = jnp.arange(n_threads)
 
         # Evaluate all threads in parallel with vmap
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: Creating eval_fn partial...")
         eval_fn = partial(
             self.eval_single_thread,
             epoch=epoch,
             initial_sim_state=initial_sim_state,
+            initial_msg_history=initial_msg_history,
         )
 
-        fitnesses = jax.vmap(eval_fn)(keys, thread_ids)
+        # vmap returns (fitnesses, infos) where infos is a dict of arrays
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: Running vmap over {n_threads} threads (JIT compiling)...")
+        fitnesses, infos = jax.vmap(eval_fn)(keys, thread_ids)
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: vmap complete, fitnesses shape: {fitnesses.shape}")
 
         # ES gradient update
         iterinfos = (
@@ -494,11 +1533,15 @@ class ESJaxLOBTrainer:
         )
 
         # Normalize and update
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: Converting fitnesses...")
         normalized_fitnesses = self.noiser_cls.convert_fitnesses(
             self.frozen_noiser_params, self.noiser_params, fitnesses
         )
 
-        self.noiser_params, self.lobs5_init = self.noiser_cls.do_updates(
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: Running ES gradient update (do_updates)...")
+        self.noiser_params, updated_params = self.noiser_cls.do_updates(
             self.frozen_noiser_params,
             self.noiser_params,
             self.lobs5_init.params,
@@ -507,8 +1550,15 @@ class ESJaxLOBTrainer:
             iterinfos,
             self.lobs5_init.es_map,
         )
+        # Update only the params, keep the ESInitResult structure
+        self.lobs5_init.params = updated_params
+        if epoch == 0:
+            print(f"[EPOCH] Epoch {epoch}: Params updated")
 
-        return jnp.mean(fitnesses), fitnesses
+        # Aggregate info across all threads (mean values)
+        aggregated_info = {k: jnp.mean(v) for k, v in infos.items()}
+
+        return jnp.mean(fitnesses), fitnesses, aggregated_info
 
     def train(self, n_epochs: Optional[int] = None):
         """
@@ -520,28 +1570,125 @@ class ESJaxLOBTrainer:
         Returns:
             Final policy params
         """
+        print("[TRAIN] ========================================")
+        print("[TRAIN] Starting training loop")
+        print("[TRAIN] ========================================")
+
         n_epochs = n_epochs or self.config.n_epochs
         key = jax.random.PRNGKey(self.config.seed)
+        print(f"[TRAIN] n_epochs: {n_epochs}")
 
-        # Get initial JaxLOB state
-        # In practice, load from your data
-        initial_sim_state = self.sim.reset()  # Placeholder
+        # Initialize W&B if configured
+        print("[TRAIN] Step 1: Initializing W&B...")
+        wandb_run = None
+        if hasattr(self.config, 'wandb_project') and self.config.wandb_project:
+            import wandb
+            wandb_run = wandb.init(
+                project=self.config.wandb_project,
+                entity=self.config.wandb_entity,
+                name=f"es_jaxlob_n{self.config.n_threads}_s{self.config.seed}",
+                config={
+                    'n_threads': self.config.n_threads,
+                    'n_steps': self.config.n_steps,
+                    'noiser': self.config.noiser,
+                    'sigma': self.config.sigma,
+                    'lr': self.config.lr,
+                    'lora_rank': self.config.lora_rank,
+                    'checkpoint': self.config.lobs5_checkpoint,
+                }
+            )
+            print(f"[TRAIN] Step 1: W&B initialized: {wandb_run.url}")
+        else:
+            print("[TRAIN] Step 1: W&B disabled (no project configured)")
+
+        # Get initial JaxLOB state and message history from real data
+        print("[TRAIN] Step 2: Creating initial sim state from LOBSTER data...")
+        initial_sim_state, initial_msg_history = self._create_initial_sim_state()
+        print(f"[TRAIN] Step 2: Initial order book created with {self.sim.nOrders} order slots, {self.sim.nTrades} trade slots")
+
+        print("[TRAIN] ========================================")
+        print("[TRAIN] Step 3: Starting epoch loop...")
+        print("[TRAIN] ========================================")
 
         # Training loop
         best_fitness = -float('inf')
         for epoch in tqdm(range(n_epochs), desc='ES JaxLOB Training'):
             key, epoch_key = jax.random.split(key)
 
-            mean_fitness, fitnesses = self.train_epoch(
-                epoch_key, epoch, initial_sim_state
+            mean_fitness, fitnesses, epoch_info = self.train_epoch(
+                epoch_key, epoch, initial_sim_state, initial_msg_history
             )
 
             if mean_fitness > best_fitness:
                 best_fitness = mean_fitness
 
+            # Log to W&B with extended metrics
+            if wandb_run:
+                # Basic fitness metrics
+                fitness_std = float(jnp.std(fitnesses))
+                fitness_max = float(jnp.max(fitnesses))
+                fitness_min = float(jnp.min(fitnesses))
+
+                # Fitness distribution percentiles
+                fitness_sorted = jnp.sort(fitnesses)
+                n = len(fitness_sorted)
+                p25 = float(fitness_sorted[n // 4])
+                p50 = float(fitness_sorted[n // 2])  # median
+                p75 = float(fitness_sorted[3 * n // 4])
+
+                # Count of positive/negative fitness (for PnL interpretation)
+                n_positive = int(jnp.sum(fitnesses > 0))
+                n_negative = int(jnp.sum(fitnesses < 0))
+                n_zero = int(jnp.sum(fitnesses == 0))
+
+                wandb_run.log({
+                    # Epoch info
+                    'epoch': epoch,
+
+                    # Fitness summary
+                    'fitness/mean': float(mean_fitness),
+                    'fitness/best_ever': float(best_fitness),
+                    'fitness/std': fitness_std,
+                    'fitness/max': fitness_max,
+                    'fitness/min': fitness_min,
+
+                    # Fitness distribution
+                    'fitness/p25': p25,
+                    'fitness/median': p50,
+                    'fitness/p75': p75,
+
+                    # PnL breakdown
+                    'pnl/n_positive': n_positive,
+                    'pnl/n_negative': n_negative,
+                    'pnl/n_zero': n_zero,
+                    'pnl/positive_ratio': n_positive / n if n > 0 else 0,
+
+                    # Advantage metrics in USD (× 1e6 scale)
+                    'advantage/vs_vwap_usd': float(epoch_info['advantage_vwap']),
+                    'advantage/vs_init_mid_usd': float(epoch_info['advantage_init']),
+                    # Advantage metrics in basis points (bp)
+                    'advantage/vs_vwap_bp': float(epoch_info['advantage_vwap_bp']),
+                    'advantage/vs_init_mid_bp': float(epoch_info['advantage_init_bp']),
+                    # Price benchmarks (raw units: price × 10000)
+                    'advantage/vwap': float(epoch_info['vwap']),
+                    'advantage/init_mid_price': float(epoch_info['init_mid_price']),
+
+                    # Execution metrics
+                    'execution/agent_quantity': float(epoch_info['agent_quantity']),
+                    'execution/agent_avg_price': float(epoch_info['agent_avg_price']),
+                    'execution/doom_quantity': float(epoch_info['doom_quantity']),
+                    'execution/total_trades': float(epoch_info['total_trades']),
+                    'execution/agent_trades': float(epoch_info['agent_trades']),
+                    'execution/completion_penalty': float(epoch_info['completion_penalty']),
+                    'execution/avg_steps': float(epoch_info['step_counter']),
+                })
+
             if epoch % 10 == 0:
                 print(f"Epoch {epoch}: mean_fitness={mean_fitness:.4f}, "
                       f"best={best_fitness:.4f}, std={jnp.std(fitnesses):.4f}")
+
+        if wandb_run:
+            wandb_run.finish()
 
         return self.lobs5_init.params
 
