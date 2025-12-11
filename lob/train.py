@@ -414,10 +414,10 @@ def train(args):
         print('Training on', args.num_devices, 'devices.')
 
         # ===== Intra-Epoch Evaluation Setup =====
-        # num_segments=0 (default) means use 5 segments; otherwise use the specified value
-        num_evals_per_epoch = getattr(args, 'num_segments', 0)
+        # num_segments: number of segments per epoch (default=1, no mid-epoch validation)
+        num_evals_per_epoch = getattr(args, 'num_segments', 1)
         if num_evals_per_epoch <= 0:
-            num_evals_per_epoch = 5  # Default: 5 segments per epoch with mid-epoch validation
+            num_evals_per_epoch = 1  # Default: 1 segment = no mid-epoch validation
         eval_interval = steps_per_epoch // num_evals_per_epoch
         print(f"[*] Intra-epoch evaluation: {num_evals_per_epoch} evals, interval={eval_interval} steps")
 
@@ -549,7 +549,7 @@ def train(args):
                 # Use a unique step that encodes both epoch and segment
                 ckpt_step = epoch * num_evals_per_epoch + eval_idx
                 save_checkpoint(ckpt_mgr, intra_ckpt, ckpt_step)
-                print(f"[*] Intra-epoch checkpoint saved: epoch {epoch}, segment {eval_idx}, step {step}, dataloader_seed {current_dataloader_seed}")
+                print(f"[*] Intra-epoch checkpoint saved: {ckpt_mgr.directory}, epoch {epoch}, segment {eval_idx}, step {step}, dataloader_seed {current_dataloader_seed}")
 
             # =========================================================================
             # OPTIMIZATION: Remove post-checkpoint barrier for async checkpoint

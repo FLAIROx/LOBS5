@@ -8,7 +8,7 @@
 #SBATCH --mem=0
 #SBATCH --time=23:00:00
 #SBATCH --contiguous
-#SBATCH --exclude=nid[010696-010716],nid010718
+#SBATCH --exclude=nid[010696-010716],nid010718,nid010152
 
 
 

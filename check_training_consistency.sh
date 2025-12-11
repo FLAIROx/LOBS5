@@ -95,7 +95,7 @@ print(f"✓ Dataloader: Vocab(token_mode={token_mode})")
 print(f"✓ Encoder: encode_msgs(..., token_mode={token_mode})")
 print(f"✓ Model: d_output={expected_vocab_size}")
 print(f"✓ Message_Tokenizer: MSG_LEN={expected_msg_len}, TOK_LENS={list(Message_Tokenizer.TOK_LENS)}")
-print(f"\n✅ All components configured for token_mode={token_mode}")
+print(f"\n✓ All components configured for token_mode={token_mode}")
 print("="*80)
 PYEOF
 

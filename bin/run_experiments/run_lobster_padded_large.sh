@@ -143,11 +143,11 @@ echo "[Wrapper] Debug timing: DEBUG_TIMING=$DEBUG_TIMING"
 
 # **************** Num Segments Configuration ****************
 # NUM_SEGMENTS: Number of segments (mid-epoch validations) per epoch
-#   0 (default): Use 5 segments (original behavior)
-#   1: No mid-epoch validation (only end-of-epoch)
+#   1 (default): No mid-epoch validation (only end-of-epoch)
+#   5: Mid-epoch validation every ~20% of epoch
 #   N: N segments per epoch with mid-epoch validation
-# Usage: NUM_SEGMENTS=3 MODEL_PRESET=55M sbatch ...
-NUM_SEGMENTS=${NUM_SEGMENTS:-0}
+# Usage: NUM_SEGMENTS=5 MODEL_PRESET=55M sbatch ...
+NUM_SEGMENTS=${NUM_SEGMENTS:-1}
 echo "[Wrapper] Num segments: NUM_SEGMENTS=$NUM_SEGMENTS"
 
 # Set data directories based on DATA_MODE
@@ -156,7 +156,7 @@ if [ "$DATA_MODE" = "encoded" ]; then
     # DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021'
     TEST_DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_encoded'
 elif [ "$DATA_MODE" = "preproc" ]; then
-    DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021'
+    DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022'
     TEST_DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc'
 else
     echo "ERROR: DATA_MODE='$DATA_MODE' not implemented. Use 'encoded' or 'preproc'."
@@ -177,7 +177,7 @@ export TEST_DIR_NAME
 # ============================================================
 echo "[Wrapper] Running pre-training consistency check..."
 bash check_training_consistency.sh || {
-    echo "❌ Consistency check failed! Fix issues before training."
+    echo "[Wrapper] ✗ Consistency check failed! Fix issues before training."
     exit 1
 }
 echo "[Wrapper] ✓ Consistency check passed"
