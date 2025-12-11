@@ -37,10 +37,10 @@ module load cuda/12.6
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nvshmem/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
 # **************** BF16 vs FP32 Gradient Comparison Test ****************
-# USE_BF16=1 (default): Enable BF16 mixed precision
-# USE_BF16=0: Disable BF16, use FP32
+# BF16=1 (default): Enable BF16 mixed precision
+# BF16=0: Disable BF16, use FP32
 # GRAD_STATS_PRECISION: Label for gradient stats JSON output (bf16/fp32)
-export USE_BF16=${USE_BF16:-1}
+export USE_BF16=${BF16:-1}
 export GRAD_STATS_PRECISION=${GRAD_STATS_PRECISION:-bf16_gpt_init}
 echo "[Wrapper] Precision mode: USE_BF16=$USE_BF16, GRAD_STATS_PRECISION=$GRAD_STATS_PRECISION"
 
