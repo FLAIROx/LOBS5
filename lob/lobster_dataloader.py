@@ -386,7 +386,22 @@ class LOBSTER_Dataset(Dataset):
 
         self.n_cache_files = n_cache_files
         self._message_cache = OrderedDict()
-        self.vocab = Vocab()
+
+        # ============================================================
+        # CRITICAL: Explicit token_mode to avoid training bugs
+        # ============================================================
+        # ALWAYS use token_mode=24 (current codebase is 24tok only)
+        # If you need 22tok, must also update:
+        #   - Message_Tokenizer.TOK_LENS
+        #   - encode_msg/decode_msg functions
+        #   - Model d_output
+        # ============================================================
+        self.vocab = Vocab(token_mode=24)  # EXPLICIT: Use 24tok
+        self.token_mode = 24  # Store for consistency checks
+
+        print(f"[DATALOADER] Initialized Vocab with token_mode={self.token_mode}, "
+              f"vocab_size={len(self.vocab)}, MSG_LEN={Message_Tokenizer.MSG_LEN}")
+
         self.mask_fn = mask_fn
         if self.mask_fn==LOBSTER_Dataset.no_mask or self.mask_fn==LOBSTER_Dataset.inference_mask:
             self.seq_len=self.n_messages* Message_Tokenizer.MSG_LEN
@@ -484,8 +499,12 @@ class LOBSTER_Dataset(Dataset):
             # Data is raw (shape: N, 14), need to encode
             X_raw = np.array(X[seq_start: seq_end])
             # print(X_raw[0])
-            # encode message
-            X = encode_msgs(X_raw, self.vocab.ENCODING)
+            # ============================================================
+            # CRITICAL: Pass token_mode explicitly to encode_msgs
+            # ============================================================
+            # Must match self.vocab.token_mode to avoid encoding bugs
+            # ============================================================
+            X = encode_msgs(X_raw, self.vocab.ENCODING, token_mode=self.token_mode)
         # print(f"lobster_dataloader.py: First loaded message from batch is \n  {X_raw[0]}\n which is \n {X[0]}\nafter encoding.")
 
         

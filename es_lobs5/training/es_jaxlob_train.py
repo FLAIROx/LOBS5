@@ -904,21 +904,44 @@ class ESJaxLOBTrainer:
             # ====== 1. World Model generates K background messages ======
             def world_msg_step(wcarry, world_msg_idx):
                 key, msg_hist, hidden, sim_st, book_f, oid_offset = wcarry
+
+                # ============================================================
+                # AUTOREGRESSIVE TOKEN-BY-TOKEN SAMPLING (FIX)
+                # ============================================================
+                # Model is trained autoregressively: given tokens[0:k], predict token[k+1]
+                # We must sample one token at a time, appending to context
+                # ============================================================
+                def sample_one_token(token_carry, _):
+                    """Sample one token autoregressively."""
+                    key_t, msg_hist_t, hidden_t = token_carry
+                    key_t, sample_key_t = jax.random.split(key_t)
+
+                    # Forward with current context
+                    hidden_t, log_probs_t = ES_PaddedLobPredModel._forward_step(
+                        world_common_params, hidden_t, msg_hist_t[-msg_len:], book_f[None, :]
+                    )
+                    # Keep only last position's hidden
+                    hidden_t = jax.tree.map(lambda h: h[:, -1:, :], hidden_t)
+
+                    # Sample ONLY the last position (next token)
+                    log_probs_t = jnp.nan_to_num(log_probs_t, nan=-1e9, posinf=1e9, neginf=-1e9)
+                    next_token = jax.random.categorical(sample_key_t, log_probs_t[-1])  # Shape: ()
+
+                    # Append to context (sliding window)
+                    msg_hist_t = jnp.concatenate([msg_hist_t[1:], jnp.array([next_token])])
+
+                    return (key_t, msg_hist_t, hidden_t), next_token
+
+                # Sample 24 tokens autoregressively
                 key, sample_key = jax.random.split(key)
-
-                # World Model forward (no noise)
-                hidden, log_probs = ES_PaddedLobPredModel._forward_step(
-                    world_common_params, hidden, msg_hist[-msg_len:], book_f[None, :]
+                (key, msg_hist, hidden), world_msg = jax.lax.scan(
+                    sample_one_token,
+                    (sample_key, msg_hist, hidden),
+                    None,
+                    length=msg_len,  # Sample 24 tokens
                 )
-                # Keep only the last position's hidden state for next iteration
-                hidden = jax.tree.map(lambda h: h[:, -1:, :], hidden)
-
-                # FAULT TOLERANCE: Handle NaN/Inf in log_probs before sampling
-                # NaN → -1e9 (very low probability), Inf → clamp to ±1e9
-                log_probs = jnp.nan_to_num(log_probs, nan=-1e9, posinf=1e9, neginf=-1e9)
-
-                # Sample next message tokens
-                world_msg = jax.random.categorical(sample_key, log_probs[-msg_len:])
+                # world_msg shape: (24,)
+                # ============================================================
 
                 # Convert to JaxLOB format and process
                 mid_price = get_mid_price(sim_st, config.tick_size)
@@ -960,20 +983,40 @@ class ESJaxLOBTrainer:
             )
 
             # ====== 2. Policy observes and generates action ======
+            # ============================================================
+            # AUTOREGRESSIVE TOKEN-BY-TOKEN SAMPLING (FIX)
+            # ============================================================
+            def sample_policy_token(token_carry, _):
+                """Sample one policy token autoregressively."""
+                key_p, msg_hist_p, hidden_p = token_carry
+                key_p, sample_key_p = jax.random.split(key_p)
+
+                # Forward with current context (with ES noise)
+                hidden_p, log_probs_p = ES_PaddedLobPredModel._forward_step(
+                    policy_common_params, hidden_p, msg_hist_p[-msg_len:], book_feat[None, :]
+                )
+                # Keep only last position's hidden
+                hidden_p = jax.tree.map(lambda h: h[:, -1:, :], hidden_p)
+
+                # Sample ONLY the last position
+                log_probs_p = jnp.nan_to_num(log_probs_p, nan=-1e9, posinf=1e9, neginf=-1e9)
+                next_token_p = jax.random.categorical(sample_key_p, log_probs_p[-1])  # Shape: ()
+
+                # Append to context
+                msg_hist_p = jnp.concatenate([msg_hist_p[1:], jnp.array([next_token_p])])
+
+                return (key_p, msg_hist_p, hidden_p), next_token_p
+
+            # Sample 24 policy tokens autoregressively
             key_policy, sample_key = jax.random.split(key_policy)
-
-            # Policy forward (with ES noise via iterinfo)
-            hiddens_policy, log_probs = ES_PaddedLobPredModel._forward_step(
-                policy_common_params, hiddens_policy, msg_history[-msg_len:], book_feat[None, :]
+            (key_policy, msg_history, hiddens_policy), policy_msg = jax.lax.scan(
+                sample_policy_token,
+                (sample_key, msg_history, hiddens_policy),
+                None,
+                length=msg_len,  # Sample 24 tokens
             )
-            # Keep only the last position's hidden state for next iteration
-            hiddens_policy = jax.tree.map(lambda h: h[:, -1:, :], hiddens_policy)
-
-            # FAULT TOLERANCE: Handle NaN/Inf in log_probs before sampling
-            log_probs = jnp.nan_to_num(log_probs, nan=-1e9, posinf=1e9, neginf=-1e9)
-
-            # Sample action tokens
-            policy_msg = jax.random.categorical(sample_key, log_probs[-msg_len:])
+            # policy_msg shape: (24,)
+            # ============================================================
 
             # Convert to JaxLOB format
             mid_price = get_mid_price(sim_state, config.tick_size)
