@@ -224,6 +224,9 @@ if __name__ == "__main__":
 				help="Runs the training loop in overfit mode on a single batch of data. Validation and testing are from the same set. ")
 	parser.add_argument("--log_ce_tables", type=str2bool, default=False,
 				help="Logs the CE values on a per token level to wandb. Memory intensive.")
+	parser.add_argument("--num_segments", type=int, default=0,
+				help="Number of segments (mid-epoch validations) per epoch. Default 0 means use 5. "
+				     "Set to 1 to disable mid-epoch validation (only end-of-epoch).")
 	# DISABLED: use_remat parameter defined but never implemented (no jax.checkpoint/remat calls in codebase)
 	# parser.add_argument("--use_remat", type=str2bool, default=False,
 	# 			help="Use gradient checkpointing (rematerialization) to reduce runtime memory. "

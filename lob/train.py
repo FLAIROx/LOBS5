@@ -414,8 +414,10 @@ def train(args):
         print('Training on', args.num_devices, 'devices.')
 
         # ===== Intra-Epoch Evaluation Setup =====
-        num_evals_per_epoch = 5      # Original: 5 segments per epoch with mid-epoch validation
-        # num_evals_per_epoch = 1    # Modified: 1 segment = no mid-epoch validation, only end-of-epoch
+        # num_segments=0 (default) means use 5 segments; otherwise use the specified value
+        num_evals_per_epoch = getattr(args, 'num_segments', 0)
+        if num_evals_per_epoch <= 0:
+            num_evals_per_epoch = 5  # Default: 5 segments per epoch with mid-epoch validation
         eval_interval = steps_per_epoch // num_evals_per_epoch
         print(f"[*] Intra-epoch evaluation: {num_evals_per_epoch} evals, interval={eval_interval} steps")
 

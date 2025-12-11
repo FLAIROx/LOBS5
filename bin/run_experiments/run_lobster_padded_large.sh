@@ -141,18 +141,36 @@ echo "[Wrapper] Token mode: TOKEN_MODE=$TOKEN_MODE"
 DEBUG_TIMING=${DEBUG_TIMING:-False}
 echo "[Wrapper] Debug timing: DEBUG_TIMING=$DEBUG_TIMING"
 
+# **************** Num Segments Configuration ****************
+# NUM_SEGMENTS: Number of segments (mid-epoch validations) per epoch
+#   0 (default): Use 5 segments (original behavior)
+#   1: No mid-epoch validation (only end-of-epoch)
+#   N: N segments per epoch with mid-epoch validation
+# Usage: NUM_SEGMENTS=3 MODEL_PRESET=55M sbatch ...
+NUM_SEGMENTS=${NUM_SEGMENTS:-0}
+echo "[Wrapper] Num segments: NUM_SEGMENTS=$NUM_SEGMENTS"
+
 # Set data directories based on DATA_MODE
 if [ "$DATA_MODE" = "encoded" ]; then
     DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2022'
     # DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021'
     TEST_DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_encoded'
-else
+elif [ "$DATA_MODE" = "preproc" ]; then
     DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021'
     TEST_DIR_NAME='/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc'
+else
+    echo "ERROR: DATA_MODE='$DATA_MODE' not implemented. Use 'encoded' or 'preproc'."
+    exit 1
 fi
 echo "[Wrapper] Train dir: $DIR_NAME"
 echo "[Wrapper] Test dir: $TEST_DIR_NAME"
 # **************** Data Mode Configuration ****************
+
+# Export variables for consistency check
+export TOKEN_MODE
+export DATA_MODE
+export DIR_NAME
+export TEST_DIR_NAME
 
 # ============================================================
 # PRE-TRAINING CONSISTENCY CHECK
@@ -192,6 +210,7 @@ python -u -B run_train.py \
         --shuffle_train=True \
         --debug_overfit=False \
         --lr_patience=3 \
+        --num_segments=$NUM_SEGMENTS \
         --USE_WANDB=True \
         --wandb_entity=kang-oxford
 
