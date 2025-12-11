@@ -125,7 +125,7 @@ python -u -B -m es_lobs5.training.es_jaxlob_train \
     --sigma=0.01 \
     --lr=0.001 \
     --lora_rank=1 \
-    --n_threads=100 \
+    --n_threads=1 \
     --n_epochs=1000 \
     --n_steps=100 \
     --world_msgs_per_step=1 \

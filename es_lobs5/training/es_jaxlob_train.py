@@ -1092,6 +1092,100 @@ class ESJaxLOBTrainer:
             quant_executed = quant_executed + step_executed
             # ============================================================
 
+            # === DEBUG: Per-step execution summary ===
+            jax.lax.cond(
+                thread_id == 0,
+                lambda: jax.debug.print(
+                    "[EXEC-STEP] step={}, submitted: oid={} qty={} price={} | "
+                    "executed_this_step={} | total_exec={}/{} | remaining={}",
+                    step_idx,
+                    policy_order_id, truncated_qty, sim_msg[3],
+                    step_executed,
+                    quant_executed, config.task_size,
+                    config.task_size - quant_executed,
+                    ordered=True
+                ),
+                lambda: None,
+            )
+
+            # === DEBUG: Trade details when execution happens ===
+            jax.lax.cond(
+                (thread_id == 0) & (step_executed > 0),
+                lambda: jax.debug.print(
+                    "[TRADE-DETAIL] step={}, ✓ EXECUTED {} shares\n"
+                    "  Policy order: oid={}, side={}, submitted_qty={}\n"
+                    "  Trades involving policy (first 3):\n"
+                    "    exec_prices: {}\n"
+                    "    exec_qtys: {}\n"
+                    "    passive_oids: {}\n"
+                    "    aggr_oids: {}",
+                    step_idx, step_executed,
+                    policy_order_id, msg_decoded[2], truncated_qty,
+                    jnp.where(is_policy_in_trade, trades[:, 0], -1)[:3],
+                    jnp.where(is_policy_in_trade, trades[:, 1], 0)[:3],
+                    jnp.where(is_policy_in_trade, trades[:, 2], -1)[:3],
+                    jnp.where(is_policy_in_trade, trades[:, 3], -1)[:3],
+                    ordered=True
+                ),
+                lambda: None,
+            )
+
+            # === DEBUG: Orderbook snapshot (every step for thread 0) ===
+            # Format inspired by logs_55M/print_orderbook
+            jax.lax.cond(
+                thread_id == 0,
+                lambda: jax.debug.print(
+                    "\n[BOOK-SNAP] Step {}\n"
+                    "  ========== ASK (Sell) ==========\n"
+                    "  L10: price={:8.2f}  qty={:5}\n"
+                    "  L9:  price={:8.2f}  qty={:5}\n"
+                    "  L8:  price={:8.2f}  qty={:5}\n"
+                    "  L7:  price={:8.2f}  qty={:5}\n"
+                    "  L6:  price={:8.2f}  qty={:5}\n"
+                    "  L5:  price={:8.2f}  qty={:5}\n"
+                    "  L4:  price={:8.2f}  qty={:5}\n"
+                    "  L3:  price={:8.2f}  qty={:5}\n"
+                    "  L2:  price={:8.2f}  qty={:5}\n"
+                    "  L1:  price={:8.2f}  qty={:5} <- Best Ask\n"
+                    "  ---------- SPREAD ----------\n"
+                    "  L1:  price={:8.2f}  qty={:5} <- Best Bid\n"
+                    "  L2:  price={:8.2f}  qty={:5}\n"
+                    "  L3:  price={:8.2f}  qty={:5}\n"
+                    "  L4:  price={:8.2f}  qty={:5}\n"
+                    "  L5:  price={:8.2f}  qty={:5}\n"
+                    "  L6:  price={:8.2f}  qty={:5}\n"
+                    "  L7:  price={:8.2f}  qty={:5}\n"
+                    "  L8:  price={:8.2f}  qty={:5}\n"
+                    "  L9:  price={:8.2f}  qty={:5}\n"
+                    "  L10: price={:8.2f}  qty={:5}\n"
+                    "  ========== BID (Buy) ==========",
+                    step_idx,
+                    # Get L2 state (10 levels)
+                    sim_state.asks[9, 0] / config.tick_size, sim_state.asks[9, 1],
+                    sim_state.asks[8, 0] / config.tick_size, sim_state.asks[8, 1],
+                    sim_state.asks[7, 0] / config.tick_size, sim_state.asks[7, 1],
+                    sim_state.asks[6, 0] / config.tick_size, sim_state.asks[6, 1],
+                    sim_state.asks[5, 0] / config.tick_size, sim_state.asks[5, 1],
+                    sim_state.asks[4, 0] / config.tick_size, sim_state.asks[4, 1],
+                    sim_state.asks[3, 0] / config.tick_size, sim_state.asks[3, 1],
+                    sim_state.asks[2, 0] / config.tick_size, sim_state.asks[2, 1],
+                    sim_state.asks[1, 0] / config.tick_size, sim_state.asks[1, 1],
+                    sim_state.asks[0, 0] / config.tick_size, sim_state.asks[0, 1],
+                    sim_state.bids[0, 0] / config.tick_size, sim_state.bids[0, 1],
+                    sim_state.bids[1, 0] / config.tick_size, sim_state.bids[1, 1],
+                    sim_state.bids[2, 0] / config.tick_size, sim_state.bids[2, 1],
+                    sim_state.bids[3, 0] / config.tick_size, sim_state.bids[3, 1],
+                    sim_state.bids[4, 0] / config.tick_size, sim_state.bids[4, 1],
+                    sim_state.bids[5, 0] / config.tick_size, sim_state.bids[5, 1],
+                    sim_state.bids[6, 0] / config.tick_size, sim_state.bids[6, 1],
+                    sim_state.bids[7, 0] / config.tick_size, sim_state.bids[7, 1],
+                    sim_state.bids[8, 0] / config.tick_size, sim_state.bids[8, 1],
+                    sim_state.bids[9, 0] / config.tick_size, sim_state.bids[9, 1],
+                    ordered=True
+                ),
+                lambda: None,
+            )
+
             # Update state for next step
             book_feat = transform_L2_state_wrapper(sim_state, price_levels=book_depth, tick_size=config.tick_size)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
@@ -1477,6 +1571,50 @@ class ESJaxLOBTrainer:
             'completion_penalty': completion_penalty,
             'step_counter': final_step_counter,
         }
+
+        # === DEBUG: Episode Summary ===
+        jax.lax.cond(
+            thread_id == 0,
+            lambda: jax.debug.print(
+                "\n" + "="*70 + "\n"
+                "EPISODE SUMMARY (Thread 0)\n"
+                "="*70 + "\n"
+                "Execution Status:\n"
+                "  Target:           {} shares\n"
+                "  Executed:         {} shares ({:.1f}%)\n"
+                "  Doom (forced):    {} shares\n"
+                "  Agent trades:     {}\n"
+                "  Total trades:     {}\n"
+                "\n"
+                "Price Performance:\n"
+                "  Init mid price:   {:.2f}\n"
+                "  Agent avg price:  {:.2f}\n"
+                "  Market VWAP:      {:.2f}\n"
+                "\n"
+                "Advantage:\n"
+                "  vs VWAP:          {:.2f} bp  ({:.4f} USD @1e6)\n"
+                "  vs Init Mid:      {:.2f} bp  ({:.4f} USD @1e6)\n"
+                "\n"
+                "Metrics:\n"
+                "  PnL:              {:.4f}\n"
+                "  Fitness:          {:.6f}\n"
+                "  Completion penalty: {:.4f}\n"
+                + "="*70,
+                config.task_size,
+                agent_quantity, (agent_quantity / config.task_size) * 100,
+                doom_quantity,
+                agent_trades,
+                total_trades,
+                init_mid_price / config.tick_size,
+                agent_avg_price / config.tick_size,
+                vwap / config.tick_size,
+                advantage_vwap_bp, advantage_vwap,
+                advantage_init_bp, advantage_init,
+                pnl, fitness, completion_penalty,
+                ordered=True
+            ),
+            lambda: None,
+        )
 
         return fitness, info
 
