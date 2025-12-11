@@ -247,6 +247,7 @@ def get_sim_msg_es(
     tick_size: int,
     encoder: Dict,
     trader_id: int = -88,  # FIX: Allow specifying trader_id (policy=-1000, world=-2000)
+    token_mode: int = 22,  # Token mode for decoding (22 or 24)
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Convert predicted message tokens to JaxLOB format.
@@ -294,7 +295,7 @@ def get_sim_msg_es(
     _lazy_import_jaxlob()
 
     # Decode tokens to message fields
-    msg_decoded = encoding.decode_msg(pred_msg_tokens, encoder)
+    msg_decoded = encoding.decode_msg(pred_msg_tokens, encoder, token_mode=token_mode)
 
     # Extract fields
     event_type = msg_decoded[1]  # EVENT_TYPE_i
@@ -813,7 +814,8 @@ class ESJaxLOBTrainer:
         )
 
         # Initialize episode state
-        msg_len = 24  # tokens per message
+        # msg_len must match token_mode: 22 for tok22, 24 for tok24
+        msg_len = 22 if config.token_mode == 22 else 24
 
         # Context length: 500 messages to match training (msg_seq_len=500)
         # Why 500:
@@ -821,7 +823,7 @@ class ESJaxLOBTrainer:
         #   2. Provides full market history (~several minutes of trading)
         #   3. inference_no_errcorr.py uses parameterized n_inp_msgs (no hardcoded value)
         #      We choose 500 to match the training distribution
-        context_len = msg_len * 500  # 500 messages = 12000 tokens
+        context_len = msg_len * 500  # 500 messages = 11000 (tok22) or 12000 (tok24) tokens
 
         # ============================================================
         # ORDER ID DESIGN (FIX for trader identification)
@@ -949,17 +951,19 @@ class ESJaxLOBTrainer:
                 world_order_id = WORLD_ORDER_ID_START + oid_offset
                 sim_msg, msg_decoded = get_sim_msg_es(
                     world_msg, self.sim, sim_st, mid_price, world_order_id, config.tick_size, self.encoder,
-                    trader_id=-2000  # FIX: World Model trader ID
+                    trader_id=-2000,  # FIX: World Model trader ID
+                    token_mode=config.token_mode
                 )
 
                 # === DEBUG: Print world model orders (only thread 0, first few steps) ===
+                # tok22: size is token[4], tok24: size is tokens[4:6]
                 jax.lax.cond(
                     (thread_id == 0) & (step_idx < 5) & (world_msg_idx < 3),
                     lambda: jax.debug.print(
-                        "[WORLD] step={}, world_msg={}, oid={}, event={}, side={}, qty={}, price={}, tokens[4:6]={}",
+                        "[WORLD] step={}, world_msg={}, oid={}, event={}, side={}, qty={}, price={}, size_tok={}",
                         step_idx, world_msg_idx, world_order_id,
                         msg_decoded[1], msg_decoded[2], msg_decoded[5], sim_msg[3],
-                        world_msg[4:6],
+                        world_msg[4],  # size token (tok22: single, tok24: high digit)
                         ordered=True
                     ),
                     lambda: None,
@@ -1024,7 +1028,8 @@ class ESJaxLOBTrainer:
             policy_order_id = POLICY_ORDER_ID_START + step_idx
             sim_msg, msg_decoded = get_sim_msg_es(
                 policy_msg, self.sim, sim_state, mid_price, policy_order_id, config.tick_size, self.encoder,
-                trader_id=-1000  # FIX: Policy trader ID (all policy orders have same trader)
+                trader_id=-1000,  # FIX: Policy trader ID (all policy orders have same trader)
+                token_mode=config.token_mode
             )
 
             # ============================================================
@@ -1037,15 +1042,16 @@ class ESJaxLOBTrainer:
             sim_msg = sim_msg.at[2].set(truncated_qty)
 
             # === DEBUG: Print policy orders (only thread 0, first 10 steps) ===
+            # tok22: size is token[4], tok24: size is tokens[4:6]
             jax.lax.cond(
                 (thread_id == 0) & (step_idx < 10),
                 lambda: jax.debug.print(
-                    "[POLICY] step={}, oid={}, event={}, side={}, qty={} (orig={}), price={}, tokens[4:6]={}",
+                    "[POLICY] step={}, oid={}, event={}, side={}, qty={} (orig={}), price={}, size_tok={}",
                     step_idx, policy_order_id,
                     msg_decoded[1], msg_decoded[2],  # event_type, direction
                     truncated_qty, original_qty,     # qty after/before truncation
                     sim_msg[3],                      # price
-                    policy_msg[4:6],                 # size_high, size_low tokens
+                    policy_msg[4],                   # size token (tok22: single, tok24: high digit)
                     ordered=True
                 ),
                 lambda: None,

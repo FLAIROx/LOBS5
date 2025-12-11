@@ -321,6 +321,24 @@ decode_msgs_22 = jax.jit(jax.vmap(decode_msg_22, in_axes=(0, None)), backend='cp
 decode_msgs_24 = jax.jit(jax.vmap(decode_msg_24, in_axes=(0, None)), backend='cpu')
 
 
+def decode_msg(msg_enc, encoding, token_mode=22):
+    """
+    Decode a single message using the specified token mode.
+
+    Args:
+        msg_enc: Single encoded message (22 or 24 tokens)
+        encoding: Encoding dictionary from Vocab
+        token_mode: 22 (default) or 24
+
+    Returns:
+        Decoded message (14 fields)
+    """
+    if token_mode == 22:
+        return decode_msg_22(msg_enc, encoding)
+    else:
+        return decode_msg_24(msg_enc, encoding)
+
+
 def decode_msgs(msgs_enc, encoding, token_mode=22):
     """
     Decode messages using the specified token mode.

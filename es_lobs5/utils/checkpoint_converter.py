@@ -564,8 +564,18 @@ def load_checkpoint_for_es(
 
     # Extract config values with defaults
     d_model = config.get('d_model', 256)
-    d_output = config.get('d_output', config.get('vocab_size', 2112))
-    d_book = config.get('d_book', 503)
+    # d_output must match token_mode: 22tok -> 12012, 24tok -> 2112
+    token_mode = config.get('token_mode', 22)
+    default_vocab_size = 12012 if token_mode == 22 else 2112
+    d_output = config.get('d_output', config.get('vocab_size', default_vocab_size))
+
+    # Extract runtime configuration from checkpoint metadata
+    msg_seq_len = config.get('msg_seq_len', 500)
+    book_depth = config.get('book_depth', 500)
+    d_book = 3 + book_depth  # Compute: [mid_diff, time_s, time_ns] + volume image
+
+    print(f"[CHECKPOINT] token_mode={token_mode}, d_output={d_output}")
+    print(f"[CHECKPOINT] msg_seq_len={msg_seq_len}, book_depth={book_depth}, d_book={d_book}")
     n_message_layers = config.get('n_message_layers', config.get('n_layers', 2))
     n_fused_layers = config.get('n_fused_layers', 4)
     n_book_pre_layers = config.get('n_book_pre_layers', 1)

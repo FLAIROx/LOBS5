@@ -70,7 +70,7 @@ nvidia-smi --list-gpus | head -4
 # ============================================
 # Real ES Training Configuration
 # ============================================
-CHECKPOINT_PATH="checkpoints/lobs5_d1024_l12_b16_bsz13x4_seed42_jid1684154_3zf0yp50"
+CHECKPOINT_PATH="checkpoints/lobs5_d1024_l12_b16_bsz13x4_seed42_jid1704172_htdogyoh"
 OUTPUT_DIR="es_checkpoints/real_$(date +%Y%m%d_%H%M%S)"
 
 echo ""
@@ -132,7 +132,7 @@ python -u -B -m es_lobs5.training.es_jaxlob_train \
     --task=sell \
     --task_size=50 \
     --tick_size=100 \
-    --token_mode=24 \
+    --token_mode=22 \
     --seed=42 \
     --output_dir="${OUTPUT_DIR}" \
     --wandb_project=lobs5-es-jaxlob \
