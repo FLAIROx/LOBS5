@@ -73,11 +73,36 @@ nvidia-smi --list-gpus | head -4
 CHECKPOINT_PATH="checkpoints/lobs5_d1024_l12_b16_bsz13x4_seed42_jid1704172_htdogyoh"
 OUTPUT_DIR="es_checkpoints/real_$(date +%Y%m%d_%H%M%S)"
 
+# **************** Token Mode Configuration ****************
+# TOKEN_MODE: 22 (default) or 24
+# Usage: TOKEN_MODE=24 sbatch run_es_train.sh
+TOKEN_MODE=${TOKEN_MODE:-22}
+echo "[*] Token mode: TOKEN_MODE=$TOKEN_MODE"
+
+# **************** Background Model Configuration ****************
+# BACKGROUND_MODE: 'world_model' (default) or 'historical_replay'
+#   world_model: Autoregressive generation using LOBS5 model (slow, ~220k forward passes/episode)
+#   historical_replay: Sequential replay from historical data (fast, ~2k forward passes/episode)
+# Usage: BACKGROUND_MODE=historical_replay sbatch run_es_train.sh
+BACKGROUND_MODE=${BACKGROUND_MODE:-world_model}
+echo "[*] Background mode: BACKGROUND_MODE=$BACKGROUND_MODE"
+
+# REPLAY_DATA_PATH: Path to historical data directory (only for historical_replay mode)
+# Default: GOOG 2021 data (same as training data)
+# Usage: REPLAY_DATA_PATH=/path/to/GOOG/2016 BACKGROUND_MODE=historical_replay sbatch ...
+REPLAY_DATA_PATH=${REPLAY_DATA_PATH:-/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021}
+if [ "$BACKGROUND_MODE" = "historical_replay" ]; then
+    echo "[*] Replay data path: $REPLAY_DATA_PATH"
+fi
+# **************** Background Model Configuration ****************
+
 echo ""
 echo "[*] ============================================"
 echo "[*] Real ES Training Configuration:"
 echo "[*]   Checkpoint: $CHECKPOINT_PATH"
 echo "[*]   Output: $OUTPUT_DIR"
+echo "[*]   Token mode: $TOKEN_MODE"
+echo "[*]   Background mode: $BACKGROUND_MODE"
 echo "[*]   Noiser: eggroll"
 echo "[*]   Population: 1792 (448 per GPU × 4)"
 echo "[*]   Epochs: 1000"
@@ -132,6 +157,9 @@ python -u -B -m es_lobs5.training.es_jaxlob_train \
     --task=sell \
     --task_size=50 \
     --tick_size=100 \
+    --token_mode="${TOKEN_MODE}" \
+    --background_mode="${BACKGROUND_MODE}" \
+    $([ "$BACKGROUND_MODE" = "historical_replay" ] && echo "--replay_data_path=${REPLAY_DATA_PATH}") \
     --seed=42 \
     --output_dir="${OUTPUT_DIR}" \
     --wandb_project=lobs5-es-jaxlob \

@@ -152,7 +152,7 @@ python -u -B -m es_lobs5.training.es_jaxlob_train \
     --tick_size=100 \
     --token_mode=22 \
     --background_mode="${BACKGROUND_MODE}" \
-    $([ -n "$REPLAY_DATA_PATH" ] && echo "--replay_data_path=\"$REPLAY_DATA_PATH\"") \
+    $([ "$BACKGROUND_MODE" = "historical_replay" ] && echo "--replay_data_path=${REPLAY_DATA_PATH}") \
     --seed=42 \
     --output_dir="${OUTPUT_DIR}" \
     --wandb_project=lobs5-es-jaxlob \
