@@ -955,29 +955,37 @@ class ESJaxLOBTrainer:
             # ============================================================
             # HISTORICAL REPLAY MODE: Load pre-encoded messages from data
             # ============================================================
-            def historical_replay_step(wcarry, world_msg_idx):
+            def historical_replay_step(wcarry, bg_msg_idx):
                 """
                 Sequential replay of historical market messages (no forward pass).
 
+                NOTE: Variable names use 'world_*' prefix for interface compatibility,
+                but this function replays HISTORICAL DATA, not model-generated messages.
+
                 CRITICAL DESIGN: This replaces world model's 2200 forward passes/step
                 with direct data lookup, achieving ~100x speedup for background generation.
+
+                Args:
+                    bg_msg_idx: Background message index (0 to world_msgs_per_step-1)
                 """
                 key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr = wcarry
 
-                # Get pre-encoded token sequence (no model inference needed!)
-                world_msg = self.replay_tokens[replay_ptr]  # (msg_len,)
-
-                # Get raw message for JaxLOB conversion
-                msg_raw = self.replay_data_raw[replay_ptr]  # (14,)
+                # ============================================================
+                # HISTORICAL REPLAY: Load pre-encoded message from data
+                # ============================================================
+                # NO model inference! Just array lookup from pre-loaded data
+                # ============================================================
+                replayed_msg_tokens = self.replay_tokens[replay_ptr]  # (msg_len,) - from HISTORICAL DATA
+                replayed_msg_raw = self.replay_data_raw[replay_ptr]  # (14,) - from HISTORICAL DATA
 
                 # Convert to JaxLOB format using existing decoder
-                # NOTE: Using the same conversion as world model for consistency
-                sim_msg = decoded_msg_to_jaxlob_format(msg_raw)
+                sim_msg = decoded_msg_to_jaxlob_format(replayed_msg_raw)
 
                 # Override order_id and trader_id for tracking
-                world_order_id = WORLD_ORDER_ID_START + oid_offset
-                sim_msg = sim_msg.at[4].set(world_order_id)  # order_id
-                sim_msg = sim_msg.at[5].set(-2000)           # trader_id (world/background)
+                # (Keep same ID scheme as world model for consistency)
+                bg_order_id = WORLD_ORDER_ID_START + oid_offset
+                sim_msg = sim_msg.at[4].set(bg_order_id)  # order_id
+                sim_msg = sim_msg.at[5].set(-2000)        # trader_id (background/historical)
 
                 # Process in simulator
                 sim_st = self.sim.process_order_array(sim_st, sim_msg)
@@ -986,7 +994,7 @@ class ESJaxLOBTrainer:
                 book_f = transform_L2_state_wrapper(sim_st, price_levels=book_depth, tick_size=config.tick_size)
 
                 # Update msg_history with replayed tokens (keep context consistent with training)
-                msg_hist = jnp.concatenate([msg_hist[msg_len:], world_msg])
+                msg_hist = jnp.concatenate([msg_hist[msg_len:], replayed_msg_tokens])
 
                 # Advance replay pointer
                 new_replay_ptr = replay_ptr + 1
@@ -999,9 +1007,22 @@ class ESJaxLOBTrainer:
                     new_replay_ptr
                 )
 
+                # === DEBUG: Print replayed messages from HISTORICAL DATA ===
+                jax.lax.cond(
+                    (thread_id == 0) & (step_idx < 5) & (bg_msg_idx < 3),
+                    lambda: jax.debug.print(
+                        "[REPLAY] step={:3d}, bg_msg={:3d}, oid={:7d}, event={:1d}, side={:1d}, qty={:5d}, price={:8d}, size_tok={:5d}",
+                        step_idx, bg_msg_idx, bg_order_id,
+                        replayed_msg_raw[1], replayed_msg_raw[2], replayed_msg_raw[5], sim_msg[3],
+                        replayed_msg_tokens[4],  # size token
+                        ordered=True
+                    ),
+                    lambda: None,
+                )
+
                 oid_offset = oid_offset + 1
 
-                return (key, msg_hist, hidden, sim_st, book_f, oid_offset, new_replay_ptr), world_msg
+                return (key, msg_hist, hidden, sim_st, book_f, oid_offset, new_replay_ptr), replayed_msg_tokens
 
             # ====== 1. World Model generates K background messages ======
             def world_msg_step(wcarry, world_msg_idx):
