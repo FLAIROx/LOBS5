@@ -52,20 +52,24 @@ FULL AUTOREGRESSIVE (no sliding window), so the data loading needs adaptation.
     │                     sim_state, sim_msg)     │
     └─────────────────────────────────────────────┘
 
-[4] Prepare Context for Generation
+[4] Prepare Context for Generation (FULL AUTOREGRESSIVE)
     ┌─────────────────────────────────────────────┐
-    │ msg_history = last 20 messages (480 tokens) │
-    │             = messages[480:500] encoded     │
+    │ msg_history = ALL 500 messages (11000 tok)  │
+    │             = full context from replay      │
+    │                                             │
+    │ hidden_state = RNN state (carries history)  │
     │                                             │
     │ book_feat = extract_book_features(sim_state)│
-    │           = current L2 state (40 values)    │
+    │           = current L2 state (503 values)   │
     └─────────────────────────────────────────────┘
+    NOTE: Each forward pass uses msg_history[-msg_len:] (last 1 message)
+          but hidden_state carries accumulated history from all 500 messages
 
 [5] Generation Phase (Step 501+)
     ┌─────────────────────────────────────────────┐
     │ World Model + Policy start generating       │
-    │   - Use msg_history as context              │
-    │   - Use book_feat as current state          │
+    │   - Use FULL msg_history as RNN context     │
+    │   - Forward pass: last 1 msg + hidden state │
     │   - Generate new messages autoregressively  │
     └─────────────────────────────────────────────┘
 
@@ -1324,35 +1328,15 @@ class ESJaxLOBTrainer:
                 lambda: None,
             )
 
-            # === DEBUG: Trade details when execution happens ===
-            def print_trade_table():
-                jax.debug.print(
-                    "  ✓ EXECUTED {:4d} shares | Policy oid={:7d}, side={:1d}, submitted={:4d}",
-                    step_executed, policy_order_id,
-                    msg_decoded[2],  # 0=sell, 1=buy (avoid Python if/else in lambda)
-                    truncated_qty,
-                    ordered=True
-                )
-                jax.debug.print(
-                    "    From matching: {:4d} | Pseudo (last step): {:4d}",
-                    step_executed_from_matching, step_executed_pseudo,
-                    ordered=True
-                )
-                jax.lax.cond(
-                    step_executed_pseudo > 0,
-                    lambda: jax.debug.print(
-                        "    Pseudo exec price: {:8.2f} (best_bid×0.9 or best_ask×1.1)",
-                        pseudo_exec_price / config.tick_size,
-                        ordered=True
-                    ),
-                    lambda: None,
-                )
-
-            jax.lax.cond(
-                (thread_id == 0) & (step_executed > 0),
-                print_trade_table,
-                lambda: None,
-            )
+            # === DEBUG: Trade details (DISABLED to reduce log size and improve speed) ===
+            # Uncomment if needed for debugging
+            # def print_trade_table():
+            #     jax.debug.print(
+            #         "  ✓ EXECUTED {:4d} shares | Matching: {:4d} | Pseudo: {:4d}",
+            #         step_executed, step_executed_from_matching, step_executed_pseudo,
+            #         ordered=True
+            #     )
+            # jax.lax.cond((thread_id == 0) & (step_executed > 0), print_trade_table, lambda: None)
 
             # === DEBUG: Orderbook snapshot (detailed format, every step for thread 0) ===
             # Format matching logs_55M/print_orderbook
