@@ -1257,23 +1257,54 @@ class ESJaxLOBTrainer:
             )
             # ============================================================
 
-            # Process order
+            # ============================================================
+            # EXECUTION LOGIC: JaxLOB Matching + Pseudo Execution (Last Step Only)
+            # ============================================================
+            # NORMAL STEPS (0-98): Use JaxLOB matching engine
+            # LAST STEP (99): If not completed, add pseudo execution with 10% slippage
+            # ============================================================
+
+            # Process order through JaxLOB matching engine
             sim_state = self.sim.process_order_array(sim_state, sim_msg)
 
-            # ============================================================
-            # TRACK EXECUTED QUANTITY
-            # ============================================================
-            # Check new trades for this policy order (already defined above as policy_order_id)
-            # Find trades where policy is seller (sell task) or buyer (buy task)
-            # trades[:, 2] = passive_oid, trades[:, 3] = aggr_oid
+            # Track executed quantity from real trades
             trades = sim_state.trades
             is_new_trade = (trades[:, 0] != -1)  # valid trade
-
-            # Check if policy_order_id appears in either passive or aggressor position
             is_policy_in_trade = ((trades[:, 2] == policy_order_id) | (trades[:, 3] == policy_order_id)) & is_new_trade
+            step_executed_from_matching = jnp.sum(jnp.where(is_policy_in_trade, jnp.abs(trades[:, 1]), 0))
 
-            # Sum executed quantity from this step's trades
-            step_executed = jnp.sum(jnp.where(is_policy_in_trade, jnp.abs(trades[:, 1]), 0))
+            # ============================================================
+            # PSEUDO EXECUTION: Last step only, if task not completed
+            # ============================================================
+            # CRITICAL: Only execute on LAST STEP (step_idx == n_steps - 1)
+            # If task is incomplete, force execute remaining quantity at slippage price
+            # Rationale:
+            #   - Ensures task completion for fitness calculation
+            #   - Simulates aggressive market order execution
+            #   - Sell: Execute at (Best Bid × 0.9) - 10% slippage below best
+            #   - Buy:  Execute at (Best Ask × 1.1) - 10% slippage above best
+            # ============================================================
+            is_last_step = step_idx == (config.n_steps - 1)
+            remaining_qty = config.task_size - (quant_executed + step_executed_from_matching)
+
+            step_executed_pseudo = jnp.where(
+                is_last_step & (remaining_qty > 0) & (truncated_qty > 0),
+                remaining_qty,  # Force execute all remaining
+                jnp.int32(0)    # No pseudo execution
+            )
+
+            # Calculate pseudo execution price (used for metrics only)
+            best_ask = sim_state.asks[0, 0]
+            best_bid = sim_state.bids[0, 0]
+            is_sell = msg_decoded[2] == 0
+            pseudo_exec_price = jnp.where(
+                is_sell,
+                jnp.int32(best_bid * 0.9),  # Sell: 10% below best bid
+                jnp.int32(best_ask * 1.1),  # Buy:  10% above best ask
+            )
+
+            # Total execution this step
+            step_executed = step_executed_from_matching + step_executed_pseudo
             quant_executed = quant_executed + step_executed
             # ============================================================
 
@@ -1293,20 +1324,28 @@ class ESJaxLOBTrainer:
                 lambda: None,
             )
 
-            # === DEBUG: Trade details when execution happens (table format) ===
+            # === DEBUG: Trade details when execution happens ===
             def print_trade_table():
                 jax.debug.print(
-                    "  ✓ EXECUTED {:4d} shares | Policy oid={:7d}, side={:2d}, submitted={:4d}",
-                    step_executed, policy_order_id, msg_decoded[2], truncated_qty,
+                    "  ✓ EXECUTED {:4d} shares | Policy oid={:7d}, side={:1d}, submitted={:4d}",
+                    step_executed, policy_order_id,
+                    msg_decoded[2],  # 0=sell, 1=buy (avoid Python if/else in lambda)
+                    truncated_qty,
                     ordered=True
                 )
                 jax.debug.print(
-                    "  Trade Details (first 3): prices={} | qtys={} | passive={} | aggr={}",
-                    jnp.where(is_policy_in_trade, trades[:, 0], -1)[:3],
-                    jnp.where(is_policy_in_trade, trades[:, 1], 0)[:3],
-                    jnp.where(is_policy_in_trade, trades[:, 2], -1)[:3],
-                    jnp.where(is_policy_in_trade, trades[:, 3], -1)[:3],
+                    "    From matching: {:4d} | Pseudo (last step): {:4d}",
+                    step_executed_from_matching, step_executed_pseudo,
                     ordered=True
+                )
+                jax.lax.cond(
+                    step_executed_pseudo > 0,
+                    lambda: jax.debug.print(
+                        "    Pseudo exec price: {:8.2f} (best_bid×0.9 or best_ask×1.1)",
+                        pseudo_exec_price / config.tick_size,
+                        ordered=True
+                    ),
+                    lambda: None,
                 )
 
             jax.lax.cond(

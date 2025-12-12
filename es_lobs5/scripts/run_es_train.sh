@@ -152,7 +152,7 @@ python -u -B -m es_lobs5.training.es_jaxlob_train \
     --lora_rank=1 \
     --n_threads=1 \
     --n_epochs=1000 \
-    --n_steps=100 \
+    --n_steps=10 \
     --world_msgs_per_step=1 \
     --task=sell \
     --task_size=50 \
