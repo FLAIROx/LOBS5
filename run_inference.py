@@ -89,6 +89,11 @@ if __name__ == "__main__":
         data_dir = '/data1/sascha/data/GOOG/preprocessed/GOOG2019'
         ckpt_path='/data1/sascha/data/checkpoints/olive-blaze-463_9eq56l8n/'
         save_dir='/data1/sascha/data/GOOG/benchmark_data/evalsequences/s5/scaled_olive'
+    elif run_args.stock == 'GOOG_JAN2023':
+        # Isambard checkpoint - 55M model epoch 30
+        data_dir = '/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc'
+        ckpt_path = '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/lobs5_d1024_l12_b16_bsz12x4_seed42_jid1708554_19dvko8l'
+        save_dir = '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/lobbench_output/GOOG_JAN2023'
     elif run_args.stock == 'INTC':
         raise NotImplementedError("Nothing trained for INTC yet")
     elif run_args.stock == 'TSLA':
@@ -99,8 +104,8 @@ if __name__ == "__main__":
     ##################################################
 
     n_gen_msgs = 500  #500 # how many messages to generate into the future
-    n_messages_conditional = 0
-    n_eval_messages = n_gen_msgs  # how many to load from dataset 
+    n_messages_conditional = 200  # Number of historical messages as condition
+    n_eval_messages = n_gen_msgs + n_messages_conditional  # how many to load from dataset 
     eval_seq_len = (n_eval_messages-1) * Message_Tokenizer.MSG_LEN
     cond_seq_len = (n_messages_conditional) * Message_Tokenizer.MSG_LEN
     data_levels = 10
@@ -223,6 +228,6 @@ if __name__ == "__main__":
         save_folder=save_dir,
         sample_top_n= sample_top_n,
         args=args,
-        conditional= False,
+        conditional= True,
         overfit_debug=overfit_debug,
     )

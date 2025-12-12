@@ -288,3 +288,12 @@ logs_55M/print_orderbook
 logs_lobs5_3072x32/** 
 es_lobs5/utils/Untitled-77
 es_lobs5/utils/Untitled-78
+test_eggroll_forward.py
+test_eggroll_gpu.batch
+test_eggroll_all.py
+test_eggroll_lobs5_model.py
+test_eggroll_lobs5.py
+test_eggroll_mlp_classification.py
+test_eggroll_real_training.py
+test_eggroll_rnn.py
+test_eggroll_stress.py

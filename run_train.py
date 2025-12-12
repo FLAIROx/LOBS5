@@ -58,7 +58,7 @@ if __name__ == "__main__":
 			"wandb_project": "lobs5-300M-d2048", "log_dir": "logs_300M_d2048"
 		},
 		"55M": {
-			"d_model": 1024, "n_layers": 12, "blocks": 16, "ssm_size_base": 1024, "per_gpu_bsz": 13,
+			"d_model": 1024, "n_layers": 12, "blocks": 16, "ssm_size_base": 1024, "per_gpu_bsz": 12,
 			"ssm_lr_base": 5e-5, "lr_factor": 1,
 			"wandb_project": "lobs5-55M-d1024", "log_dir": "logs_55M_d1024"
 		},

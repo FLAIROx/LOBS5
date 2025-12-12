@@ -1,0 +1,52 @@
+#!/bin/bash
+#SBATCH --job-name=lobbench_inf
+#SBATCH --output=logs_lobbench_%j.out
+#SBATCH --error=logs_lobbench_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH --time=04:00:00
+
+# ============================================
+# LOBBench Inference Script
+# ============================================
+# Usage:
+#   CKPT_STEP=30 sbatch run_lobbench_inference.batch
+# ============================================
+
+CKPT_STEP=${CKPT_STEP:-30}
+
+echo "============================================"
+echo "Job started at: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Checkpoint step: $CKPT_STEP"
+echo "============================================"
+
+cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+
+# Source conda
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate lobs5
+
+# Load CUDA module
+module load cuda/12.6
+
+# Set LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nvshmem/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+
+# BF16 Mixed Precision (matching training configuration)
+export USE_BF16=1
+
+echo "[*] Starting LOBBench inference (Conditional generation, BF16 enabled)..."
+python -u run_inference.py \
+    --stock=GOOG_JAN2023 \
+    --checkpoint_step=$CKPT_STEP \
+    --test_split=0.1
+
+echo "============================================"
+echo "Inference completed at: $(date)"
+echo "============================================"
