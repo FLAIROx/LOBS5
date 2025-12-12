@@ -654,10 +654,19 @@ class ESJaxLOBTrainer:
         if len(message_files) == 0:
             raise FileNotFoundError(f"No message files found in {data_path}")
 
-        # Load first file (can be configurable later)
+        # Randomly select a file (for variety across training runs)
         import numpy as np
-        msg_raw = np.load(message_files[0])  # (N, 14)
-        print(f"[INIT]   Loaded {msg_raw.shape[0]} raw messages from {os.path.basename(message_files[0])}")
+        file_idx = np.random.randint(0, len(message_files))
+        selected_file = message_files[file_idx]
+
+        # Store filename for initial state to use the SAME file
+        # Extract date from filename (e.g., "GOOG_2022-01-03_..." -> "2022-01-03")
+        self.replay_data_date = os.path.basename(selected_file).split('_')[1]
+        self.replay_data_dir = data_path
+
+        msg_raw = np.load(selected_file)  # (N, 14)
+        print(f"[INIT]   Loaded {msg_raw.shape[0]} raw messages from {os.path.basename(selected_file)}")
+        print(f"[INIT]   Replay data date: {self.replay_data_date} (will use same date for initial state)")
 
         # Pre-encode all messages to tokens upfront (avoids encoding in JIT loop)
         from lob.encoding import encode_msgs
@@ -732,11 +741,17 @@ class ESJaxLOBTrainer:
 
         config = self.config
 
-        # Data directory (configurable or default to GOOG 2016)
+        # Data directory (configurable or default to GOOG 2022)
         if hasattr(config, 'data_dir') and config.data_dir:
             data_dir = config.data_dir
+        elif config.background_mode == 'historical_replay' and config.replay_data_path:
+            # CRITICAL: When using historical_replay, use same data source for initial state
+            # This ensures price levels are consistent between initial book and replayed messages
+            data_dir = config.replay_data_path
+            print(f"[INIT] Using replay_data_path for initial state (consistent price levels)")
         else:
-            data_dir = "/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2016"
+            # Default: GOOG 2022 data
+            data_dir = "/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022"
 
         # Find all data files
         orderbook_files = sorted(glob.glob(f"{data_dir}/*orderbook_10_proc.npy"))
@@ -745,8 +760,16 @@ class ESJaxLOBTrainer:
         if len(orderbook_files) == 0:
             raise FileNotFoundError(f"No orderbook files found in {data_dir}")
 
-        # Randomly select a data file (or use config.file_idx if provided)
-        if hasattr(config, 'file_idx'):
+        # Select data file
+        if config.background_mode == 'historical_replay' and hasattr(self, 'replay_data_date'):
+            # CRITICAL: Use SAME date as replay data for consistent initial state
+            # Find file matching the replay_data_date
+            matching_files = [f for f in orderbook_files if self.replay_data_date in f]
+            if len(matching_files) == 0:
+                raise FileNotFoundError(f"No orderbook file found for date {self.replay_data_date} in {data_dir}")
+            file_idx = orderbook_files.index(matching_files[0])
+            print(f"[INIT] Using SAME date as replay data: {self.replay_data_date}")
+        elif hasattr(config, 'file_idx'):
             file_idx = config.file_idx % len(orderbook_files)
         else:
             file_idx = np.random.randint(0, len(orderbook_files))

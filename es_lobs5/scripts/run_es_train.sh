@@ -88,9 +88,9 @@ BACKGROUND_MODE=${BACKGROUND_MODE:-world_model}
 echo "[*] Background mode: BACKGROUND_MODE=$BACKGROUND_MODE"
 
 # REPLAY_DATA_PATH: Path to historical data directory (only for historical_replay mode)
-# Default: GOOG 2021 data (same as training data)
-# Usage: REPLAY_DATA_PATH=/path/to/GOOG/2016 BACKGROUND_MODE=historical_replay sbatch ...
-REPLAY_DATA_PATH=${REPLAY_DATA_PATH:-/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021}
+# Default: GOOG 2022 data
+# Usage: REPLAY_DATA_PATH=/path/to/other/year BACKGROUND_MODE=historical_replay sbatch ...
+REPLAY_DATA_PATH=${REPLAY_DATA_PATH:-/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022}
 if [ "$BACKGROUND_MODE" = "historical_replay" ]; then
     echo "[*] Replay data path: $REPLAY_DATA_PATH"
 fi
