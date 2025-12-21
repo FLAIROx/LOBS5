@@ -31,12 +31,18 @@ def create_simple_mesh(num_devices: int) -> Mesh:
     Returns:
         Mesh: A mesh with only the 'data' axis
     """
+    from jax.experimental import mesh_utils
+
     devices = jax.devices()[:num_devices]
-    # Arrange devices in a 1D array with axis name 'data'
-    # Note: Use numpy array, not jnp.array (devices are not JAX arrays)
-    import numpy as np
-    device_array = np.array(devices).reshape(-1)
-    mesh = Mesh(device_array, axis_names=('data',))
+
+    # Use mesh_utils.create_device_mesh (MaxText approach)
+    # This properly handles device topology and returns a numpy array of devices
+    devices_array = mesh_utils.create_device_mesh(
+        [num_devices],  # 1D mesh shape
+        devices,
+    )
+
+    mesh = Mesh(devices_array, axis_names=('data',))
     print(f"[Sharding] Created mesh with {num_devices} devices along 'data' axis")
     print(f"[Sharding] Mesh shape: {mesh.shape}")
     return mesh
