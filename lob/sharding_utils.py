@@ -33,7 +33,9 @@ def create_simple_mesh(num_devices: int) -> Mesh:
     """
     devices = jax.devices()[:num_devices]
     # Arrange devices in a 1D array with axis name 'data'
-    device_array = jnp.array(devices).reshape(-1)
+    # Note: Use numpy array, not jnp.array (devices are not JAX arrays)
+    import numpy as np
+    device_array = np.array(devices).reshape(-1)
     mesh = Mesh(device_array, axis_names=('data',))
     print(f"[Sharding] Created mesh with {num_devices} devices along 'data' axis")
     print(f"[Sharding] Mesh shape: {mesh.shape}")
@@ -165,6 +167,7 @@ def create_state_shardings(state: Any, mesh: Mesh) -> Any:
     - train_step needs to know input/output sharding
     - In phase 1, we replicate all state (params, opt_state)
     - This replicates pmap behavior but with explicit sharding
+    - Special handling: scalars (rank 0) need P(), arrays need P(None)
 
     Args:
         state: TrainState
@@ -173,9 +176,26 @@ def create_state_shardings(state: Any, mesh: Mesh) -> Any:
     Returns:
         Sharding pytree with same structure as state
     """
-    replicated = create_replicated_sharding(mesh)
-    # Replicate entire state structure, all leaf nodes use replicated sharding
-    return jax.tree_map(lambda _: replicated, state)
+    def get_sharding_for_leaf(leaf):
+        """
+        Get appropriate sharding for a leaf node.
+
+        - Scalars (rank 0): Use P() for full replication
+        - Arrays (rank > 0): Use P(None) for full replication
+        """
+        if isinstance(leaf, jax.Array):
+            # Check if this is a scalar (rank 0)
+            if leaf.ndim == 0:
+                # Scalar: use P() (empty PartitionSpec)
+                return NamedSharding(mesh, P())
+            else:
+                # Array: use P(None) for replication
+                return NamedSharding(mesh, P(None))
+        else:
+            # Non-array leaf (e.g., static values, None): use scalar sharding
+            return NamedSharding(mesh, P())
+
+    return jax.tree_map(get_sharding_for_leaf, state)
 
 
 def get_data_shardings_for_batch(
