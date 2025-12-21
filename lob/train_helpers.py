@@ -5,7 +5,7 @@ import jax.numpy as np
 # from jax.nn import one_hot
 from tqdm import tqdm
 from flax.training import train_state
-from flax import jax_utils
+# from flax import jax_utils  # No longer needed - migrated to jax.jit + shardings
 import optax
 from typing import Any, Dict, Optional, Tuple, Union
 from lob.encoding import Message_Tokenizer
@@ -844,150 +844,10 @@ def create_jit_train_step(mesh: Mesh, state: train_state.TrainState, has_book_da
     return jit_train_step
 
 
-@partial(
-    jax.pmap,
-    axis_name="batch_devices",
-    static_broadcasted_argnums=(5,),  # TODO: revert to 5 for batchnorm in pmap
-    in_axes=(0, None, 0, 0, 0, None, None),
-    # out_axes=(0, 0),
-    # devices=global_devices
-)
-def train_step_rnn(
-        state: train_state.TrainState,
-        rng: jax.dtypes.prng_key,  # 3
-        batch_inputs: Tuple[jax.Array, jax.Array], # 4
-        batch_labels: jax.Array, # 5
-        batch_integration_timesteps: Tuple[jax.Array, jax.Array], # 6
-        batchnorm: bool, # 7
-        init_hiddens: Tuple, 
-    ):
-    #print('tracing par_loss_and_grad')
-
-    #Never reset the hidden states:
-    
-    batch_inputs=repeat_book(*batch_inputs,True)
-    # batch_integration_timesteps=repeat_book(*batch_integration_timesteps)
-    
-    
-    def loss_fn(params):
-        def single_elem_loss(carry,xs):
-            shapes=jax.tree_util.tree_map(lambda x: x.shape,xs)
-            print("Shapes before using:",shapes)
-            batch_inputs,batch_integration_timesteps,batch_labels=xs
-            dones=(np.zeros_like(batch_inputs[0],dtype=bool),)*len(hiddens)
-            hiddens=carry
-            if batchnorm:
-                (hiddens,logits), mod_vars = state.apply_fn( 
-                    {"params": params, "batch_stats": state.batch_stats},
-                    hiddens,
-                    *batch_inputs,
-                    *dones,
-                    *batch_integration_timesteps,
-                    rngs={"dropout": rng},
-                    mutable=["intermediates", "batch_stats"],
-                    method='__call_rnn__'
-                )
-            else:
-                (hiddens,logits), mod_vars = state.apply_fn(
-                    {"params": params},
-                    hiddens,
-                    *batch_inputs,
-                    *dones,
-                    *batch_integration_timesteps,
-                    rngs={"dropout": rng},
-                    mutable=["intermediates"],
-                    method='__call_rnn__'
-                )
-            
-            
-            ce=cross_entropy_loss(logits, batch_labels)
-            # jax.debug.print("Shape of CE: {}", ce.shape)
-            # average cross-ent loss
-            ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
-            ce=ce.at[:,:,TIME_START_I:TIME_END_I].set(0)
-            ce=ce.reshape(ce.shape[0],-1)
-            loss = np.mean(ce)
-            return (hiddens),(loss,mod_vars)
-        # jax.debug.print("Shape of loss: {}", loss.shape)
-        xs=(batch_inputs,batch_integration_timesteps,batch_labels)
-        xs=jax.tree_util.tree_map(lambda x: np.array(np.split(x,2,axis=1)),xs)
-        hiddens,y=jax.lax.scan(single_elem_loss,init_hiddens,xs)
-        losses,mod_vars=y
-        loss=np.mean(losses)
-        mod_vars=jax.tree_util.tree_map(np.mean,mod_vars)
-        return loss, mod_vars
-
-    (loss, mod_vars), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
-
-    # UPDATE
-    # calculate means over device dimension (first)
-    loss = jax.lax.pmean(loss, axis_name="batch_devices")
-    grads = jax.lax.pmean(grads, axis_name="batch_devices")
-
-    if batchnorm:
-        mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
-        state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
-    else:
-        state = state.apply_gradients(grads=grads)
-
-    #return loss, mod_vars, grads, state
-    return state, loss
-
-@partial(
-    jax.pmap,
-    axis_name="batch_devices",
-    static_broadcasted_argnums=(5,),  # TODO: revert to 5 for batchnorm in pmap
-    in_axes=(0, None, 0, 0, 0, None),
-    # out_axes=(0, 0),
-    # devices=global_devices
-)
-def train_step_old(
-        state: train_state.TrainState,
-        rng: jax.dtypes.prng_key,  # 3
-        batch_inputs: Tuple[jax.Array, jax.Array], # 4
-        batch_labels: jax.Array, # 5
-        batch_integration_timesteps: Tuple[jax.Array, jax.Array], # 6
-        batchnorm: bool, # 7
-    ):
-    #print('tracing par_loss_and_grad')
-    def loss_fn(params):
-        if batchnorm:
-            logits, mod_vars = state.apply_fn( 
-                {"params": params, "batch_stats": state.batch_stats},
-                *batch_inputs, *batch_integration_timesteps,
-                rngs={"dropout": rng},
-                mutable=["intermediates", "batch_stats"],
-            )
-        else:
-            logits, mod_vars = state.apply_fn(
-                {"params": params},
-                *batch_inputs, *batch_integration_timesteps,
-                rngs={"dropout": rng},
-                mutable=["intermediates"],
-            )
-
-        # average cross-ent loss
-        loss = np.mean(cross_entropy_loss(logits, batch_labels))
-
-        return loss, (mod_vars, logits)
-
-    (loss, (mod_vars, logits)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
-
-
-
-    # UPDATE
-    # calculate means over device dimension (first)
-    loss = jax.lax.pmean(loss, axis_name="batch_devices")
-    grads = jax.lax.pmean(grads, axis_name="batch_devices")
-
-    if batchnorm:
-        mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
-        state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
-    else:
-        state = state.apply_gradients(grads=grads)
-
-    #return loss, mod_vars, grads, state
-    return state, loss
+# ============================================================================
+# Deleted: train_step_rnn and train_step_old (old pmap versions)
+# These functions used jax.pmap and are no longer needed with jit+shardings
+# ============================================================================
 
 
 def validate(state,
