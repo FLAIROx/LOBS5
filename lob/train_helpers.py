@@ -95,8 +95,11 @@ def update_learning_rate_per_step(lr_params, state):
     #     state.opt_state.inner_states['none'].inner_state.hyperparams['learning_rate'] = \
     #         jax_utils.replicate(np.array(ssm_lr_val, dtype=np.float32))
     # BETTER WAY - reuse existing structure:
+    # CRITICAL: Create separate arrays to avoid buffer aliasing with donate_argnums
+    # Each assignment must get its own unique array to prevent "donate buffer twice" error
     lr_array = np.array(lr_val, dtype=np.float32)
     ssm_lr_array = np.array(ssm_lr_val, dtype=np.float32)
+    ssm_lr_array_copy = np.array(ssm_lr_val, dtype=np.float32)  # Separate copy for 'none' optimizer
     
     # Update in place by creating new state with updated hyperparams
     # This avoids accumulating replicated tensors while preserving other hyperparameters
@@ -138,8 +141,8 @@ def update_learning_rate_per_step(lr_params, state):
                             hyperparams={
                                 **state.opt_state.inner_states['none'].inner_state.hyperparams,
                                 # Old way (pmap): 'learning_rate': jax_utils.replicate(ssm_lr_array)
-                                # New way (jit + shardings): ssm_lr_array already replicated via sharding
-                                'learning_rate': ssm_lr_array
+                                # New way (jit + shardings): Use separate copy to avoid buffer aliasing
+                                'learning_rate': ssm_lr_array_copy  # Separate copy, not ssm_lr_array!
                             }
                         )
                     ),
