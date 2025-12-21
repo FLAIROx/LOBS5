@@ -636,10 +636,8 @@ def train_epoch(
             # CRITICAL FIX: Force copy all buffers to avoid aliasing with donate_argnums
             # update_learning_rate_per_step may create buffer aliasing via state.replace()
             # This ensures each buffer is unique before donation in next train_step call
-            state = jax.tree_util.tree_map(
-                lambda x: np.array(x) if isinstance(x, jax.Array) else x,
-                state
-            )
+            # Following MaxText pattern: use jax.tree.map with copy function
+            state = jax.tree.map(np.copy, state)  # np is jax.numpy (stays on GPU)
 
             if (step>20) & (step<=21) & debug_profiler:
                 jax.profiler.stop_trace()
