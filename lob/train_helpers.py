@@ -36,6 +36,81 @@ TIME_END_I =13
 # global_devices = jax.local_devices()[0: num_devices_global]
 
 
+# ==============================================================================
+# Learning Rate Schedule Creation (MaxText-style optax schedules)
+# ==============================================================================
+
+def create_lobs5_learning_rate_schedule(
+    base_lr: float,
+    warmup_end_step: int,
+    total_steps: int,
+    lr_min: float = 0.0,
+    use_cosine_anneal: bool = True,
+) -> optax.Schedule:
+    """
+    Creates a learning rate schedule for LOBS5 training.
+
+    This follows MaxText's approach: create an optax Schedule function that is
+    passed directly to the optimizer, eliminating manual per-step LR updates.
+
+    Schedule:
+    1. Linear warmup from 0 to base_lr over [0, warmup_end_step]
+    2. Cosine decay from base_lr to lr_min over [warmup_end_step, total_steps]
+       (or constant base_lr if use_cosine_anneal=False)
+
+    Args:
+        base_lr: Peak learning rate (reached at end of warmup)
+        warmup_end_step: Step at which warmup ends (steps_per_epoch * warmup_end_epochs)
+        total_steps: Total training steps (steps_per_epoch * total_epochs)
+        lr_min: Minimum learning rate at end of cosine decay
+        use_cosine_anneal: If True, use cosine decay after warmup; if False, constant lr
+
+    Returns:
+        An optax Schedule function: step -> learning_rate
+    """
+    # Warmup schedule: 0 -> base_lr over warmup_end_step steps
+    warmup_schedule = optax.linear_schedule(
+        init_value=0.0,
+        end_value=base_lr,
+        transition_steps=warmup_end_step
+    )
+
+    if use_cosine_anneal:
+        # Cosine decay after warmup
+        cosine_steps = total_steps - warmup_end_step
+
+        def make_cos_schedule(init_lr, final_lr, len_steps):
+            """Custom cosine schedule matching LOBS5's original cosine_annealing."""
+            def schedule(step):
+                # step here is relative to start of cosine phase
+                pct = step / len_steps
+                pct = np.minimum(pct, 1.0)  # Clamp to [0, 1]
+                cosine_decay = 0.5 * (1 + np.cos(np.pi * pct))
+                lr = (init_lr - final_lr) * cosine_decay + final_lr
+                return lr
+            return schedule
+
+        cosine_schedule = make_cos_schedule(base_lr, lr_min, cosine_steps)
+
+        # Join warmup and cosine schedules
+        schedule = optax.join_schedules(
+            schedules=[warmup_schedule, cosine_schedule],
+            boundaries=[warmup_end_step]
+        )
+    else:
+        # Constant LR after warmup
+        constant_schedule = optax.constant_schedule(base_lr)
+        schedule = optax.join_schedules(
+            schedules=[warmup_schedule, constant_schedule],
+            boundaries=[warmup_end_step]
+        )
+
+    return schedule
+
+
+# ==============================================================================
+# Old LR schedulers (DEPRECATED - replaced by create_lobs5_learning_rate_schedule)
+# ==============================================================================
 # LR schedulers
 def linear_warmup(step, base_lr, end_step, lr_min=None):
     return base_lr * (step + 1) / end_step
@@ -180,13 +255,16 @@ def create_train_state(model_cls,
                        weight_decay=0.01,
                        batchnorm=False,
                        opt_config="standard",
-                       ssm_lr=1e-3,
-                       lr=1e-3,
+                       ssm_lr_schedule=None,  # Changed: now accepts optax.Schedule
+                       lr_schedule=None,      # Changed: now accepts optax.Schedule
                        dt_global=False,
                        num_devices=1,
                        ):
     """
-    Initializes the training state using optax
+    Initializes the training state using optax.
+
+    IMPORTANT: ssm_lr_schedule and lr_schedule should be optax.Schedule functions,
+    not scalar values. Use create_lobs5_learning_rate_schedule() to create them.
 
     :param model_cls:
     :param rng:
@@ -257,15 +335,18 @@ def create_train_state(model_cls,
     if opt_config in ["standard"]:
         """This option applies weight decay to C, but B is kept with the
             SSM parameters with no weight decay.
+
+        Using optax schedules (MaxText way):
+        - Schedules are passed directly to optimizers (no inject_hyperparams)
+        - LR is automatically computed from state.step
         """
-        print("configuring standard optimization setup")
+        print("configuring standard optimization setup (with optax schedules)")
         if dt_global:
             ssm_fn = map_nested_fn(
                 lambda k, _: "ssm"
                 if k in ["B", "Lambda_re", "Lambda_im", "norm"]
                 else ("none" if k in [] else "regular")
             )
-
         else:
             ssm_fn = map_nested_fn(
                 lambda k, _: "ssm"
@@ -274,25 +355,26 @@ def create_train_state(model_cls,
             )
         tx = optax.multi_transform(
             {
-                "none": optax.inject_hyperparams(optax.sgd)(learning_rate=0.0),
-                "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
-                "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
-                                                                 weight_decay=weight_decay),
+                "none": optax.sgd(learning_rate=0.0),
+                "ssm": optax.adam(learning_rate=ssm_lr_schedule),
+                "regular": optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay),
             },
             ssm_fn,
         )
     elif opt_config in ["BandCdecay"]:
         """This option applies weight decay to both C and B. Note we still apply the
            ssm learning rate to B.
+
+        Using optax schedules (MaxText way):
+        - "none" group (B): uses ssm_lr_schedule WITH weight decay
         """
-        print("configuring optimization with B in AdamW setup")
+        print("configuring optimization with B in AdamW setup (with optax schedules)")
         if dt_global:
             ssm_fn = map_nested_fn(
                 lambda k, _: "ssm"
                 if k in ["Lambda_re", "Lambda_im", "norm"]
                 else ("none" if k in ["B"] else "regular")
             )
-
         else:
             ssm_fn = map_nested_fn(
                 lambda k, _: "ssm"
@@ -301,20 +383,23 @@ def create_train_state(model_cls,
             )
         tx = optax.multi_transform(
             {
-                "none": optax.inject_hyperparams(optax.adamw)(learning_rate=ssm_lr,
-                                                              weight_decay=weight_decay),
-                "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
-                "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
-                                                                 weight_decay=weight_decay),
+                "none": optax.adamw(learning_rate=ssm_lr_schedule, weight_decay=weight_decay),
+                "ssm": optax.adam(learning_rate=ssm_lr_schedule),
+                "regular": optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay),
             },
             ssm_fn,
         )
 
     elif opt_config in ["BfastandCdecay"]:
-        """This option applies weight decay to both C and B. Note here we apply 
+        """This option applies weight decay to both C and B. Note here we apply
            faster global learning rate to B also.
+
+        Using optax schedules (MaxText way):
+        - "none" group: constant 0.0 (disabled)
+        - "ssm" group: uses ssm_lr_schedule
+        - "regular" group: uses lr_schedule WITH weight decay
         """
-        print("configuring optimization with B in AdamW setup with lr")
+        print("configuring optimization with B in AdamW setup with lr (with optax schedules)")
         if dt_global:
             ssm_fn = map_nested_fn(
                 lambda k, _: "ssm"
@@ -329,19 +414,23 @@ def create_train_state(model_cls,
             )
         tx = optax.multi_transform(
             {
-                "none": optax.inject_hyperparams(optax.adamw)(learning_rate=0.0),
-                "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
-                "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
-                                                                 weight_decay=weight_decay),
+                "none": optax.adamw(learning_rate=0.0, weight_decay=0.0),
+                "ssm": optax.adam(learning_rate=ssm_lr_schedule),
+                "regular": optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay),
             },
             ssm_fn,
         )
 
     elif opt_config in ["noBCdecay"]:
-        """This option does not apply weight decay to B or C. C is included 
+        """This option does not apply weight decay to B or C. C is included
             with the SSM parameters and uses ssm learning rate.
+
+        Using optax schedules (MaxText way):
+        - "none" group: constant 0.0 (disabled)
+        - "ssm" group (B, C, D, Lambda, log_step, norm): uses ssm_lr_schedule, NO weight decay
+        - "regular" group: uses lr_schedule WITH weight decay
          """
-        print("configuring optimization with C not in AdamW setup")
+        print("configuring optimization with C not in AdamW setup (with optax schedules)")
         if dt_global:
             ssm_fn = map_nested_fn(
                 lambda k, _: "ssm"
@@ -358,10 +447,9 @@ def create_train_state(model_cls,
             )
         tx = optax.multi_transform(
             {
-                "none": optax.inject_hyperparams(optax.sgd)(learning_rate=0.0),
-                "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
-                "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
-                                                                 weight_decay=weight_decay),
+                "none": optax.sgd(learning_rate=0.0),
+                "ssm": optax.adam(learning_rate=ssm_lr_schedule),
+                "regular": optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay),
             },
             ssm_fn,
         )
