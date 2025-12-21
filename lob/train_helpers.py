@@ -841,16 +841,17 @@ def create_jit_train_step(mesh: Mesh, state: train_state.TrainState, has_book_da
     )
 
     # 3. Define in_shardings
-    # Order corresponds to train_step parameters:
-    # (state, rng, batch_inputs, batch_labels, batch_integration_timesteps, batchnorm, ignore_times)
+    # IMPORTANT: in_shardings only includes NON-STATIC parameters!
+    # Order corresponds to train_step NON-STATIC parameters:
+    # (state, rng, batch_inputs, batch_labels, batch_integration_timesteps)
+    # batchnorm and ignore_times are static_argnums=(5,6), NOT included here!
     in_shardings = (
-        state_shardings,          # state - replicated
-        None,                     # rng - replicated (None = default behavior)
-        inputs_shardings,         # batch_inputs - sharded
-        labels_sharding,          # batch_labels - sharded
-        timesteps_shardings,      # batch_integration_timesteps - sharded
-        None,                     # batchnorm - static argument
-        None,                     # ignore_times - static argument
+        state_shardings,          # param 0: state - replicated
+        None,                     # param 1: rng - replicated (None = default)
+        inputs_shardings,         # param 2: batch_inputs - sharded
+        labels_sharding,          # param 3: batch_labels - sharded
+        timesteps_shardings,      # param 4: batch_integration_timesteps - sharded
+        # params 5, 6 (batchnorm, ignore_times) are static - NOT in in_shardings!
     )
 
     # 4. Define out_shardings
@@ -1218,19 +1219,16 @@ def create_jit_eval_step(mesh: Mesh, state: train_state.TrainState, has_book_dat
     )
 
     # 3. Define in_shardings
-    # Order corresponds to eval_step parameters:
-    # (batch_inputs, batch_labels, batch_integration_timesteps, state,
-    #  apply_fn, batchnorm, apply_method, init_hiddens, ignore_times)
+    # IMPORTANT: in_shardings only includes NON-STATIC parameters!
+    # Order corresponds to eval_step NON-STATIC parameters:
+    # (batch_inputs, batch_labels, batch_integration_timesteps, state)
+    # apply_fn, batchnorm, apply_method, init_hiddens, ignore_times are static - NOT included!
     in_shardings = (
-        inputs_shardings,         # batch_inputs - sharded
-        labels_sharding,          # batch_labels - sharded
-        timesteps_shardings,      # batch_integration_timesteps - sharded
-        state_shardings,          # state - replicated
-        None,                     # apply_fn - static
-        None,                     # batchnorm - static
-        None,                     # apply_method - static
-        None,                     # init_hiddens - static
-        None,                     # ignore_times - static
+        inputs_shardings,         # param 0: batch_inputs - sharded
+        labels_sharding,          # param 1: batch_labels - sharded
+        timesteps_shardings,      # param 2: batch_integration_timesteps - sharded
+        state_shardings,          # param 3: state - replicated
+        # params 4-8 (apply_fn, batchnorm, apply_method, init_hiddens, ignore_times) are static!
     )
 
     # 4. Define out_shardings
