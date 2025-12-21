@@ -637,7 +637,7 @@ def train_epoch(
             # update_learning_rate_per_step may create buffer aliasing via state.replace()
             # This ensures each buffer is unique before donation in next train_step call
             state = jax.tree_util.tree_map(
-                lambda x: jnp.array(x) if isinstance(x, jax.Array) else x,
+                lambda x: np.array(x) if isinstance(x, jax.Array) else x,
                 state
             )
 
