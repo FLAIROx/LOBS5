@@ -459,21 +459,7 @@ def create_train_state(model_cls,
     #print(f"[*] Trainable Parameters: {sum(jax.tree_leaves(param_sizes))}")
     print(f"[*] Trainable Parameters: {sum(jax.tree_util.tree_leaves(param_sizes))}")
 
-    if batchnorm:
-        class TrainState(train_state.TrainState):
-            batch_stats: Any
-        state = TrainState.create(apply_fn=model.apply, params=params, tx=tx, batch_stats=batch_stats)
-    else:
-        state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
-    
-    # Keep copy of state on each device
-    print(state.params['message_encoder']['encoder']['embedding'].shape)
-
-    # Old way (pmap): Use jax_utils.replicate
-    # state = jax_utils.replicate(state)
-
-    # New way (jit + shardings): Use sharding for replication
-    # 1. Initialize mesh (if not already initialized)
+    # Initialize mesh first
     try:
         mesh = get_global_mesh()
         print("[State] Using existing global mesh")
@@ -481,11 +467,32 @@ def create_train_state(model_cls,
         mesh = initialize_mesh(num_devices)
         print("[State] Created new global mesh")
 
-    # 2. Create shardings for entire state (handles scalars correctly)
-    state_shardings = create_state_shardings(state, mesh)
+    # MaxText approach: Wrap state creation in JIT with out_shardings
+    # This ensures each buffer is uniquely allocated, preventing XLA-level aliasing
+    if batchnorm:
+        class TrainState(train_state.TrainState):
+            batch_stats: Any
 
-    # 3. Replicate state to all devices using the sharding pytree
-    state = jax.device_put(state, state_shardings)
+        def create_state_fn():
+            return TrainState.create(apply_fn=model.apply, params=params, tx=tx, batch_stats=batch_stats)
+    else:
+        def create_state_fn():
+            return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
+
+    # 1. Get abstract state shape to create shardings
+    abstract_state = jax.eval_shape(create_state_fn)
+    print(abstract_state.params['message_encoder']['encoder']['embedding'].shape)
+
+    # 2. Create shardings based on abstract state
+    state_shardings = create_state_shardings(abstract_state, mesh)
+
+    # 3. JIT-compile state creation with explicit out_shardings
+    # This forces JAX to allocate unique device buffers for each leaf
+    print("[State] Creating state via JIT with out_shardings (ensures unique buffers)")
+    state = jax.jit(
+        create_state_fn,
+        out_shardings=state_shardings,
+    )()
 
     print(state.params['message_encoder']['encoder']['embedding'].shape)
 
