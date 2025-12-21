@@ -891,6 +891,35 @@ def create_jit_train_step(mesh: Mesh, state: train_state.TrainState, has_book_da
     Returns:
         JIT-compiled train_step function
     """
+    # ========================================================================
+    # DEBUG: Check for buffer aliasing in state before JIT compilation
+    # ========================================================================
+    print("\n[DEBUG] Checking for buffer aliasing in state...")
+    leaves_with_paths = jax.tree_util.tree_leaves_with_path(state)
+    buffer_ids = {}
+    for idx, (path, leaf) in enumerate(leaves_with_paths):
+        if isinstance(leaf, jax.Array):
+            buf_id = id(leaf)
+            if buf_id not in buffer_ids:
+                buffer_ids[buf_id] = []
+            path_str = jax.tree_util.keystr(path)
+            buffer_ids[buf_id].append((idx, path_str, leaf.shape))
+
+    aliased = {bid: locs for bid, locs in buffer_ids.items() if len(locs) > 1}
+    if aliased:
+        print(f"[DEBUG] FOUND {len(aliased)} ALIASED BUFFERS:")
+        for buf_id, locations in aliased.items():
+            indices = [idx for idx, _, _ in locations]
+            if 8 in indices and 18 in indices:
+                print(f"\n[DEBUG] *** CULPRIT FOUND ***")
+            print(f"  Buffer {buf_id} at indices {indices}:")
+            for idx, path, shape in locations:
+                print(f"    [{idx:3d}] {path} | shape={shape}")
+    else:
+        print(f"[DEBUG] No aliasing found - all buffers unique")
+    print(f"[DEBUG] Total leaves: {len(leaves_with_paths)}, Unique buffers: {len(buffer_ids)}\n")
+    # ========================================================================
+
     # 1. Create shardings for state (everything replicated)
     state_shardings = create_state_shardings(state, mesh)
 
