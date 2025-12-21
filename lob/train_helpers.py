@@ -447,102 +447,65 @@ def prep_batch(
     else:
         raise RuntimeError("Err... not sure what I should do... Unhandled data type. ")
 
-    # reshape from large batch to multiple device batches
-    inputs, targets, book_data, timestep_msg, timestep_book = device_reshape(
-        num_devices,
-        inputs,
-        targets,
-        book_data,
-        timestep_msg,
-        timestep_book,
-    )
-    # print('inputs shape (device_reshape):', inputs.shape)
+    # ========================================================================
+    # Old (pmap): reshape to (num_devices, batch_per_device, ...) and use pmap
+    # ========================================================================
+    # inputs, targets, book_data, timestep_msg, timestep_book = device_reshape(...)
+    # inputs, labels, integration_times = _prep_batch_par(...)
 
-    # split large batch into smaller device batches on the GPUs
-    inputs, labels, integration_times = _prep_batch_par(
-        inputs,
-        targets,
-        seq_len,
-        # in_dim,
-        book_data,
-        timestep_msg,
-        timestep_book,
-    )
-    # print('inputs (targets) shape (_prep_batch_par):', inputs[1].shape)
-
-    return inputs, labels, integration_times
-
-@partial(
-#    jax.vmap,
-    jax.pmap,
-    axis_name="batch_devices",
-    static_broadcasted_argnums=(2,),
-    # in_axes=(0, 0, None, None, 0, 0, 0),
-    in_axes=(0, 0, None, 0, 0, 0),
-    # out_axes=(0, 0, 0),
-    # devices=global_devices
-)
-def _prep_batch_par(
-        inputs: jax.Array,
-        targets: jax.Array,
-        seq_len: int,
-        # in_dim: int,
-        book_data: Optional[jax.Array] = None,
-        timestep_msg: Optional[jax.Array] = None,
-        timestep_book: Optional[jax.Array] = None,
-    ) -> Tuple[Tuple, np.ndarray, Tuple]:
-    """
-    Take a batch and convert it to a standard x/y format per device
-    TODO: document this better for pmapped version
-    :param seq_len:     (int) length of sequence.
-    :param in_dim:      (int) dimension of input.
-    :return:
-    """
+    # ========================================================================
+    # New (jit+shardings): keep (global_batch, ...) shape, no device dimension
+    # ========================================================================
+    # Prepare batch data directly without device-specific reshaping
+    # JAX sharding will automatically distribute data across devices
 
     assert inputs.shape[1] == seq_len, f'inputs: {inputs.shape} seq_len {seq_len}'
-    # inputs = one_hot(inputs, in_dim)
 
-    # If there is an aux channel containing the integration times, then add that.
+    # Compute integration timesteps
     if timestep_msg is not None:
-        #timestep_msg = jax.device_put(timestep_msg, jax.devices()[0])
         integration_timesteps = (np.diff(np.asarray(timestep_msg)), )
     else:
         integration_timesteps = (np.ones((len(inputs), seq_len)), )
 
+    # Prepare full inputs (messages + optional book data)
     if book_data is not None:
-        #book_data = jax.device_put(book_data, jax.devices()[0])
         full_inputs = (inputs.astype(np.int32), book_data)
         if timestep_book is not None:
-            #timestep_book = jax.device_put(timestep_book, jax.devices()[0])
             integration_timesteps += (np.diff(timestep_book), )
         else:
             integration_timesteps += (np.ones((len(inputs), seq_len)), )
     else:
         full_inputs = (inputs.astype(np.int32), )
 
-    # CAVE: squeeze very important for training!
-    return full_inputs, np.squeeze(targets.astype(np.int32)), integration_timesteps
+    # Prepare labels
+    labels = np.squeeze(targets.astype(np.int32))
 
-@partial(jax.jit, static_argnums=(0,), backend='gpu')# backend='cpu')
-def device_reshape(
-        num_devices: int,
-        inputs: jax.Array,
-        targets: jax.Array,
-        book_data: Optional[jax.Array] = None,
-        timestep_msg: Optional[jax.Array] = None,
-        timestep_book: Optional[jax.Array] = None,
-    ) -> Tuple:
-    """ 
-    """
-    inputs = np.reshape(inputs, (num_devices, -1, *inputs.shape[1:]))
-    targets = np.reshape(targets, (num_devices, -1, *targets.shape[1:]))
-    if book_data is not None:
-        book_data = np.reshape(book_data, (num_devices, -1, *book_data.shape[1:]))
-    if timestep_msg is not None:
-        timestep_msg = np.reshape(timestep_msg, (num_devices, -1, *timestep_msg.shape[1:]))
-    if timestep_book is not None:
-        timestep_book = np.reshape(timestep_book, (num_devices, -1, *timestep_book.shape[1:]))
-    return inputs, targets, book_data, timestep_msg, timestep_book
+    return full_inputs, labels, integration_timesteps
+
+# ============================================================================
+# Old _prep_batch_par (pmap version) - NO LONGER NEEDED
+# ============================================================================
+# @partial(jax.pmap, axis_name="batch_devices", ...)
+# def _prep_batch_par(inputs, targets, seq_len, ...):
+#     """Prepare batch per device (pmap version)."""
+#     # Logic now inlined in prep_batch above
+#     ...
+
+# Note: The batch preparation logic from _prep_batch_par has been inlined
+# into prep_batch above, without the device dimension handling
+
+# ============================================================================
+# Old device_reshape (pmap version) - NO LONGER NEEDED
+# ============================================================================
+# @partial(jax.jit, static_argnums=(0,), backend='gpu')
+# def device_reshape(num_devices, inputs, targets, ...):
+#     """Reshape to (num_devices, batch_per_device, ...) for pmap."""
+#     inputs = np.reshape(inputs, (num_devices, -1, *inputs.shape[1:]))
+#     ...
+
+# ============================================================================
+# New: jit+shardings handles distribution automatically, no reshape needed
+# ============================================================================
 
 
 def print_memory_usage():
