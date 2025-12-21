@@ -21,7 +21,7 @@ from lob.encoding import Vocab
 from lob.lob_seq_model import BatchFullLobPredModel, BatchLobPredModel, BatchPaddedLobPredModel,OldBatchPaddedLobPredModel, FullLobPredModel#, ParFullLobPredModel
 
 #from lob.lob_seq_model import BatchLobPredModel
-from lob.train_helpers import create_train_state#, eval_step, prep_batch, cross_entropy_loss, compute_accuracy
+from lob.train_helpers import create_train_state, create_lobs5_learning_rate_schedule
 from s5.ssm import init_S5SSM
 from s5.ssm_init import make_DPLR_HiPPO
 # from s5.dataloading import make_data_loader
@@ -169,6 +169,7 @@ def init_train_state(
         seq_len: int,
         book_dim: int,
         book_seq_len,
+        train_size: int,  # NEW: needed for schedule calculation
         print_shapes=False
     ) -> Tuple[TrainState, Union[partial[BatchLobPredModel],
                                   partial[BatchFullLobPredModel],
@@ -304,14 +305,49 @@ def init_train_state(
             bn_momentum=args.bn_momentum,
         )
 
-    # initialize training state
+    # ===========================================================================
+    # Create learning rate schedules (MaxText-style optax schedules)
+    # ===========================================================================
+    steps_per_epoch = train_size // args.bsz
+    if hasattr(args, 'curtail_epochs') and args.curtail_epochs is not None:
+        steps_per_epoch = min(steps_per_epoch, args.curtail_epochs + 1)
+
+    total_steps = steps_per_epoch * args.epochs
+    warmup_end_step = steps_per_epoch * args.warmup_end
+
+    if print_shapes:
+        print(f"[Schedule] steps_per_epoch: {steps_per_epoch}")
+        print(f"[Schedule] total_steps: {total_steps}")
+        print(f"[Schedule] warmup_end_step: {warmup_end_step}")
+        print(f"[Schedule] Base SSM LR: {ssm_lr}, Base LR: {lr}")
+        print(f"[Schedule] LR min: {args.lr_min}, Cosine anneal: {args.cosine_anneal}")
+
+    # Create schedule for SSM parameters
+    ssm_lr_schedule = create_lobs5_learning_rate_schedule(
+        base_lr=ssm_lr,
+        warmup_end_step=warmup_end_step,
+        total_steps=total_steps,
+        lr_min=args.lr_min,
+        use_cosine_anneal=args.cosine_anneal,
+    )
+
+    # Create schedule for regular parameters
+    lr_schedule = create_lobs5_learning_rate_schedule(
+        base_lr=lr,
+        warmup_end_step=warmup_end_step,
+        total_steps=total_steps,
+        lr_min=args.lr_min,
+        use_cosine_anneal=args.cosine_anneal,
+    )
+
+    # Initialize training state with optax schedules
     state = create_train_state(
         model_cls,
         init_rng,
         padded,
         retrieval,
         use_book_data=args.use_book_data,
-        in_dim=1, # in_dim,
+        in_dim=1,
         book_dim=book_dim,
         book_seq_len=book_seq_len,
         bsz=args.bsz,
@@ -319,8 +355,8 @@ def init_train_state(
         weight_decay=args.weight_decay,
         batchnorm=args.batchnorm,
         opt_config=args.opt_config,
-        ssm_lr=ssm_lr,
-        lr=lr,
+        ssm_lr_schedule=ssm_lr_schedule,  # Pass schedule, not scalar
+        lr_schedule=lr_schedule,          # Pass schedule, not scalar
         dt_global=args.dt_global,
         num_devices=args.num_devices,
     )

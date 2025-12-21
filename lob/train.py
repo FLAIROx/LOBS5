@@ -107,6 +107,7 @@ def train(args):
             seq_len=seq_len,
             book_dim=book_dim,
             book_seq_len=book_seq_len,
+            train_size=train_size,  # NEW: for schedule calculation
             print_shapes=True
         )
 
@@ -181,7 +182,7 @@ def train(args):
     best_loss, best_acc, best_epoch = 100000000, -100000000.0, 0  # This best loss is val_loss
     count, best_val_loss = 0, 100000000  # This line is for early stopping purposes
     lr_count, opt_acc = 0, -100000000.0  # This line is for learning rate decay
-    step = 0  # for per step learning rate decay
+    # step variable removed - optax tracks step internally via state.step
     steps_per_epoch = int(train_size/args.bsz) if args.curtail_epochs is None else args.curtail_epochs+1
 
     # print("USING VERY INFREQUENT CHECKPOINTING FOR TINY EPOCH SIZE ")
@@ -216,49 +217,30 @@ def train(args):
 
     for epoch in range(args.epochs):
         print(f"[*] Starting Training Epoch {epoch + 1}...")
-        # jax.profiler.start_trace("./jax-traces")
-
-        if epoch < args.warmup_end:
-            print("using linear warmup for epoch {}".format(epoch+1))
-            decay_function = linear_warmup
-            end_step = steps_per_epoch * args.warmup_end
-
-        elif args.cosine_anneal:
-            print("using cosine annealing for epoch {}".format(epoch+1))
-            decay_function = cosine_annealing
-            # for per step learning rate decay
-            end_step = steps_per_epoch * args.epochs - (steps_per_epoch * args.warmup_end)
-        else:
-            print("using constant lr for epoch {}".format(epoch+1))
-            decay_function = constant_lr
-            end_step = None
-
-        # TODO: Switch to letting Optax handle this.
-        #  Passing this around to manually handle per step learning rate decay.
-        lr_params = (decay_function, ssm_lr, lr, step, end_step, args.opt_config, args.lr_min)
+        # LR scheduling now handled by optax schedules - no manual switching needed
+        print(f"[*] Step {int(state.step)} - LR automatically managed by optax schedules")
 
         print('Training on', args.num_devices, 'devices.')
         train_rng, skey = random.split(train_rng)
 
         #Pass an initial hidden state to be used in case of the 'RNN' forward pass being used.
-        state, train_loss,ce_by_tok ,step = train_epoch(state,
-                                              skey,
-                                              #model_cls,
-                                              #train_model,
-                                              trainloader,
-                                              seq_len,
-                                              #in_dim,
-                                              batchnorm,
-                                              lr_params,
-                                              args.num_devices,
-                                              args.debug_loading,
-                                              args.enable_profiler,
-                                              args.curtail_epochs,
-                                              init_hidden,
-                                              epoch,
-                                              ignore_times,
-                                              args.log_ce_tables,
-                                              jit_train_step_fn=jit_train_step_fn)  # New: Pass JIT function
+        state, train_loss, ce_by_tok = train_epoch(
+            state,
+            skey,
+            trainloader,
+            seq_len,
+            batchnorm,
+            # lr_params REMOVED - optax schedules handle LR
+            args.num_devices,
+            args.debug_loading,
+            args.enable_profiler,
+            args.curtail_epochs,
+            init_hidden,
+            epoch,
+            ignore_times,
+            args.log_ce_tables,
+            jit_train_step_fn=jit_train_step_fn
+        )
 
         if args.random_offsets_train:
             # reinit training loader, so that sequences are initialised with
