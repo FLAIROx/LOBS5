@@ -13,6 +13,19 @@ import sys
 
 import psutil
 import os
+
+# New: Import sharding utilities (migrating from pmap to jax.jit + shardings)
+from lob.sharding_utils import (
+    create_simple_mesh,
+    create_data_sharding,
+    create_replicated_sharding,
+    tree_replicate_to_devices,
+    create_state_shardings,
+    initialize_mesh,
+    get_global_mesh,
+    get_data_shardings_for_batch,
+)
+from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 # from lob.lob_seq_model import LobPredModel
 
 
@@ -95,7 +108,9 @@ def update_learning_rate_per_step(lr_params, state):
                     inner_state=state.opt_state.inner_states['regular'].inner_state._replace(
                         hyperparams={
                             **state.opt_state.inner_states['regular'].inner_state.hyperparams,
-                            'learning_rate': jax_utils.replicate(lr_array)
+                            # Old way (pmap): 'learning_rate': jax_utils.replicate(lr_array)
+                            # New way (jit + shardings): lr_array already replicated via sharding
+                            'learning_rate': lr_array
                         }
                     )
                 ),
@@ -103,7 +118,9 @@ def update_learning_rate_per_step(lr_params, state):
                     inner_state=state.opt_state.inner_states['ssm'].inner_state._replace(
                         hyperparams={
                             **state.opt_state.inner_states['ssm'].inner_state.hyperparams,
-                            'learning_rate': jax_utils.replicate(ssm_lr_array)
+                            # Old way (pmap): 'learning_rate': jax_utils.replicate(ssm_lr_array)
+                            # New way (jit + shardings): ssm_lr_array already replicated via sharding
+                            'learning_rate': ssm_lr_array
                         }
                     )
                 ),
@@ -120,7 +137,9 @@ def update_learning_rate_per_step(lr_params, state):
                         inner_state=state.opt_state.inner_states['none'].inner_state._replace(
                             hyperparams={
                                 **state.opt_state.inner_states['none'].inner_state.hyperparams,
-                                'learning_rate': jax_utils.replicate(ssm_lr_array)
+                                # Old way (pmap): 'learning_rate': jax_utils.replicate(ssm_lr_array)
+                                # New way (jit + shardings): ssm_lr_array already replicated via sharding
+                                'learning_rate': ssm_lr_array
                             }
                         )
                     ),
@@ -356,9 +375,27 @@ def create_train_state(model_cls,
     else:
         state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
     
-    # keep copy of state on each device
+    # Keep copy of state on each device
     print(state.params['message_encoder']['encoder']['embedding'].shape)
-    state = jax_utils.replicate(state)#, devices=global_devices)
+
+    # Old way (pmap): Use jax_utils.replicate
+    # state = jax_utils.replicate(state)
+
+    # New way (jit + shardings): Use sharding for replication
+    # 1. Initialize mesh (if not already initialized)
+    try:
+        mesh = get_global_mesh()
+        print("[State] Using existing global mesh")
+    except RuntimeError:
+        mesh = initialize_mesh(num_devices)
+        print("[State] Created new global mesh")
+
+    # 2. Create replicated sharding
+    replicated_sharding = create_replicated_sharding(mesh)
+
+    # 3. Replicate state to all devices
+    state = tree_replicate_to_devices(state, replicated_sharding)
+
     print(state.params['message_encoder']['encoder']['embedding'].shape)
 
     return state
@@ -555,10 +592,15 @@ def train_epoch(
         epoch,
         ignore_times,
         log_ce_tables,
+        jit_train_step_fn=None,  # New: JIT-compiled train_step
     ):
 
     """
     Training function for an epoch that loops over batches.
+
+    New parameter:
+        jit_train_step_fn: JIT-compiled train_step function.
+                          If None, uses default train_step (backward compatible)
     """
     # Store Metrics
     batch_losses = []
@@ -592,7 +634,10 @@ def train_epoch(
             #     init_hiddens)
 
             # print("Gets to train")
-            state, loss, ce, logits = train_step(
+            # Use JIT-compiled train_step if provided
+            train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
+
+            state, loss, ce, logits = train_fn(
                 state,
                 drop_rng,
                 inputs,
@@ -655,14 +700,21 @@ def repeat_book(msg,book,shift_start):
     #     book=np.concatenate([pad,book[:-1]])
     return (msg,book)
 
-@partial(
-    jax.pmap,
-    axis_name="batch_devices",
-    static_broadcasted_argnums=(5,6),  # TODO: revert to 5 for batchnorm in pmap
-    in_axes=(0, None, 0, 0, 0, None, None),
-    # out_axes=(0, 0),
-    # devices=global_devices
-)
+# ============================================================================
+# Old train_step (pmap version) - Commented out
+# ============================================================================
+# @partial(
+#     jax.pmap,
+#     axis_name="batch_devices",
+#     static_broadcasted_argnums=(5,6),  # TODO: revert to 5 for batchnorm in pmap
+#     in_axes=(0, None, 0, 0, 0, None, None),
+#     # out_axes=(0, 0),
+#     # devices=global_devices
+# )
+
+# ============================================================================
+# New train_step (jit + shardings version)
+# ============================================================================
 def train_step(
         state: train_state.TrainState,
         rng: jax.dtypes.prng_key,  # 1
@@ -672,6 +724,19 @@ def train_step(
         batchnorm: bool, # 5
         ignore_times:bool, #6
     ):
+    """
+    Training step function (jit + shardings version).
+
+    Main changes:
+    1. Removed pmap decorator, using jax.jit + in_shardings/out_shardings
+    2. Removed jax.lax.pmean, automatic cross-device aggregation
+    3. state no longer has device dimension (replicated via sharding)
+
+    Why these changes:
+    - pmap implicitly parallelizes over first axis, jit + shardings uses explicit sharding specs
+    - pmap requires pmean for cross-device aggregation, jit + shardings handles this automatically
+    - These changes make parallelism strategy more flexible (easy to add FSDP in future)
+    """
 
     # Print hash values of static arguments
     # print(f"batchnorm hash: {batchnorm.__hash__()}")
@@ -725,19 +790,94 @@ def train_step(
 
 
     # UPDATE
-    # calculate means over device dimension (first)
-    loss = jax.lax.pmean(loss, axis_name="batch_devices")
-    grads = jax.lax.pmean(grads, axis_name="batch_devices")
-    ce=jax.lax.pmean(ce,axis_name="batch_devices")
+    # Old way (pmap): Use pmean for cross-device averaging
+    # loss = jax.lax.pmean(loss, axis_name="batch_devices")
+    # grads = jax.lax.pmean(grads, axis_name="batch_devices")
+    # ce = jax.lax.pmean(ce, axis_name="batch_devices")
+
+    # New way (jit + shardings):
+    # - loss, grads, ce already computed on each device
+    # - Since we use data parallel + sharding, JAX automatically handles aggregation
+    # - No explicit pmean calls needed
+    # Note: loss and grads are automatically aggregated along data axis (via sharding)
 
     if batchnorm:
-        mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
+        # Old way: mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
+        # New way: batch_stats automatically aggregated
         state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
     else:
         state = state.apply_gradients(grads=grads)
 
     #return loss, mod_vars, grads, state
     return state, loss, ce, logits
+
+
+# ============================================================================
+# Create JIT-compiled train_step
+# ============================================================================
+def create_jit_train_step(mesh: Mesh, state: train_state.TrainState, has_book_data: bool = True):
+    """
+    Create JIT-compiled train_step.
+
+    Why a separate function is needed:
+    - jax.jit needs to know input/output shardings
+    - We specify in_shardings and out_shardings here
+    - donate_argnums tells JAX it can reuse state's memory
+
+    Args:
+        mesh: JAX Mesh
+        state: Example state (for inferring sharding)
+        has_book_data: Whether book data is present
+
+    Returns:
+        JIT-compiled train_step function
+    """
+    # 1. Create shardings for state (everything replicated)
+    state_shardings = create_state_shardings(state, mesh)
+
+    # 2. Create shardings for data
+    inputs_shardings, labels_sharding, timesteps_shardings = get_data_shardings_for_batch(
+        mesh, has_book_data=has_book_data
+    )
+
+    # 3. Define in_shardings
+    # Order corresponds to train_step parameters:
+    # (state, rng, batch_inputs, batch_labels, batch_integration_timesteps, batchnorm, ignore_times)
+    in_shardings = (
+        state_shardings,          # state - replicated
+        None,                     # rng - replicated (None = default behavior)
+        inputs_shardings,         # batch_inputs - sharded
+        labels_sharding,          # batch_labels - sharded
+        timesteps_shardings,      # batch_integration_timesteps - sharded
+        None,                     # batchnorm - static argument
+        None,                     # ignore_times - static argument
+    )
+
+    # 4. Define out_shardings
+    # Order corresponds to return values: (state, loss, ce, logits)
+    out_shardings = (
+        state_shardings,          # state - replicated
+        None,                     # loss - scalar, auto-handled
+        None,                     # ce - small array, auto-handled
+        None,                     # logits - inferred from inputs
+    )
+
+    # 5. Create JIT-compiled function
+    jit_train_step = jax.jit(
+        train_step,
+        in_shardings=in_shardings,
+        out_shardings=out_shardings,
+        static_argnums=(5, 6),     # batchnorm, ignore_times are static params
+        donate_argnums=(0,),       # donate state (allows JAX to reuse memory)
+    )
+
+    print("[JIT] Created JIT-compiled train_step")
+    print(f"[JIT] in_shardings: state=replicated, data=sharded on 'data' axis")
+    print(f"[JIT] out_shardings: state=replicated, metrics=auto")
+    print(f"[JIT] donate_argnums: (0,) = state (memory optimization)")
+
+    return jit_train_step
+
 
 @partial(
     jax.pmap,
@@ -942,13 +1082,20 @@ def validate(state,
     del losses, accuracies
     return aveloss, aveaccu, ce_means,acc_means
 
-@partial(
-    jax.pmap,
-    axis_name="batch_devices",
-    static_broadcasted_argnums=(4,5,6,8),
-    in_axes=(0, 0, 0, 0, None, None, None,None,None),
-    # devices=global_devices
-)
+# ============================================================================
+# Old eval_step (pmap version) - Commented out
+# ============================================================================
+# @partial(
+#     jax.pmap,
+#     axis_name="batch_devices",
+#     static_broadcasted_argnums=(4,5,6,8),
+#     in_axes=(0, 0, 0, 0, None, None, None,None,None),
+#     # devices=global_devices
+# )
+
+# ============================================================================
+# New eval_step (jit + shardings version)
+# ============================================================================
 def eval_step(
         batch_inputs,
         batch_labels,
@@ -961,6 +1108,17 @@ def eval_step(
         init_hiddens,
         ignore_times,
     ):
+    """
+    Evaluation step function (jit + shardings version).
+
+    Main changes:
+    1. Removed pmap decorator, using jax.jit + in_shardings/out_shardings
+    2. No pmean needed (eval_step originally had no cross-device aggregation)
+
+    Why these changes:
+    - Maintain consistent parallelism strategy with train_step
+    - Use same sharding infrastructure
+    """
     # print("checking for compile in eval_step function")
 
 
@@ -1030,6 +1188,73 @@ def eval_step(
         accs=ce
 
     return losses, accs, logits
+
+
+# ============================================================================
+# Create JIT-compiled eval_step
+# ============================================================================
+def create_jit_eval_step(mesh: Mesh, state: train_state.TrainState, has_book_data: bool = True):
+    """
+    Create JIT-compiled eval_step.
+
+    Why needed:
+    - eval_step also needs jax.jit + shardings for consistency
+    - Though eval doesn't need donate_argnums (doesn't update state), still needs correct sharding
+
+    Args:
+        mesh: JAX Mesh
+        state: Example state (for inferring sharding)
+        has_book_data: Whether book data is present
+
+    Returns:
+        JIT-compiled eval_step function
+    """
+    # 1. Create shardings for state (everything replicated)
+    state_shardings = create_state_shardings(state, mesh)
+
+    # 2. Create shardings for data
+    inputs_shardings, labels_sharding, timesteps_shardings = get_data_shardings_for_batch(
+        mesh, has_book_data=has_book_data
+    )
+
+    # 3. Define in_shardings
+    # Order corresponds to eval_step parameters:
+    # (batch_inputs, batch_labels, batch_integration_timesteps, state,
+    #  apply_fn, batchnorm, apply_method, init_hiddens, ignore_times)
+    in_shardings = (
+        inputs_shardings,         # batch_inputs - sharded
+        labels_sharding,          # batch_labels - sharded
+        timesteps_shardings,      # batch_integration_timesteps - sharded
+        state_shardings,          # state - replicated
+        None,                     # apply_fn - static
+        None,                     # batchnorm - static
+        None,                     # apply_method - static
+        None,                     # init_hiddens - static
+        None,                     # ignore_times - static
+    )
+
+    # 4. Define out_shardings
+    # Order corresponds to return values: (losses, accs, logits)
+    out_shardings = (
+        None,                     # losses - auto-handled
+        None,                     # accs - auto-handled
+        None,                     # logits - auto-handled
+    )
+
+    # 5. Create JIT-compiled function
+    # Note: eval doesn't donate state because state is not modified
+    jit_eval_step = jax.jit(
+        eval_step,
+        in_shardings=in_shardings,
+        out_shardings=out_shardings,
+        static_argnums=(4, 5, 6, 8),  # apply_fn, batchnorm, apply_method, ignore_times
+        # Don't use donate_argnums because eval doesn't modify state
+    )
+
+    print("[JIT] Created JIT-compiled eval_step")
+    print(f"[JIT] eval - No donate_argnums (state is read-only)")
+
+    return jit_eval_step
 
 
 def eval_rnn_scan(apply_fn,hiddens,state,batch_inputs,batch_dones,batch_inttimes,batchnorm):

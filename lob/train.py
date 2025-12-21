@@ -11,7 +11,8 @@ from lob.init_train import init_train_state, load_checkpoint, save_checkpoint, d
 from lob.dataloading import create_lobster_prediction_dataset, create_lobster_train_loader#, Datasets
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import reduce_lr_on_plateau, linear_warmup, \
-    cosine_annealing, constant_lr, train_epoch, validate
+    cosine_annealing, constant_lr, train_epoch, validate, \
+    create_jit_train_step, create_jit_eval_step, initialize_mesh, get_global_mesh  # New: JIT compilation functions
 
 # WandB configuration (must be set before wandb import)
 os.environ["WANDB_MODE"] = "online"
@@ -145,7 +146,37 @@ def train(args):
                                                 n_book_post_layers=args.n_book_post_layers,
                                                 n_fused_layers=args.n_layers,
                                                 h_size_ema=ssm_size)
-    
+
+        # ====================================================================
+        # New: Initialize mesh and JIT-compiled train_step (jax.jit + shardings migration)
+        # ====================================================================
+        print(f"\n[Train] Initializing mesh and JIT-compiled functions...")
+        print(f"[Train] Using {args.num_devices} devices for data parallelism")
+
+        # Mesh already initialized in create_train_state, get it here
+        mesh = get_global_mesh()
+
+        # Create JIT-compiled train_step
+        # has_book_data parameter: set based on args.use_book_data
+        jit_train_step_fn = create_jit_train_step(
+            mesh,
+            state,
+            has_book_data=args.use_book_data
+        )
+
+        # Create JIT-compiled eval_step
+        jit_eval_step_fn = create_jit_eval_step(
+            mesh,
+            state,
+            has_book_data=args.use_book_data
+        )
+
+        print(f"[Train] JIT compilation complete - ready to train!")
+        print(f"[Train] Key optimizations enabled:")
+        print(f"  - donate_argnums: Memory reuse for state")
+        print(f"  - Data parallelism: {args.num_devices} devices")
+        # ====================================================================
+
     # Training Loop over epochs
     best_loss, best_acc, best_epoch = 100000000, -100000000.0, 0  # This best loss is val_loss
     count, best_val_loss = 0, 100000000  # This line is for early stopping purposes
@@ -209,7 +240,7 @@ def train(args):
         print('Training on', args.num_devices, 'devices.')
         train_rng, skey = random.split(train_rng)
 
-        #Pass an initial hidden state to be used in case of the 'RNN' forward pass being used. 
+        #Pass an initial hidden state to be used in case of the 'RNN' forward pass being used.
         state, train_loss,ce_by_tok ,step = train_epoch(state,
                                               skey,
                                               #model_cls,
@@ -226,7 +257,8 @@ def train(args):
                                               init_hidden,
                                               epoch,
                                               ignore_times,
-                                              args.log_ce_tables)
+                                              args.log_ce_tables,
+                                              jit_train_step_fn=jit_train_step_fn)  # New: Pass JIT function
 
         if args.random_offsets_train:
             # reinit training loader, so that sequences are initialised with
