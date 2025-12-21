@@ -632,12 +632,10 @@ def print_memory_usage_tofile():
 def train_epoch(
         state,
         rng,
-        #model,
         trainloader,
         seq_len,
-        # in_dim,
         batchnorm,
-        lr_params,
+        # lr_params REMOVED - LR scheduling handled by optax
         num_devices,
         debug_loading,
         debug_profiler,
@@ -646,27 +644,30 @@ def train_epoch(
         epoch,
         ignore_times,
         log_ce_tables,
-        jit_train_step_fn=None,  # New: JIT-compiled train_step
+        jit_train_step_fn=None,
     ):
 
     """
     Training function for an epoch that loops over batches.
 
-    New parameter:
-        jit_train_step_fn: JIT-compiled train_step function.
-                          If None, uses default train_step (backward compatible)
+    With optax schedules:
+    - Learning rate is automatically computed from state.step by the optimizer
+    - No manual lr_params needed
+    - No update_learning_rate_per_step() calls needed
+    - No buffer copying needed (eliminates donate_argnums aliasing)
     """
     # Store Metrics
     batch_losses = []
-    cross_entropies= [] #list of 1xNTok losses 
+    cross_entropies= [] #list of 1xNTok losses
 
-    decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min = lr_params
+    # No more lr_params unpacking - optax handles LR scheduling internally
+    # Step tracking is done via state.step (maintained by optax)
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     for batch_idx, batch in enumerate(tqdm(trainloader)):
         # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
         # print(f"train_epoch: Batch input shape: {batch[0].shape}, batch target shape: {batch[1].shape}")
         if not debug_loading:
-            if (step>1) & (step<3) & debug_profiler:
+            if (state.step>1) & (state.step<3) & debug_profiler:
                 jax.profiler.start_trace("/tmp/tensorboard")
             inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
             # print("train_epoch: Prepared batch inputs shape:", inputs[0].shape)
@@ -718,16 +719,11 @@ def train_epoch(
             batch_losses.append(loss)
             if log_ce_tables:
                 cross_entropies.append(ce)
-            lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
-            state, step = update_learning_rate_per_step(lr_params, state)
 
-            # CRITICAL FIX: Force copy all buffers to avoid aliasing with donate_argnums
-            # update_learning_rate_per_step may create buffer aliasing via state.replace()
-            # This ensures each buffer is unique before donation in next train_step call
-            # Following MaxText pattern: use jax.tree.map with copy function
-            state = jax.tree.map(np.copy, state)  # np is jax.numpy (stays on GPU)
+            # No more manual LR updates - optax schedules handle this automatically!
+            # No more buffer copying needed - eliminates donate_argnums aliasing
 
-            if (step>20) & (step<=21) & debug_profiler:
+            if (state.step>20) & (state.step<=21) & debug_profiler:
                 jax.profiler.stop_trace()
                 break
             if (curtail_epochs is not None) and (batch_idx>=curtail_epochs):
@@ -745,7 +741,8 @@ def train_epoch(
         ce_means=None
     # jax.debug.print("CE of epoch by token: {}",ce_means.shape)
     loss_mean=np.mean(np.array(batch_losses))
-    return state,loss_mean , ce_means,step
+    # No more returning step - optax tracks it internally via state.step
+    return state, loss_mean, ce_means
 
 
 @partial(jax.vmap,in_axes=(0,0,None),out_axes=(0,0))
