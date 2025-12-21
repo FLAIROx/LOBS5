@@ -156,7 +156,7 @@ def tree_unreplicate(pytree: Any) -> Any:
     """
     # For replicated arrays, values are identical on all devices
     # We just need to get the value (JAX handles this automatically)
-    return jax.tree_map(lambda x: x if not isinstance(x, jax.Array) else x, pytree)
+    return jax.tree_util.tree_map(lambda x: x if not isinstance(x, jax.Array) else x, pytree)
 
 
 def create_state_shardings(state: Any, mesh: Mesh) -> Any:
@@ -195,7 +195,7 @@ def create_state_shardings(state: Any, mesh: Mesh) -> Any:
             # Non-array leaf (e.g., static values, None): use scalar sharding
             return NamedSharding(mesh, P())
 
-    return jax.tree_map(get_sharding_for_leaf, state)
+    return jax.tree_util.tree_map(get_sharding_for_leaf, state)
 
 
 def get_data_shardings_for_batch(
