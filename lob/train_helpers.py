@@ -632,6 +632,15 @@ def train_epoch(
                 cross_entropies.append(ce)
             lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
             state, step = update_learning_rate_per_step(lr_params, state)
+
+            # CRITICAL FIX: Force copy all buffers to avoid aliasing with donate_argnums
+            # update_learning_rate_per_step may create buffer aliasing via state.replace()
+            # This ensures each buffer is unique before donation in next train_step call
+            state = jax.tree_util.tree_map(
+                lambda x: jnp.array(x) if isinstance(x, jax.Array) else x,
+                state
+            )
+
             if (step>20) & (step<=21) & debug_profiler:
                 jax.profiler.stop_trace()
                 break
