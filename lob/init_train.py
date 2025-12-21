@@ -34,11 +34,15 @@ def deduplicate_trainstate(
         state: TrainState,
     ) -> TrainState:
     """
+    Extract state to single device for checkpoint saving.
+
+    Old (pmap): State had device dimension, used x[0] to extract first device
+    New (jit+shardings): State is replicated via sharding (no device dimension),
+                        just need to put on single device
     """
-    return jax.device_put(
-        jax.tree.map(lambda x: x[0], state),
-        device=jax.devices('gpu')[0]
-    )
+    # With jit+shardings, arrays don't have device dimension
+    # Just move to single device (no indexing needed)
+    return jax.device_put(state, device=jax.devices('gpu')[0])
 
 def load_args_from_checkpoint(
         checkpoint_path: str,
@@ -144,9 +148,16 @@ def load_checkpoint(
         )
     )
     ckpt = loaded['metadata']
-    # copy train state back to all devices
+    # Copy train state back to all devices
     if train:
-        ckpt['model'] = jax_utils.replicate(loaded['state'])
+        # Old (pmap): Use jax_utils.replicate (adds device dimension)
+        # ckpt['model'] = jax_utils.replicate(loaded['state'])
+
+        # New (jit+shardings): Use sharding-based replication
+        from lob.sharding_utils import get_global_mesh, create_state_shardings
+        mesh = get_global_mesh()
+        state_shardings = create_state_shardings(loaded['state'], mesh)
+        ckpt['model'] = jax.device_put(loaded['state'], state_shardings)
     else:
         ckpt['model'] = loaded['state']
     return ckpt

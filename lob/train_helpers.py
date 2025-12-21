@@ -622,8 +622,9 @@ def train_epoch(
             #     np.set_printoptions()
             #     print('Done Printing')
 
-            # losses are already averaged across devices (--> should be all the same here)
-            batch_losses.append(loss[0])
+            # Old (pmap): loss had device dimension, needed loss[0]
+            # New (jit+shardings): loss is already a scalar, no indexing needed
+            batch_losses.append(loss)
             if log_ce_tables:
                 cross_entropies.append(ce)
             lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
