@@ -390,11 +390,11 @@ def create_train_state(model_cls,
         mesh = initialize_mesh(num_devices)
         print("[State] Created new global mesh")
 
-    # 2. Create replicated sharding
-    replicated_sharding = create_replicated_sharding(mesh)
+    # 2. Create shardings for entire state (handles scalars correctly)
+    state_shardings = create_state_shardings(state, mesh)
 
-    # 3. Replicate state to all devices
-    state = tree_replicate_to_devices(state, replicated_sharding)
+    # 3. Replicate state to all devices using the sharding pytree
+    state = jax.device_put(state, state_shardings)
 
     print(state.params['message_encoder']['encoder']['embedding'].shape)
 
