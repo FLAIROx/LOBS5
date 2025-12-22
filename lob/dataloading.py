@@ -29,13 +29,13 @@ def create_lobster_prediction_dataset(
 		book_depth: int = 500,
 		token_mode: int = 22,
 		test_dir_name: Union[str, Path, None] = None,
-		n_data_workers: int = 12,  # DATA CORE PARAMS: 0→12, utilize multi-core CPU (GH200: 72 cores)
+		n_data_workers: int = 16,  # DATA CORE PARAMS: 0→12, utilize multi-core CPU (GH200: 72 cores)
 		return_raw_msgs: bool = False,
 		shuffle_train=True,
 		rand_offset=True,
 		debug_overfit=False,
 		pin_memory: bool = True,
-		prefetch_factor: int = 6,  # DATA CORE PARAMS: 2→6, larger prefetch buffer (memory allows)
+		prefetch_factor: int = 8,  # DATA CORE PARAMS: 2→6, larger prefetch buffer (memory allows)
 		persistent_workers: bool = True,  # DATA CORE PARAMS: keep workers alive across epochs
 	) -> ReturnType:
 	""" 
