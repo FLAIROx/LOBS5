@@ -207,3 +207,44 @@ if __name__ == "__main__":
 	#with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
 	train(args)
 	#cProfile.run('train(parser.parse_args())')
+
+
+
+
+'''
+
+     ┌─────────────────────────────────────────────────────────────────────────────────┐
+     │                   JAX/GPU Data Loading Pipeline (Multi-Node)                    │
+     └─────────────────────────────────────────────────────────────────────────────────┘
+
+       ┌──────────┐      ┌──────────┐      ┌────────────┐      ┌──────────┐      ┌──────────┐
+       │   DISK   │ ──▶  │   RAM    │ ──▶  │ Pinned RAM │ ──▶  │   VRAM   │ ──▶  │  TRAIN   │
+       │   (IO)   │      │  (CPU)   │      │  (CPU)     │      │  (GPU)   │      │  (GPU)   │
+       └──────────┘      └──────────┘      └────────────┘      └──────────┘      └──────────┘
+             │                 │                  │                  │                 │
+             ▼                 ▼                  ▼                  ▼                 ▼
+           .npy          preprocess          page-locked        device_put       jit train_step
+        mmap read        tokenize         cudaHostAlloc()     CUDA async DMA     (with shardings)
+                         batching           non-swappable       np.split()       global sharding
+                         shuffle                               to local GPUs
+
+             │                 │                  │                  │
+             └────────┬────────┘                  │                  │
+                      │                           │                  │
+                      ▼                           ▼                  ▼
+         ┌────────────────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+         │      num_workers = N       │  │  pin_memory=T   │  │ prefetch_factor │
+         │  ┌────┐ ┌────┐ ┌────┐      │  │                 │  │      = M        │
+         │  │ W0 │ │ W1 │ │... │      │  │  Page-locked    │  │                 │
+         │  └────┘ └────┘ └────┘      │  │  memory         │  │  Prefetch M     │
+         │  N subprocesses parallel   │  │  No swap to     │  │  batches ahead  │
+         │  preloading data           │  │  disk allowed   │  │  per worker     │
+         └────────────────────────────┘  │  Faster DMA     │  └─────────────────┘
+                      │                  └─────────────────┘
+                      ▼
+         ┌──────────────────────────────────────────────────────────────────────────────┐
+         │   persistent_workers=T:                                                      │
+         │   Keep worker processes alive across epochs. Avoid restart overhead          │
+         └──────────────────────────────────────────────────────────────────────────────┘
+         
+'''
