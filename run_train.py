@@ -83,6 +83,8 @@ if __name__ == "__main__":
 		     			help="number of batches to prefetch per worker")
 	parser.add_argument("--persistent_workers", type=str2bool, default=False,
 		     			help="keep DataLoader workers alive between epochs")
+	parser.add_argument("--enable_goodput_monitor", type=str2bool, default=False,
+		     			help="enable goodput monitoring (data loading vs compute time)")
 
 	# Model Parameters
 	parser.add_argument("--n_message_layers", type=int, default=2,  # 2

@@ -261,6 +261,10 @@ def train(args):
     ignore_times=args.ignore_times
     batchnorm=args.batchnorm
 
+    # Initialize goodput monitor if enabled
+    from lob.profiling_utils import GoodputMonitor
+    goodput_monitor = GoodputMonitor() if args.enable_goodput_monitor else None
+
     for epoch in range(args.epochs):
         print(f"[*] Starting Training Epoch {epoch + 1}...")
         # LR scheduling now handled by optax schedules - no manual switching needed
@@ -290,6 +294,7 @@ def train(args):
             model_params=total_params,
             batch_size=args.bsz,
             peak_tflops=1000.0,
+            goodput_monitor=goodput_monitor,
         )
 
         if args.random_offsets_train:
@@ -327,6 +332,12 @@ def train(args):
                                         apply_method='__call_ar__',
                                         ignore_times=ignore_times,
                                         log_ce_tables=args.log_ce_tables)
+
+            # Print goodput statistics if enabled
+            if goodput_monitor:
+                print("\n[Goodput Monitor] Epoch statistics:")
+                goodput_monitor.print_summary()
+                print()
 
             print(f"[*] Running Epoch {epoch + 1} Test ") #on train set (With Call RNN)...
             (test_loss, test_acc,

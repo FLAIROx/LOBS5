@@ -27,6 +27,7 @@ from lob.sharding_utils import (
     get_data_shardings_for_batch,
 )
 from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
+from .profiling_utils import GoodputMonitor
 # from lob.lob_seq_model import LobPredModel
 
 
@@ -685,6 +686,7 @@ def train_epoch(
         model_params=None,
         batch_size=None,
         peak_tflops=1000.0,
+        goodput_monitor=None,
     ):
 
     """
@@ -715,7 +717,13 @@ def train_epoch(
         if not debug_loading:
             if (state.step>1) & (state.step<3) & debug_profiler:
                 jax.profiler.start_trace("/tmp/tensorboard")
-            inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
+
+            # Monitor prep_batch time if goodput_monitor provided
+            if goodput_monitor:
+                with goodput_monitor.record('prep_batch'):
+                    inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
+            else:
+                inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
             # print("train_epoch: Prepared batch inputs shape:", inputs[0].shape)
             # print("train_epoch: Prepared batch labels shape:", labels.shape)
             # print("train_epoch: Inputs 0:5:", inputs[0][0,0:5,:])
@@ -738,15 +746,28 @@ def train_epoch(
             # Use JIT-compiled train_step if provided
             train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
 
-            state, loss, ce, logits = train_fn(
-                state,
-                drop_rng,
-                inputs,
-                labels,
-                integration_times,
-                batchnorm,
-                ignore_times,
-            )
+            # Monitor train_step time if goodput_monitor provided
+            if goodput_monitor:
+                with goodput_monitor.record('train_step'):
+                    state, loss, ce, logits = train_fn(
+                        state,
+                        drop_rng,
+                        inputs,
+                        labels,
+                        integration_times,
+                        batchnorm,
+                        ignore_times,
+                    )
+            else:
+                state, loss, ce, logits = train_fn(
+                    state,
+                    drop_rng,
+                    inputs,
+                    labels,
+                    integration_times,
+                    batchnorm,
+                    ignore_times,
+                )
             if debug_profiler:
                 loss.block_until_ready()
             # print("completes train step")
