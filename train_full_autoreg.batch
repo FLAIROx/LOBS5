@@ -138,7 +138,11 @@ python -u -B run_train.py \
     --book_transform=True \
     --masking=none \
     --num_devices='"$GPUS_PER_NODE"' \
-    --n_data_workers=8 \
+    --n_data_workers=12 \
+    --pin_memory=True \
+    --prefetch_factor=6 \
+    --persistent_workers=True \
+    --enable_goodput_monitor=True \
     --debug_loading=False \
     --enable_profiler=False \
     --random_offsets_train=True \
