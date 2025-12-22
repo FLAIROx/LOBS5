@@ -795,12 +795,13 @@ def train_epoch(
                 if mfu is not None:
                     postfix['MFU'] = f'{mfu:.1f}%'
 
-            if goodput_monitor and batch_idx > 0:
-                prep_stats = goodput_monitor.get_stats('prep_batch')
-                step_stats = goodput_monitor.get_stats('train_step')
-                if prep_stats and step_stats:
-                    postfix['prep'] = f'{prep_stats["mean"]*1000:.1f}ms'
-                    postfix['step'] = f'{step_stats["mean"]*1000:.0f}ms'
+            if goodput_monitor:
+                prep_time = goodput_monitor.get_last('prep_batch')
+                step_time = goodput_monitor.get_last('train_step')
+                if prep_time is not None:
+                    postfix['prep'] = f'{prep_time*1000:.1f}ms'
+                if step_time is not None:
+                    postfix['step'] = f'{step_time*1000:.0f}ms'
 
             if postfix:
                 pbar.set_postfix(postfix)
