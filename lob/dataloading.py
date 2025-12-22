@@ -29,14 +29,14 @@ def create_lobster_prediction_dataset(
 		book_depth: int = 500,
 		token_mode: int = 22,
 		test_dir_name: Union[str, Path, None] = None,
-		n_data_workers: int = 0,
+		n_data_workers: int = 12,  # DATA CORE PARAMS: 0→12, utilize multi-core CPU (GH200: 72 cores)
 		return_raw_msgs: bool = False,
 		shuffle_train=True,
 		rand_offset=True,
 		debug_overfit=False,
 		pin_memory: bool = True,
-		prefetch_factor: int = 2,
-		persistent_workers: bool = False,
+		prefetch_factor: int = 6,  # DATA CORE PARAMS: 2→6, larger prefetch buffer (memory allows)
+		persistent_workers: bool = True,  # DATA CORE PARAMS: keep workers alive across epochs
 	) -> ReturnType:
 	""" 
 	"""
@@ -101,7 +101,7 @@ def create_lobster_prediction_dataset(
 	 		N_CLASSES, SEQ_LENGTH, IN_DIM, BOOK_SEQ_LEN, BOOK_DIM, TRAIN_SIZE)
 
 def create_lobster_train_loader(dataset_obj, seed, bsz, num_workers, reset_train_offsets=False, shuffle=True,
-								pin_memory=True, prefetch_factor=2, persistent_workers=False):
+								pin_memory=True, prefetch_factor=6, persistent_workers=True):  # DATA CORE PARAMS: optimized defaults
 	if reset_train_offsets:
 		dataset_obj.reset_train_offsets()
 	# use sampler to only get individual samples and automatic batching from dataloader
