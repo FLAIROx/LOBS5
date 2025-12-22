@@ -231,6 +231,16 @@ def train(args):
     log_with_timestamp(f"Training dataset size: {train_size}")
     log_with_timestamp(f"Steps per epoch: {steps_per_epoch}")
 
+
+
+    # Log DataLoader configuration                                                                                                                                
+    log_with_timestamp("DataLoader Configuration:", prefix="Train")                                                                                               
+    log_with_timestamp(f"  - num_workers: {args.n_data_workers}", prefix="Train")                                                                                 
+    log_with_timestamp(f"  - pin_memory: {args.pin_memory}", prefix="Train")                                                                                      
+    log_with_timestamp(f"  - prefetch_factor: {args.prefetch_factor}", prefix="Train")                                                                            
+    log_with_timestamp(f"  - persistent_workers: {args.persistent_workers}", prefix="Train")                                                                      
+                                                            
+      
     # print("USING VERY INFREQUENT CHECKPOINTING FOR TINY EPOCH SIZE ")
 
     mgr_options = ocp.CheckpointManagerOptions(
