@@ -770,6 +770,7 @@ def train_epoch(
                 )
             if debug_profiler:
                 loss.block_until_ready()
+
             # print("completes train step")
             # if (batch_idx==0) & (epoch%100==0):
             #     np.set_printoptions(threshold=sys.maxsize)
@@ -787,11 +788,22 @@ def train_epoch(
             if log_ce_tables:
                 cross_entropies.append(ce)
 
-            # Update MFU display
+            # Update tqdm with MFU and goodput metrics
+            postfix = {}
             if mfu_tracker is not None:
                 mfu = mfu_tracker.tick()
                 if mfu is not None:
-                    pbar.set_postfix({'MFU': f'{mfu:.1f}%'})
+                    postfix['MFU'] = f'{mfu:.1f}%'
+
+            if goodput_monitor and batch_idx > 0:
+                prep_stats = goodput_monitor.get_stats('prep_batch')
+                step_stats = goodput_monitor.get_stats('train_step')
+                if prep_stats and step_stats:
+                    postfix['prep'] = f'{prep_stats["mean"]*1000:.1f}ms'
+                    postfix['step'] = f'{step_stats["mean"]*1000:.0f}ms'
+
+            if postfix:
+                pbar.set_postfix(postfix)
 
             # No more manual LR updates - optax schedules handle this automatically!
             # No more buffer copying needed - eliminates donate_argnums aliasing
