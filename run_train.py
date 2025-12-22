@@ -77,6 +77,12 @@ if __name__ == "__main__":
 						help="How many past messages to include in each sample")
 	parser.add_argument("--n_data_workers", type=int, default=0,
 		     			help="number of workers used in DataLoader")
+	parser.add_argument("--pin_memory", type=str2bool, default=True,
+		     			help="enable pin_memory for DataLoader (faster GPU transfer)")
+	parser.add_argument("--prefetch_factor", type=int, default=2,
+		     			help="number of batches to prefetch per worker")
+	parser.add_argument("--persistent_workers", type=str2bool, default=False,
+		     			help="keep DataLoader workers alive between epochs")
 
 	# Model Parameters
 	parser.add_argument("--n_message_layers", type=int, default=2,  # 2

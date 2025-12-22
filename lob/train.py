@@ -113,7 +113,10 @@ def train(args):
             n_data_workers=args.n_data_workers,
             shuffle_train=args.shuffle_train,
             rand_offset=args.random_offsets_train,
-            debug_overfit=args.debug_overfit
+            debug_overfit=args.debug_overfit,
+            pin_memory=args.pin_memory,
+            prefetch_factor=args.prefetch_factor,
+            persistent_workers=args.persistent_workers
         )
 
 
@@ -299,7 +302,10 @@ def train(args):
                 args.bsz,
                 num_workers=args.n_data_workers,
                 reset_train_offsets=args.random_offsets_train,
-                shuffle=args.shuffle_train)
+                shuffle=args.shuffle_train,
+                pin_memory=args.pin_memory,
+                prefetch_factor=args.prefetch_factor,
+                persistent_workers=args.persistent_workers)
         print(f"val model hash: {val_model.__hash__()}")
         print(f"val model apply hash: {val_model.__hash__()}")
 
