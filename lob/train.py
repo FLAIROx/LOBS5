@@ -6,6 +6,8 @@ import flax
 import orbax.checkpoint as ocp
 # import wandb
 import gc
+from datetime import datetime
+import subprocess
 
 from lob.init_train import init_train_state, load_checkpoint, save_checkpoint, deduplicate_trainstate
 from lob.dataloading import create_lobster_prediction_dataset, create_lobster_train_loader#, Datasets
@@ -20,6 +22,27 @@ os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
 os.environ["WANDB_INSECURE_DISABLE_SSL"] = "True"
 import wandb
 
+
+def log_with_timestamp(msg, prefix="*"):
+    """Print log message with timestamp prefix."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] [{prefix}] {msg}")
+
+
+def get_git_info():
+    """Get current git branch and commit hash."""
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        return branch, commit
+    except:
+        return "unknown", "unknown"
 
 
 def train(args):
@@ -93,9 +116,9 @@ def train(args):
             debug_overfit=args.debug_overfit
         )
 
-    
 
-    print(f"[*] Starting S5 Training on {ds} =>> Initializing...")
+
+    log_with_timestamp(f"Starting S5 Training on {ds} =>> Initializing...")
     if args.debug_loading:
         state=None
         val_model=None
@@ -115,13 +138,13 @@ def train(args):
         # Log BF16 status
         import os
         use_bf16 = os.environ.get('USE_BF16', '1') == '1'
-        print(f"[*] Training precision: {'BF16 (mixed)' if use_bf16 else 'FP32'}")
+        log_with_timestamp(f"Training precision: {'BF16 (mixed)' if use_bf16 else 'FP32'}")
         if use_bf16:
-            print("[*] BF16 Mixed Precision enabled:")
-            print("    - Compute: BF16")
-            print("    - Parameters: BF16 (except Lambda/D/log_step)")
-            print("    - Optimizer states: FP32")
-            print("    - Decoder: FP32 (for numerical stability)")
+            log_with_timestamp("BF16 Mixed Precision enabled:")
+            log_with_timestamp("  - Compute: BF16")
+            log_with_timestamp("  - Parameters: BF16 (except Lambda/D/log_step)")
+            log_with_timestamp("  - Optimizer states: FP32")
+            log_with_timestamp("  - Decoder: FP32 (for numerical stability)")
 
         # Log to WandB
         if args.USE_WANDB:
@@ -129,6 +152,13 @@ def train(args):
                 "use_bf16": use_bf16,
                 "precision_mode": "bf16_mixed" if use_bf16 else "fp32",
             })
+            # Log git and batch size configuration to WandB
+            branch, commit = get_git_info()
+            wandb.run.summary["git_branch"] = branch
+            wandb.run.summary["git_commit"] = commit
+            wandb.run.summary["global_batch_size"] = args.bsz
+            wandb.run.summary["micro_batch_size"] = args.bsz // args.num_devices
+            wandb.run.summary["num_devices"] = args.num_devices
 
         if args.restore is not None and args.restore != '':
             print(f"[*] Restoring weights from {args.restore}")
@@ -152,8 +182,8 @@ def train(args):
         # ====================================================================
         # New: Initialize mesh and JIT-compiled train_step (jax.jit + shardings migration)
         # ====================================================================
-        print(f"\n[Train] Initializing mesh and JIT-compiled functions...")
-        print(f"[Train] Using {args.num_devices} devices for data parallelism")
+        log_with_timestamp("Initializing mesh and JIT-compiled functions...", prefix="Train")
+        log_with_timestamp(f"Using {args.num_devices} devices for data parallelism", prefix="Train")
 
         # Mesh already initialized in create_train_state, get it here
         mesh = get_global_mesh()
@@ -173,10 +203,10 @@ def train(args):
             has_book_data=args.use_book_data
         )
 
-        print(f"[Train] JIT compilation complete - ready to train!")
-        print(f"[Train] Key optimizations enabled:")
-        print(f"  - donate_argnums: Memory reuse for state")
-        print(f"  - Data parallelism: {args.num_devices} devices")
+        log_with_timestamp("JIT compilation complete - ready to train!", prefix="Train")
+        log_with_timestamp("Key optimizations enabled:", prefix="Train")
+        log_with_timestamp("  - donate_argnums: Memory reuse for state", prefix="Train")
+        log_with_timestamp(f"  - Data parallelism: {args.num_devices} devices", prefix="Train")
         # ====================================================================
 
     # Training Loop over epochs
@@ -185,6 +215,18 @@ def train(args):
     lr_count, opt_acc = 0, -100000000.0  # This line is for learning rate decay
     # step variable removed - optax tracks step internally via state.step
     steps_per_epoch = int(train_size/args.bsz) if args.curtail_epochs is None else args.curtail_epochs+1
+
+    # Log git information and batch size configuration
+    branch, commit = get_git_info()
+    log_with_timestamp(f"Git Branch: {branch}")
+    log_with_timestamp(f"Git Commit: {commit}")
+    global_batch_size = args.bsz
+    micro_batch_size = args.bsz // args.num_devices
+    log_with_timestamp(f"Global Batch Size (Gbs): {global_batch_size}")
+    log_with_timestamp(f"Micro Batch Size (mbs/per_gpu_bsz): {micro_batch_size}")
+    log_with_timestamp(f"Number of devices: {args.num_devices}")
+    log_with_timestamp(f"Training dataset size: {train_size}")
+    log_with_timestamp(f"Steps per epoch: {steps_per_epoch}")
 
     # print("USING VERY INFREQUENT CHECKPOINTING FOR TINY EPOCH SIZE ")
 
