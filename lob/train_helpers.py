@@ -13,6 +13,7 @@ import sys
 
 import psutil
 import os
+import time
 
 # New: Import sharding utilities (migrating from pmap to jax.jit + shardings)
 from lob.sharding_utils import (
@@ -456,8 +457,8 @@ def create_train_state(model_cls,
 
     fn_is_complex = lambda x: x.dtype in [np.complex64, np.complex128]
     param_sizes = map_nested_fn(lambda k, param: param.size * (2 if fn_is_complex(param) else 1))(params)
-    #print(f"[*] Trainable Parameters: {sum(jax.tree_leaves(param_sizes))}")
-    print(f"[*] Trainable Parameters: {sum(jax.tree_util.tree_leaves(param_sizes))}")
+    total_params = sum(jax.tree_util.tree_leaves(param_sizes))
+    print(f"[*] Trainable Parameters: {total_params}")
 
     # Initialize mesh first
     try:
@@ -496,7 +497,7 @@ def create_train_state(model_cls,
 
     print(state.params['message_encoder']['encoder']['embedding'].shape)
 
-    return state
+    return state, total_params
 
 def get_slices(dims):
     slices = []
@@ -636,6 +637,34 @@ def print_memory_usage_tofile():
                 pass
 
 
+class MFUTracker:
+    """Track and compute MFU (Model FLOPs Utilization) with sliding window average."""
+    def __init__(self, model_params, batch_size, seq_len, num_devices, peak_tflops=1000.0, window=10):
+        self.flops_per_step = 6 * batch_size * seq_len * model_params
+        self.total_peak = peak_tflops * num_devices
+        self.window = []
+        self.window_size = window
+        self.last_time = None
+        self.step = 0
+
+    def tick(self):
+        """Call after each training step. Returns smoothed MFU% or None if not ready."""
+        now = time.time()
+        self.step += 1
+        if self.last_time is None or self.step <= 1:
+            self.last_time = now
+            return None
+        dt = now - self.last_time
+        self.last_time = now
+        if dt <= 0:
+            return None
+        mfu = (self.flops_per_step / dt / 1e12) / self.total_peak * 100
+        self.window.append(mfu)
+        if len(self.window) > self.window_size:
+            self.window.pop(0)
+        return sum(self.window) / len(self.window)
+
+
 def train_epoch(
         state,
         rng,
@@ -652,6 +681,10 @@ def train_epoch(
         ignore_times,
         log_ce_tables,
         jit_train_step_fn=None,
+        # MFU tracking parameters
+        model_params=None,
+        batch_size=None,
+        peak_tflops=1000.0,
     ):
 
     """
@@ -667,10 +700,16 @@ def train_epoch(
     batch_losses = []
     cross_entropies= [] #list of 1xNTok losses
 
+    # Initialize MFU tracker if parameters provided
+    mfu_tracker = None
+    if model_params is not None and batch_size is not None:
+        mfu_tracker = MFUTracker(model_params, batch_size, seq_len, num_devices, peak_tflops)
+
     # No more lr_params unpacking - optax handles LR scheduling internally
     # Step tracking is done via state.step (maintained by optax)
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
-    for batch_idx, batch in enumerate(tqdm(trainloader)):
+    pbar = tqdm(trainloader)
+    for batch_idx, batch in enumerate(pbar):
         # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
         # print(f"train_epoch: Batch input shape: {batch[0].shape}, batch target shape: {batch[1].shape}")
         if not debug_loading:
@@ -726,6 +765,12 @@ def train_epoch(
             batch_losses.append(loss)
             if log_ce_tables:
                 cross_entropies.append(ce)
+
+            # Update MFU display
+            if mfu_tracker is not None:
+                mfu = mfu_tracker.tick()
+                if mfu is not None:
+                    pbar.set_postfix({'MFU': f'{mfu:.1f}%'})
 
             # No more manual LR updates - optax schedules handle this automatically!
             # No more buffer copying needed - eliminates donate_argnums aliasing

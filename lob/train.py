@@ -100,8 +100,9 @@ def train(args):
         state=None
         val_model=None
         init_hidden=None
+        total_params=None
     else:
-        state, model_cls = init_train_state(
+        state, model_cls, total_params = init_train_state(
             args,
             n_classes=n_classes,
             seq_len=seq_len,
@@ -239,7 +240,11 @@ def train(args):
             epoch,
             ignore_times,
             args.log_ce_tables,
-            jit_train_step_fn=jit_train_step_fn
+            jit_train_step_fn=jit_train_step_fn,
+            # MFU tracking parameters
+            model_params=total_params,
+            batch_size=args.bsz,
+            peak_tflops=1000.0,
         )
 
         if args.random_offsets_train:

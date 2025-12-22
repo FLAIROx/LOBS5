@@ -341,7 +341,7 @@ def init_train_state(
     )
 
     # Initialize training state with optax schedules
-    state = create_train_state(
+    state, total_params = create_train_state(
         model_cls,
         init_rng,
         padded,
@@ -361,4 +361,4 @@ def init_train_state(
         num_devices=args.num_devices,
     )
 
-    return state, model_cls
+    return state, model_cls, total_params
