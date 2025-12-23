@@ -281,6 +281,117 @@ def complex_matvec_bf16(A_complex, x_complex):
 # ============================================================================
 # Correct BF16 SSM: BF16 matmul + FP32 scan (Reference: 7DEC working implementation)
 # ============================================================================
+#
+# ============================================================================
+# S5 SSM DATA FLOW ANALYSIS (L=12000, H=1024, P=512)
+# ============================================================================
+#
+# Current MFU: 15.3% (Job 1790325 baseline)
+# Total HBM traffic per layer: ~330 MB (read 186 MB + write 144 MB)
+#
+# Data Flow with Matrix Sizes and FLOPs:
+# -----------------------------------------------------------------------
+#
+#  input (L,H)        Shape: (12000, 1024)    Size: 24.6 MB (BF16)
+#       │
+#       ▼
+#  cast FP32 ──► HBM  Shape: (12000, 1024)    Size: 49.2 MB (FP32)
+#       │              FLOPs: 0 (type cast)
+#       ▼
+#  transpose ──► HBM  Shape: (1024, 12000)    Size: 24.6 MB (BF16)
+#       │              FLOPs: 0 (reshape)
+#       ▼
+#  B@u (2x) ──► HBM   B: (512, 1024) × u: (1024, 12000) → Bu: (512, 12000)
+#       │              Size: 24.6 MB (complex64 = 2×FP32)
+#       │              FLOPs: 2 × (512 × 1024 × 12000 × 2) = 25.2 GFLOPs
+#       │              ⭐ Tensor Core accelerated
+#       ▼
+#  complex combine    Bu_re + j*Bu_im → Bu_complex
+#       │ ──► HBM      Size: 24.6 MB (complex64)
+#       │              FLOPs: 0 (view creation)
+#       ▼
+#  Lambda broadcast   Lambda: (512,) → (12000, 512)
+#       │ ──► HBM      Size: 48.8 MB (complex64) ← WASTEFUL!
+#       │              FLOPs: 0 (broadcast)
+#       │              Note: broadcast_to saves allocation but not HBM bandwidth
+#       ▼
+#  associative_scan   (Lambda, Bu) → xs
+#       │ ──► HBM      Shape: (12000, 512)    Size: 48.8 MB (complex64)
+#       │              FLOPs: L × P × 14 = 12000 × 512 × 14 = 86 MFLOPs
+#       │              ⚠ Memory-bound: AI = 14 FLOPs / 48 Bytes = 0.3
+#       │              Note: log₂(L) = 14 levels of parallel reduction
+#       ▼
+#  transpose ──► HBM  Shape: (512, 12000)    Size: 48.8 MB (complex64)
+#       │              FLOPs: 0 (reshape)
+#       ▼
+#  extract re/im      xs_T → xs_re, xs_im
+#       │ ──► HBM      Size: 2 × 24.6 MB = 49.2 MB (2× FP32)
+#       │              FLOPs: 0 (view extraction)
+#       ▼
+#  C@xs (2x) ──► HBM  C: (1024, 512) × xs: (512, 12000) → ys: (1024, 12000)
+#       │              Size: 49.2 MB (FP32)
+#       │              FLOPs: 2 × (1024 × 512 × 12000 × 2) = 25.2 GFLOPs
+#       │              ⭐ Tensor Core accelerated
+#       ▼
+#  subtract+scale     (C_re@xs_re - C_im@xs_im) × 2
+#       │ ──► HBM      Size: 49.2 MB (FP32)
+#       │              FLOPs: 2 × 12000 × 1024 = 24.6 MFLOPs
+#       ▼
+#  D*input ──► HBM    D: (1024,) × input: (12000, 1024) → Du: (12000, 1024)
+#       │              Size: 49.2 MB (FP32)
+#       │              FLOPs: 12000 × 1024 = 12.3 MFLOPs
+#       ▼
+#  ys + Du ──► HBM    ys + Du → output
+#       │              Size: 49.2 MB (FP32)
+#       │              FLOPs: 12000 × 1024 = 12.3 MFLOPs
+#       ▼
+#  GELU ──► HBM       gelu(output)
+#       │              Size: 24.6 MB (BF16)
+#       │              FLOPs: 12000 × 1024 × 8 ≈ 98 MFLOPs (approx)
+#       ▼
+#  residual ──► HBM   skip + gelu_output
+#       │              Size: 24.6 MB (BF16)
+#       │              FLOPs: 12000 × 1024 = 12.3 MFLOPs
+#       ▼
+#  LayerNorm ──► HBM  layernorm(x)
+#                      Size: 24.6 MB (BF16)
+#                      FLOPs: 12000 × 1024 × 5 ≈ 61 MFLOPs
+#
+# -----------------------------------------------------------------------
+# SUMMARY per S5 layer:
+# -----------------------------------------------------------------------
+#   Total FLOPs:    ~50.5 GFLOPs (dominated by B@u and C@xs matmuls)
+#   Total HBM:      ~330 MB read + write
+#   Arithmetic Intensity: 50.5 GFLOPs / 330 MB ≈ 153 FLOPs/Byte
+#                         (but scan portion: 0.3 FLOPs/Byte ← bottleneck!)
+#
+#   GH200 specs:    4 PFLOPS (BF16 Tensor Core), 4 TB/s HBM
+#   Ridge point:    4000 TFLOPs / 4000 GB/s = 1000 FLOPs/Byte
+#
+# -----------------------------------------------------------------------
+# OPTIMIZATION EXPERIMENTS:
+# -----------------------------------------------------------------------
+#   | Experiment               | Branch                      | MFU   | Result |
+#   |--------------------------|-----------------------------+-------+--------|
+#   | Baseline (vmap)          | -                           | 12.0% | -      |
+#   | ✅ Batched matmul + D opt| autoreg_batched_matmul_mfu15| 15.3% | BEST   |
+#   | ❌ SSD (chunk=32)        | ssd                         | 8.4%  | 22x ↓  |
+#   | ❌ Chunk FLA (chunk=256) | sram_chunk_fla              | 12.0% | 16x ↓  |
+#   | ❌ lax.scan sequential   | autoreg_sharding_sram       | 1.0%  | 250x ↓ |
+#   | ❌ broadcast_to          | lambda_broadcast_to_view    | 15.3% | same   |
+#
+# -----------------------------------------------------------------------
+# FUSION OPPORTUNITIES (未实施):
+# -----------------------------------------------------------------------
+#   | Fusion                    | HBM Saved | Difficulty | Notes              |
+#   |---------------------------|-----------|------------|--------------------|
+#   | Post-SSM (D+GELU+res+LN)  | 43 MB     | Medium     | Pallas kernel      |
+#   | C@xs pipeline             | 30.7 MB   | High       | Pallas + Tensor C. |
+#   | Lambda broadcast elim     | 24.6 MB   | Medium     | ❌ no MFU gain     |
+#   | Pre-SSM (LN+cast)         | 18 MB     | Low        | Pallas kernel      |
+#   | B@u pipeline              | 12.4 MB   | High       | Pallas + Tensor C. |
+#
+# ============================================================================
 
 def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional):
     """Compute the LxH output of discretized SSM given an LxH input.
