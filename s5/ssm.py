@@ -600,8 +600,8 @@ class S5SSM(nn.Module):
 
         # jax.debug.print("[S5SSM.__call__] ys from apply_ssm has NaN: {}, dtype: {}", np.any(np.isnan(ys)), ys.dtype)  # DEBUG BF16
 
-        # D feedthrough in FP32
-        Du = jax.vmap(lambda u: self.D * u)(input_fp32)
+        # D feedthrough in FP32 (optimized: broadcast instead of vmap)
+        Du = self.D * input_fp32  # (H,) broadcast to (L, H)
         # jax.debug.print("[S5SSM.__call__] Du has NaN: {}", np.any(np.isnan(Du)))  # DEBUG BF16
 
         output = ys + Du
@@ -638,8 +638,8 @@ class S5SSM(nn.Module):
                                         self.conj_sym,
                                         self.bidirectional)
 
-        # D feedthrough in FP32
-        Du = jax.vmap(lambda u: self.D * u)(input_fp32)
+        # D feedthrough in FP32 (optimized: broadcast instead of vmap)
+        Du = self.D * input_fp32  # (H,) broadcast to (L, H)
         output = ys + Du
 
         return hidden_out, output
