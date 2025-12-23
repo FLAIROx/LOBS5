@@ -1,4 +1,5 @@
 from functools import partial
+import os
 import jax
 import jax.numpy as np
 from flax import linen as nn
@@ -296,11 +297,12 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
     Returns:
         ys (float32): the SSM outputs (S5 layer preactivations)      (L, H)
     """
-    # [DEBUG BF16] Check inputs for NaN
-    # jax.debug.print("[apply_ssm] Lambda_bar has NaN: {}, shape: {}", np.any(np.isnan(Lambda_bar)), Lambda_bar.shape)  # DEBUG BF16
-    # jax.debug.print("[apply_ssm] B_bar has NaN: {}, shape: {}", np.any(np.isnan(B_bar)), B_bar.shape)  # DEBUG BF16
-    # jax.debug.print("[apply_ssm] C_tilde has NaN: {}, shape: {}", np.any(np.isnan(C_tilde)), C_tilde.shape)  # DEBUG BF16
-    # jax.debug.print("[apply_ssm] input_sequence has NaN: {}, shape: {}, dtype: {}", np.any(np.isnan(input_sequence)), input_sequence.shape, input_sequence.dtype)  # DEBUG BF16
+    # Check if Pallas Sequential Scan is enabled (SRAM-resident, no HBM traffic)
+    use_pallas_seq = os.environ.get('USE_PALLAS_SEQ', '0') != '0'
+
+    if use_pallas_seq and not bidirectional:
+        from .ssm_pallas_seq import apply_ssm_pallas_seq
+        return apply_ssm_pallas_seq(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional)
 
     # Ensure input is FP32 for scan stability (Reference: 7DEC:354)
     input_fp32 = input_sequence.astype(np.float32)
