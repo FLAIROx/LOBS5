@@ -305,7 +305,9 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
     # Ensure input is FP32 for scan stability (Reference: 7DEC:354)
     input_fp32 = input_sequence.astype(np.float32)
 
-    # Broadcast Lambda_bar to (L, P), keep as complex64 (FP32) for scan
+    # Broadcast Lambda_bar to (L, P) - required by @jax.vmap'd binary_operator
+    # Note: This creates 48.8 MB of duplicated data, but removing it would require
+    # rewriting binary_operator without vmap (complex refactor)
     Lambda_elements = Lambda_bar * np.ones((input_fp32.shape[0], Lambda_bar.shape[0]))
 
     # BF16 batched matmul: B_bar @ u (optimized: single matmul instead of vmap)
