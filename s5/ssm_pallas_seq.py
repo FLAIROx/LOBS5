@@ -95,6 +95,9 @@ def sequential_scan_chunked(Lambda_bar, Bu_elements, C_tilde, conj_sym, chunk_si
     2. Uses BF16 matmul for C@xs (Tensor Core)
     3. Avoids O(L*P) Lambda broadcast
 
+    Note: For simplicity, if L is not divisible by chunk_size, we fall back
+    to the simple sequential scan.
+
     Args:
         Lambda_bar: (P,) complex64
         Bu_elements: (L, P) complex64
@@ -107,10 +110,12 @@ def sequential_scan_chunked(Lambda_bar, Bu_elements, C_tilde, conj_sym, chunk_si
     """
     L, P = Bu_elements.shape
     H = C_tilde.shape[0]
-    n_chunks = L // chunk_size
 
-    # Precompute Lambda^chunk_size for inter-chunk decay
-    Lambda_chunk = Lambda_bar ** chunk_size
+    # Fall back to simple scan if L is not divisible by chunk_size
+    if L % chunk_size != 0:
+        return sequential_scan_simple(Lambda_bar, Bu_elements, C_tilde, conj_sym)
+
+    n_chunks = L // chunk_size
 
     def process_chunk(carry, chunk_idx):
         """Process one chunk, returning state for next chunk."""

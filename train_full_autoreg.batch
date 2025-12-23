@@ -89,7 +89,7 @@ export JAX_PLATFORMS="cuda"
 # Based on Griffin Paper (arXiv:2402.19427): "Sequential scan is faster than associative scan"
 # Expected MFU: 15% → 20-25%
 export USE_PALLAS_SEQ=1
-export PALLAS_CHUNK_SIZE=64
+export PALLAS_CHUNK_SIZE=48  # Must divide L=12000 (12000/48=250 chunks)
 echo "[Pallas Seq] Enabled: USE_PALLAS_SEQ=$USE_PALLAS_SEQ, CHUNK_SIZE=$PALLAS_CHUNK_SIZE"
 
 # Multi-node JAX config
