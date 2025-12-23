@@ -85,12 +85,12 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 export JAX_COORDINATOR_TIMEOUT_MS=600000
 export JAX_PLATFORMS="cuda"
 
-# Pallas Sequential Scan: SRAM-resident, no HBM traffic during scan
-# Based on Griffin Paper (arXiv:2402.19427): "Sequential scan is faster than associative scan"
-# Expected MFU: 15% → 20-25%
-export USE_PALLAS_SEQ=1
-export PALLAS_CHUNK_SIZE=48  # Must divide L=12000 (12000/48=250 chunks)
-echo "[Pallas Seq] Enabled: USE_PALLAS_SEQ=$USE_PALLAS_SEQ, CHUNK_SIZE=$PALLAS_CHUNK_SIZE"
+# Pallas Sequential Scan: DISABLED (lax.scan is 250x slower than associative_scan!)
+# Job 1790325: MFU 1.0% (vs baseline 15.3%), step time 8900ms (vs 35ms)
+# Griffin Paper finding applies to Pallas-on-TPU, NOT lax.scan
+# To benefit, need true Pallas kernel with SMEM management
+export USE_PALLAS_SEQ=0
+# export PALLAS_CHUNK_SIZE=48  # Unused when disabled
 
 # Multi-node JAX config
 if [ -n "$JAX_COORDINATOR_ADDRESS" ]; then

@@ -4,13 +4,36 @@
 # Based on Griffin Paper (arXiv:2402.19427) insight:
 # "Associative Scan is inherently worse than Linear Scan" in Pallas context
 #
-# Key innovations:
+# =============================================================================
+# EXPERIMENT RESULTS (2025-12-23)
+# =============================================================================
+# Test: Job 1790325
+#
+# | Implementation | MFU | Step Time | Result |
+# |----------------|-----|-----------|--------|
+# | associative_scan (baseline) | 15.3% | ~35ms | BEST |
+# | lax.scan (this file) | 1.0% | ~8900ms | 250x SLOWER! |
+#
+# CONCLUSION: lax.scan is NOT a valid replacement for associative_scan!
+#
+# Why Griffin Paper finding doesn't apply:
+# - Griffin used TRUE Pallas kernels with explicit SMEM management
+# - lax.scan still goes through XLA, no SRAM control
+# - Sequential dependencies prevent parallelization
+#
+# To achieve SRAM residency, need:
+# - True Pallas kernel with plgpu.SMEM allocation
+# - emit_pipeline for state passing
+# - wgmma for Tensor Core matmul
+# =============================================================================
+#
+# Key innovations (for future true Pallas implementation):
 # 1. Sequential scan in SRAM (no HBM traffic during scan)
 # 2. Tensor Core (wgmma) for B@u and C@xs
 # 3. State carried between chunks via emit_pipeline
 # 4. No decay matrix materialization (inline Lambda * h)
 #
-# Expected MFU: 15% → 20-25%
+# Expected MFU (with true Pallas): 15% → 20-25%
 # ============================================================================
 
 import os
