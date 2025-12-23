@@ -234,3 +234,6 @@ train_full_autoreg.batch
 lob/Untitled-**
 logs_55M/** 
 logs_lobs5/** 
+bin/run_experiments/3.glog.ini
+logs/4.log.ini
+xla_pallas/** 
