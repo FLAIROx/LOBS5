@@ -27,6 +27,9 @@ from preproc import transform_L2_state
 import lob.encoding as encoding
 from lob.encoding import Message_Tokenizer, Vocab
 from lob.lobster_dataloader import LOBSTER_Dataset
+from time import time
+from gymnax_exchange.jaxob.jaxob_config import JAXLOB_Configuration
+
 
 
 # add git submodule to path to allow imports to work
@@ -151,6 +154,7 @@ def copy_orderbook(
 def get_sim(
         init_l2_book: jax.Array,
         replay_msgs_raw: jax.Array,
+        sim: OrderBook,
         # nOrders: int = 100,
         # nTrades: int = 100
         # sim_book_levels: int,
@@ -158,9 +162,6 @@ def get_sim(
     ) -> Tuple[OrderBook, jax.Array]:
     """
     """
-    # reset simulator : args are (nOrders, nTrades)
-    cfg=job.JAXLOB_Configuration(cancel_mode=job.cst.CancelMode.CANCEL_UNIFORM_AND_LARGE.value)
-    sim = OrderBook(cfg)
     # init simulator at the start of the sequence
     sim_state = sim.reset(init_l2_book)
     # return sim, sim_state
@@ -168,14 +169,25 @@ def get_sim(
     # so that sim is at the same state as the model
     replay = msgs_to_jnp(replay_msgs_raw)
     sim_state = sim.process_orders_array(sim_state, replay)
-    return sim, sim_state
+    return sim_state
+
+
+
+# get_sims_vmap = jax.jit(
+#     jax.vmap(
+#         get_sim,
+#         in_axes=(0, 0),
+#         out_axes=(None, 0)
+#     )
+# )
 
 get_sims_vmap = jax.jit(
-    jax.vmap(
+    jax.vmap( 
         get_sim,
-        in_axes=(0, 0),
-        out_axes=(None, 0)
-    )
+        in_axes=(0, 0,None),
+        out_axes=(0),
+    ),
+    static_argnums=(2,)
 )
 
 def get_dataset(
@@ -825,6 +837,7 @@ def generate(
         # e.g. to calculate perplexity
         # m_seq_eval: Optional[jax.Array] = None,  
     ) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    print("WARNING: Compiling the generate function, you should only see this once.")
 
     # id_gen = OrderIdGenerator()
     # l = Message_Tokenizer.MSG_LEN
@@ -1070,6 +1083,8 @@ def sample_new(
     )
 
     # all_metrics = []
+    sim_init = OrderBook(cfg=JAXLOB_Configuration(cancel_mode=job.cst.CancelMode.CANCEL_UNIFORM_AND_LARGE.value))
+
     for batch_i in tqdm(sample_i):
         print('BATCH', batch_i)
         # TODO: check if we can init the dataset without the raw data 
@@ -1082,6 +1097,7 @@ def sample_new(
 
         # transform book to volume image representation for model
         b_seq = transform_L2_state_batch(b_seq_pv, n_vol_series, tick_size)
+
 
         # encoded data
         m_seq_inp = m_seq[:, : seq_len]
@@ -1098,9 +1114,16 @@ def sample_new(
         m_seq_raw_eval = msg_seq_raw[:, n_msgs: ]
 
         # initialise simulator
-        sim_init, sim_states_init = get_sims_vmap(
+        # sim_init, sim_states_init = get_sims_vmap(
+        #     book_l2_init,  # book state before any messages
+        #     m_seq_raw_inp, # messages to replay to init sim
+        #     # TODO: consider passing nOrders, nTrades
+        # )
+
+        sim_states_init = get_sims_vmap(
             book_l2_init,  # book state before any messages
             m_seq_raw_inp, # messages to replay to init sim
+            sim_init,
             # TODO: consider passing nOrders, nTrades
         )
 
@@ -1118,6 +1141,8 @@ def sample_new(
         # print('sim_states_init.asks.shape', sim_states_init.asks.shape)
         # print('sim_states_init.bids.shape', sim_states_init.bids.shape)
         # print('sim_states_init.trades.shape', sim_states_init.trades.shape)
+        
+        start=time()
         m_seq_gen, b_seq_gen, msgs_decoded, l2_book_states, num_errors = generate_batched(
             sim_init,
             train_state,
@@ -1132,6 +1157,7 @@ def sample_new(
             sim_states_init, # in_axis = 0
             jax.random.split(rng_, batch_size), # in_axis = 0
         )
+        print(f"Time to generate a batch of size {batch_size}: {time()-start}")
         rng, rng_ = jax.random.split(rng)
         # TODO: save as metadata
         print('num_errors', num_errors)
