@@ -176,3 +176,6 @@ figures/
 *.pkl
 *.out
 *.prof
+
+gymnax_exchange/
+scratch/
