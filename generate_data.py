@@ -14,8 +14,8 @@ import sys
 # from AlphaTrade import gymnax_exchange
 # from AlphaTrade.gymnax_exchange.jaxob.jorderbook import OrderBook
 
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-#os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".25"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".9"
 
 import torch
 torch.multiprocessing.set_start_method('spawn')
