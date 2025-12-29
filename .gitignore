@@ -234,3 +234,8 @@ train_full_autoreg.batch
 lob/Untitled-**
 logs_55M/** 
 logs_lobs5/** 
+m3_kernels/** 
+xla_pallas/**
+**.ini
+new2
+docs/**
