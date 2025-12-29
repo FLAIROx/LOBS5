@@ -159,7 +159,8 @@ def get_sim(
     """
     """
     # reset simulator : args are (nOrders, nTrades)
-    sim = OrderBook()
+    cfg=job.JAXLOB_Configuration(cancel_mode=job.cst.CancelMode.CANCEL_UNIFORM_AND_LARGE.value)
+    sim = OrderBook(cfg)
     # init simulator at the start of the sequence
     sim_state = sim.reset(init_l2_book)
     # return sim, sim_state
