@@ -339,7 +339,7 @@ class LOBSTER_Dataset(Dataset):
             # the book state with the same index (prior to the message)
             book = book[seq_start + self.inference: seq_end + self.inference].copy()
             if self.return_raw_msgs:
-                book_l2_init = book[0, 1:].copy()
+                book_l2_init = book[0, 3:].copy()
 
             # tranform from L2 (price volume) representation to fixed volume image 
             if self.book_transform:
