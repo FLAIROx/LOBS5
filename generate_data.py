@@ -105,7 +105,7 @@ print('Loading metadata:', ckpt_path)
 args_ckpt = load_metadata(ckpt_path)
 
 # scale down to single GPU, single sample inference
-args_ckpt.bsz = batch_size #1, 10
+args_ckpt.bsz = 1 #1, 10
 args_ckpt.num_devices = 1
 
 batchnorm = args_ckpt.batchnorm
