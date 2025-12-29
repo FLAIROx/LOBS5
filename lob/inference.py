@@ -32,6 +32,7 @@ submodule_name = 'AlphaTrade'
 (parent_folder_path, current_dir) = os.path.split(os.path.abspath(''))
 sys.path.append(os.path.join(parent_folder_path, submodule_name))
 from gymnax_exchange.jaxob.jorderbook import OrderBook, LobState
+from gymnax_exchange.jaxob.jaxob_config import JAXLOB_Configuration
 import gymnax_exchange.jaxob.JaxOrderBookArrays as job
 # from gym_exchange.environment.base_env.assets.action import OrderIdGenerator
 
@@ -153,7 +154,8 @@ def get_sim(
     ) -> Tuple[OrderBook, jax.Array]:
     """"""
     # reset simulator : args are (nOrders, nTrades)
-    sim = OrderBook(nOrders, nTrades)
+    cfg=JAXLOB_Configuration(nOrders=nOrders,nTrades=nTrades,cancel_mode=job.cst.CancelMode.CANCEL_UNIFORM_AND_LARGE.value)
+    sim = OrderBook(cfg)
     # init simulator at the start of the sequence
     sim_state = sim.reset(init_l2_book)
     # replay sequence in simulator (actual)
@@ -1352,7 +1354,7 @@ def generate_repeated_rollouts(
     # run actual messages on sim_eval (once) to compare
     # convert m_seq_raw_eval to sim_msgs
     msgs_eval = msgs_to_jnp(m_seq_raw_eval[: n_gen_msgs])
-    sim_state_eval, l2_book_states_eval, _ = sim_init.process_orders_array_l2(sim_state_init, msgs_eval, l2_state_n)
+    sim_state_eval, l2_book_states_eval = sim_init.process_orders_array_l2(sim_state_init, msgs_eval, l2_state_n)
 
     # TODO: repeat for multiple scenarios from same input to average over
     #       --> parallelise? loaded data is the same, just different rngs

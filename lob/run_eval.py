@@ -15,10 +15,11 @@ sys.path.append(parent_folder_path)
 # add git submodule to path to allow imports to work
 submodule_name = 'AlphaTrade'
 (parent_folder_path, current_dir) = os.path.split(os.path.abspath(''))
-sys.path.append(os.path.join(parent_folder_path, submodule_name))
+sys.path.append(os.path.join(os.path.abspath(''), submodule_name))
 
+print(sys.path)
 from gymnax_exchange.jaxob.jorderbook import OrderBook
-import gymnax_exchange.jaxob.JaxOrderbook as job
+import gymnax_exchange.jaxob.JaxOrderBookArrays as job
 
 # from argparse import Namespace
 from glob import glob
@@ -109,8 +110,8 @@ par_state = ckpt['model']
 
 # deduplicate params (get saved per gpu in training)
 state = par_state.replace(
-    params=jax.tree_map(lambda x: x[0], par_state.params),
-    batch_stats=jax.tree_map(lambda x: x[0], par_state.batch_stats),
+    params=jax.tree.map(lambda x: x[0], par_state.params),
+    batch_stats=jax.tree.map(lambda x: x[0], par_state.batch_stats),
 )
 
 model = model_cls(training=False, step_rescale=1.0)
