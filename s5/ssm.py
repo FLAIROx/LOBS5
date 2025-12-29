@@ -377,8 +377,13 @@ def apply_ssm_rnn(Lambda_bar, B_bar, C_tilde, hidden, input_sequence, resets, co
     # Broadcast Lambda_bar, keep as complex64 (FP32) for scan
     Lambda_elements = Lambda_bar * np.ones((input_fp32.shape[0], Lambda_bar.shape[0]))
 
-    # BF16 matmul: B_bar @ u, returns complex64 (FP32) for scan
-    Bu_elements = jax.vmap(lambda u: complex_matvec_bf16_real_x(B_bar, u))(input_fp32)
+    # BF16 batched matmul: B_bar @ u (single matmul instead of vmap)
+    input_T = input_fp32.T.astype(np.bfloat16)  # (H, L)
+    B_re = B_bar.real.astype(np.bfloat16)  # (P, H)
+    B_im = B_bar.imag.astype(np.bfloat16)  # (P, H)
+    Bu_re = np.matmul(B_re, input_T)  # (P, L)
+    Bu_im = np.matmul(B_im, input_T)  # (P, L)
+    Bu_elements = (Bu_re.astype(np.float32) + 1j * Bu_im.astype(np.float32)).T  # (L, P)
 
     # Prepend hidden state (complex64)
     Lambda_elements = np.concatenate([
@@ -408,11 +413,16 @@ def apply_ssm_rnn(Lambda_bar, B_bar, C_tilde, hidden, input_sequence, resets, co
     if bidirectional:
         raise ValueError("Cannot expect a bidirectional view if doing rnn")
 
-    # BF16 matmul: C_tilde @ x, returns complex64 (FP32) (Reference: 7DEC:200-201)
-    if conj_sym:
-        return hidden_out, jax.vmap(lambda x: 2 * complex_matvec_bf16(C_tilde, x).real)(xs)
-    else:
-        return hidden_out, jax.vmap(lambda x: complex_matvec_bf16(C_tilde, x).real)(xs)
+    # BF16 batched matmul: C_tilde @ xs (single matmul instead of vmap)
+    xs_T = xs.T  # (P, L)
+    C_re = C_tilde.real.astype(np.bfloat16)  # (H, P)
+    C_im = C_tilde.imag.astype(np.bfloat16)  # (H, P)
+    xs_re = xs_T.real.astype(np.bfloat16)  # (P, L)
+    xs_im = xs_T.imag.astype(np.bfloat16)  # (P, L)
+    ys_re = np.matmul(C_re, xs_re) - np.matmul(C_im, xs_im)  # (H, L)
+
+    ys = (2 * ys_re if conj_sym else ys_re).T.astype(np.float32)  # (L, H)
+    return hidden_out, ys
 
 
 class S5SSM(nn.Module):
