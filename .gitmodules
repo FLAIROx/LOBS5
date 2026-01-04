@@ -1,3 +1,12 @@
 [submodule "Alphatrade"]
 	path = Alphatrade
 	url = https://github.com/KangOxford/AlphaTrade.git
+[submodule "HyperscaleES"]
+	path = HyperscaleES
+	url = https://github.com/ESHyperscale/HyperscaleES.git
+[submodule "6921893bfe4f5965425af947"]
+	path = 6921893bfe4f5965425af947
+	url = https://git.overleaf.com/6921893bfe4f5965425af947
+[submodule "ml-cross-entropy"]
+	path = ml-cross-entropy
+	url = https://github.com/apple/ml-cross-entropy.git
