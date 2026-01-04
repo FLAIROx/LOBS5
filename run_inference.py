@@ -54,6 +54,7 @@ from lob.encoding import Vocab, Message_Tokenizer
 # from lobster_dataloader import LOBSTER_Dataset, LOBSTER_Subset, LOBSTER_Sampler, LOBSTER
 
 import preproc
+from time import time
 # import inference
 from lob import inference_no_errcorr as inference
 import lob.validation_helpers as valh
@@ -75,6 +76,8 @@ if __name__ == "__main__":
     parser.add_argument('--stock', type=str, default='GOOG', help='stock to evaluate')
     parser.add_argument('--checkpoint_step', type=int, default=None, help='Which checkpoint step to load')
     parser.add_argument('--test_split', type=float, default=0.1, help='Which test split to use')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for inference')
+    parser.add_argument('--n_sequences', type=int, default=1024, help='Number of sequences to generate')
     # Add custom paths for Isambard/custom runs
     parser.add_argument('--data_dir', type=str, default=None, help='Custom data directory')
     parser.add_argument('--ckpt_path', type=str, default=None, help='Custom checkpoint path')
@@ -119,7 +122,7 @@ if __name__ == "__main__":
     ##################################################
 
     n_gen_msgs = 500  #500 # how many messages to generate into the future
-    n_messages_conditional = 0
+    n_messages_conditional = 500  # conditional generation: use 500 messages as context
     n_eval_messages = n_gen_msgs  # how many to load from dataset 
     eval_seq_len = (n_eval_messages-1) * Message_Tokenizer.MSG_LEN
     cond_seq_len = (n_messages_conditional) * Message_Tokenizer.MSG_LEN
@@ -222,13 +225,13 @@ if __name__ == "__main__":
 
 
 
-    # Adjust n_samples to not exceed dataset size
-    batch_size = 2048
-    n_samples = min(2048 * 4, (len(ds) // batch_size) * batch_size)
-    print(f"Dataset size: {len(ds)}, using n_samples: {n_samples}, batch_size: {batch_size}") 
+    n_samples = run_args.n_sequences
+    batch_size = run_args.batch_size
+    print(f"Dataset size: {len(ds)}, using n_samples: {n_samples}, batch_size: {batch_size}")
 
     # m_seq_gen, b_seq_gen, msgs_decoded, l2_book_states, num_errors = inference.sample_new(
     # saves data to disk
+    start = time()
     inference.sample_new(
         n_samples,
         batch_size,
@@ -243,8 +246,9 @@ if __name__ == "__main__":
         v.ENCODING,
         run_args.stock,
         save_folder=save_dir,
-        sample_top_n= sample_top_n,
+        sample_top_n=sample_top_n,
         args=args,
-        conditional= False,
+        conditional=True,  # conditional generation
         overfit_debug=overfit_debug,
     )
+    print(f"Generation time for {n_samples} sequences across {batch_size} batch size: {time()-start}")

@@ -33,7 +33,7 @@ import preproc as preproc
 import lob.encoding as encoding
 from lob.encoding import Message_Tokenizer, Vocab
 from lob.lobster_dataloader import LOBSTER_Dataset
-
+import chex
 
 # add git submodule to path to allow imports to work
 submodule_name = 'AlphaTrade'
@@ -920,31 +920,47 @@ def generate(
     # m_seq_raw = m_seq_raw.copy()
     # num_errors = 0
     print("WARNING: Compiling the generate function, you should only see this once.")
-    m_seq_cond=m_seq_cond.copy()
-    b_seq_cond=b_seq_cond.copy()
+    # m_seq_cond=m_seq_cond.copy()
+    # b_seq_cond=b_seq_cond.copy()
 
     with jax.ensure_compile_time_eval():
         valid_mask_array = valh.syntax_validation_matrix()
 
-    # valid_mask_array=None 
+    # valid_mask_array=None
     # jax.debug.print("Note: Valid mask turned off in generate_token")
 
     if not debug_book:
         b_seq_real=None
 
-    
+
     if conditional:
-        hidden_state,_= valh.apply_model(init_hidden,
-                                        m_seq_cond[:-1], #All but the last token go in here to run fwd the hidden state. 
-                                        b_seq_cond[:-1], # All of the books, because last book needed for 21 1st toks of last message. 
-                                        train_state,
-                                        model,
-                                        batchnorm,
-                                        True)
-        init_token=m_seq_cond[-1:]
-        init_book=b_seq_cond[-1:]
-        init_time=valh.get_first_time(m_seq_cond,encoder)
-        init_ema=False
+        def roll_hidden_scan(carry, xs):
+            m_seq, b_seq = xs
+            h = carry
+            h, log = valh.apply_model(h,
+                                m_seq,  # All but the last token go in here to run fwd the hidden state.
+                                b_seq,  # All of the books, because last book needed for 21 1st toks of last message.
+                                train_state,
+                                model,
+                                batchnorm,
+                                True)
+            carry = h
+            return carry, None
+
+
+        print(m_seq_cond[:-1], b_seq_cond[:-1])
+        # Split arrays into N chunks along the leading axis
+        N = 100
+        chex.assert_is_divisible(m_seq_cond[:-1].shape[0], N)
+        chex.assert_is_divisible(b_seq_cond[:-1].shape[0], N)
+        m_seq_cond_split = m_seq_cond[:-1].reshape((N, -1))
+        b_seq_cond_split = b_seq_cond[:-1].reshape((N, -1) + b_seq_cond[:-1].shape[1:])
+
+        hidden_state, _ = jax.lax.scan(roll_hidden_scan, init_hidden, (m_seq_cond_split, b_seq_cond_split))
+        init_token = m_seq_cond[-1:]
+        init_book = b_seq_cond[-1:]
+        init_time = jnp.asarray(valh.get_first_time(m_seq_cond, encoder))
+        init_ema = False
     else:
         #If unconditional generation, then the initial token
         #  and book have one less dimension.   
@@ -1220,6 +1236,7 @@ def sample_new(
     # print(jax.tree_util.tree_map(lambda x : x.shape, init_time_batched ))
     sim_init = OrderBook(cfg=JAXLOB_Configuration(cancel_mode=cst.CancelMode.CANCEL_UNIFORM_AND_LARGE.value))
     # all_metrics = []
+    initial = True  # Flag for AOT compilation on first batch
     for batch_i in tqdm(sample_i):
         # print('BATCH', batch_i)
         # TODO: check if we can init the dataset without the raw data 
@@ -1304,25 +1321,47 @@ def sample_new(
 
         print('Before generation, real book is (should be none):', real_book)
 
+        # AOT compile on first batch, then reuse compiled function
+        if initial:
+            initial = False
+            generate_traced = generate_batched.trace(
+                sim_init,  # static
+                train_state,  # None map, static?
+                model,  # static
+                batchnorm,  # static
+                encoder,  # None map, static?
+                sample_top_n,  # sample from entire distribution # static
+                tick_size,  # static
+                m_seq_inp[:],  # in_axis = 0
+                b_seq_inp,  # in_axis = 0
+                n_gen_msgs,  # static
+                sim_states_init,  # in_axis = 0
+                jax.random.split(rng_, batch_size),  # in_axis = 0
+                init_hidden_batched,
+                conditional,  # static
+                init_time_batched,
+                debug_book,  # static
+                real_book,
+            )
+            # print("trace complete")
+            # print(generate_traced.jaxpr)
+            generate_lowered = generate_traced.lower()
+            # print("lowering complete")
+            # print(generate_lowered.as_text())
 
-        start_time = time.time()        
-        msgs_decoded, l2_book_states, num_errors,mgs_tokens = generate_batched(
-            sim_init, # static
-            train_state,  # None map, static? 
-            model, # static
-            batchnorm, # static
-            encoder, # None map, static?
-            sample_top_n,  # sample from entire distribution # static
-            tick_size, # static
-            m_seq_inp[:], # in_axis = 0
-            b_seq_inp, # in_axis = 0
-            n_gen_msgs, # static
-            sim_states_init, # in_axis = 0 
-            jax.random.split(rng_, batch_size), # in_axis = 0
+            generate_compiled = generate_lowered.compile()
+            # print("Cost analysis:", generate_compiled.cost_analysis())
+
+        start_time = time.time()
+        msgs_decoded, l2_book_states, num_errors, mgs_tokens = generate_compiled(
+            train_state,  # None map, static?
+            encoder,  # None map, static?
+            m_seq_inp[:],  # in_axis = 0
+            b_seq_inp,  # in_axis = 0
+            sim_states_init,  # in_axis = 0
+            jax.random.split(rng_, batch_size),  # in_axis = 0
             init_hidden_batched,
-            conditional,  # static
             init_time_batched,
-            debug_book, # static
             real_book,
         )
         end_time = time.time()
