@@ -180,11 +180,13 @@ class ES_StackedEncoder(Model):
 
         # Pass through sequence layers with hidden state management
         new_hiddens = []
+        fp = common_params.frozen_params or {}
         for i in range(n_layers):
+            layer_key = f'layer_{i}'
             layer_params = common_params._replace(
-                frozen_params=common_params.frozen_params.get(f'layer_{i}', {}),
-                params=common_params.params[f'layer_{i}'],
-                es_tree_key=common_params.es_tree_key[f'layer_{i}'],
+                frozen_params=fp.get(layer_key, {}) if isinstance(fp, dict) else {},
+                params=common_params.params[layer_key],
+                es_tree_key=common_params.es_tree_key.get(layer_key, common_params.es_tree_key) if isinstance(common_params.es_tree_key, dict) else common_params.es_tree_key,
             )
             hidden_i, x = ES_SequenceLayer._forward_rnn(
                 layer_params, hiddens[i], x, resets

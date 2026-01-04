@@ -355,10 +355,18 @@ class ESTrainer:
         print(f"[INIT]   background_mode: {config.background_mode}")
 
     def _init_noiser(self):
-        """Initialize EGGROLL noiser for Policy."""
+        """Initialize EGGROLL noiser for Policy with gradient clipping."""
+        import optax
         config = self.config
         all_noisers = _get_all_noisers()
         NOISER = all_noisers[config.noiser]
+
+        # Create optimizer with gradient clipping to handle high-variance fitness
+        grad_clip = getattr(config, 'grad_clip', 1.0)
+        solver = optax.chain(
+            optax.clip_by_global_norm(grad_clip),
+            optax.sgd(learning_rate=config.lr),
+        )
 
         self.noiser_cls = NOISER
         self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
@@ -368,6 +376,7 @@ class ESTrainer:
             rank=config.lora_rank,
             freeze_nonlora=False,
             noise_reuse=0,
+            solver=solver,
         )
 
     def _init_jaxlob(self):
@@ -863,12 +872,46 @@ class ESTrainer:
 
         return jnp.mean(fitnesses), fitnesses, aggregated_info
 
-    def train(self, n_epochs: Optional[int] = None):
-        """Run full training loop."""
+    def train(self, n_epochs: Optional[int] = None, resume_from: Optional[str] = None):
+        """Run full training loop with automatic checkpointing.
+
+        Args:
+            n_epochs: Number of epochs to train (default: config.n_epochs)
+            resume_from: Path to checkpoint directory to resume from
+        """
+        import os
         print("[TRAIN] Starting training loop")
 
         n_epochs = n_epochs or self.config.n_epochs
         key = jax.random.PRNGKey(self.config.seed)
+
+        # Checkpointing configuration
+        checkpoint_dir = getattr(self.config, 'checkpoint_dir', './es_checkpoints')
+        checkpoint_every = getattr(self.config, 'checkpoint_every', 50)
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Resume from checkpoint if specified
+        start_epoch = 0
+        best_fitness = -float('inf')
+        if resume_from:
+            try:
+                self.load_checkpoint(resume_from)
+                # Load training state
+                import pickle
+                state_path = os.path.join(resume_from, 'training_state.pkl')
+                if os.path.exists(state_path):
+                    with open(state_path, 'rb') as f:
+                        state = pickle.load(f)
+                    start_epoch = state.get('epoch', 0) + 1
+                    best_fitness = state.get('best_fitness', -float('inf'))
+                    key = jax.random.PRNGKey(self.config.seed)
+                    # Fast-forward the key
+                    for _ in range(start_epoch):
+                        key, _ = jax.random.split(key)
+                print(f"[TRAIN] Resumed from epoch {start_epoch}, best_fitness={best_fitness:.4f}")
+            except Exception as e:
+                print(f"[TRAIN] Warning: Could not resume from {resume_from}: {e}")
+                print("[TRAIN] Starting fresh training")
 
         # Initialize W&B
         wandb_run = None
@@ -887,7 +930,8 @@ class ESTrainer:
                     'lora_rank': self.config.lora_rank,
                     'checkpoint': self.config.lobs5_checkpoint,
                     'background_mode': self.config.background_mode,
-                }
+                },
+                resume='allow' if resume_from else None,
             )
             print(f"[TRAIN] W&B initialized: {wandb_run.url}")
 
@@ -895,16 +939,32 @@ class ESTrainer:
         initial_sim_state, initial_msg_history = self._create_initial_sim_state()
 
         # Training loop
-        best_fitness = -float('inf')
-        for epoch in tqdm(range(n_epochs), desc='ES Training'):
+        for epoch in tqdm(range(start_epoch, n_epochs), desc='ES Training', initial=start_epoch, total=n_epochs):
             key, epoch_key = jax.random.split(key)
 
             mean_fitness, fitnesses, epoch_info = self.train_epoch(
                 epoch_key, epoch, initial_sim_state, initial_msg_history
             )
 
-            if mean_fitness > best_fitness:
+            # Track best model
+            is_best = mean_fitness > best_fitness
+            if is_best:
                 best_fitness = mean_fitness
+                # Save best model
+                best_path = os.path.join(checkpoint_dir, 'best')
+                self.save_checkpoint(best_path)
+                self._save_training_state(best_path, epoch, best_fitness)
+                print(f"[TRAIN] New best model saved: fitness={best_fitness:.4f}")
+
+            # Periodic checkpointing
+            if (epoch + 1) % checkpoint_every == 0:
+                ckpt_path = os.path.join(checkpoint_dir, f'epoch_{epoch}')
+                self.save_checkpoint(ckpt_path)
+                self._save_training_state(ckpt_path, epoch, best_fitness)
+                # Also save as 'latest' for easy resumption
+                latest_path = os.path.join(checkpoint_dir, 'latest')
+                self.save_checkpoint(latest_path)
+                self._save_training_state(latest_path, epoch, best_fitness)
 
             # Log to W&B
             if wandb_run:
@@ -928,10 +988,28 @@ class ESTrainer:
             if epoch % 10 == 0:
                 print(f"Epoch {epoch}: mean={mean_fitness:.4f}, best={best_fitness:.4f}, std={jnp.std(fitnesses):.4f}")
 
+        # Save final checkpoint
+        final_path = os.path.join(checkpoint_dir, 'final')
+        self.save_checkpoint(final_path)
+        self._save_training_state(final_path, n_epochs - 1, best_fitness)
+        print(f"[TRAIN] Final checkpoint saved to {final_path}")
+
         if wandb_run:
             wandb_run.finish()
 
         return self.lobs5_init.params
+
+    def _save_training_state(self, path: str, epoch: int, best_fitness: float):
+        """Save training state for resumption."""
+        import os
+        import pickle
+        os.makedirs(path, exist_ok=True)
+        state = {
+            'epoch': epoch,
+            'best_fitness': best_fitness,
+        }
+        with open(os.path.join(path, 'training_state.pkl'), 'wb') as f:
+            pickle.dump(state, f)
 
     def save_checkpoint(self, path: str):
         """Save current policy params to checkpoint."""

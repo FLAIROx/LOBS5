@@ -243,11 +243,13 @@ class ES_SequenceLayer(Model):
             x = call_submodule(ES_LayerNorm, 'norm', common_params, x)
 
         # SSM in RNN mode - need to extract SSM submodule params
-        ssm_frozen = common_params.frozen_params.get('ssm', common_params.frozen_params)
+        # Handle None frozen_params safely
+        fp = common_params.frozen_params or {}
+        ssm_frozen = fp.get('ssm', fp) if isinstance(fp, dict) else fp
         ssm_params = common_params._replace(
             frozen_params=ssm_frozen,
             params=common_params.params['ssm'],
-            es_tree_key=common_params.es_tree_key['ssm'],
+            es_tree_key=common_params.es_tree_key.get('ssm', common_params.es_tree_key) if isinstance(common_params.es_tree_key, dict) else common_params.es_tree_key,
         )
         hidden, x = S5SSMParams._forward_rnn(ssm_params, hidden, x, resets)
 

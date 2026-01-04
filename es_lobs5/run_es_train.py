@@ -54,6 +54,18 @@ def create_parser():
     parser.add_argument('--task_size', type=int, default=500)
     parser.add_argument('--tick_size', type=int, default=100)
 
+    # Training stability
+    parser.add_argument('--grad_clip', type=float, default=1.0,
+                        help='Gradient clipping norm (default: 1.0)')
+
+    # Checkpointing
+    parser.add_argument('--checkpoint_dir', type=str, default='./es_checkpoints',
+                        help='Directory to save checkpoints')
+    parser.add_argument('--checkpoint_every', type=int, default=50,
+                        help='Save checkpoint every N epochs')
+    parser.add_argument('--resume_from', type=str, default=None,
+                        help='Resume training from checkpoint directory')
+
     # Other
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output_dir', type=str, default='./es_checkpoints')
@@ -78,6 +90,10 @@ def main():
     print(f"Background mode: {args.background_mode}")
     print(f"Threads: {args.n_threads}")
     print(f"Epochs: {args.n_epochs}")
+    print(f"Grad clip: {args.grad_clip}")
+    print(f"Checkpoint dir: {args.checkpoint_dir}")
+    if args.resume_from:
+        print(f"Resuming from: {args.resume_from}")
     print("=" * 60)
 
     # Validate
@@ -89,7 +105,7 @@ def main():
 
     # Create and run trainer
     trainer = ESTrainer(args)
-    trainer.train()
+    trainer.train(resume_from=args.resume_from)
 
     print("=" * 60)
     print("Training completed!")
