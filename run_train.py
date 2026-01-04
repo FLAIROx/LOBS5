@@ -52,10 +52,20 @@ if __name__ == "__main__":
 			"ssm_lr_base": 0.00003, "lr_factor": 1,
 			"wandb_project": "lobs5-2.5B-deep-d4096"
 		},
+		"2.2B-Wide": {
+			"d_model": 4704, "n_layers": 32, "blocks": 56, "ssm_size_base": 4704, "bsz": 1,
+			"ssm_lr_base": 0.000032, "lr_factor": 1,
+			"wandb_project": "lobs5-2.2B-wide-d4704"
+		},
+		"2.2B-Deep": {
+			"d_model": 4352, "n_layers": 48, "blocks": 64, "ssm_size_base": 4352, "bsz": 1,
+			"ssm_lr_base": 0.000032, "lr_factor": 1,
+			"wandb_project": "lobs5-2.2B-deep-d4352"
+		},
 		"2B-Wide": {
-			"d_model": 4608, "n_layers": 32, "blocks": 56, "ssm_size_base": 4608, "bsz": 1,
+			"d_model": 4480, "n_layers": 32, "blocks": 56, "ssm_size_base": 4480, "bsz": 4,
 			"ssm_lr_base": 0.000035, "lr_factor": 1,
-			"wandb_project": "lobs5-2B-wide-d4608"
+			"wandb_project": "lobs5-2B-wide-d4480"
 		},
 		"2B-Deep": {
 			"d_model": 4096, "n_layers": 44, "blocks": 64, "ssm_size_base": 4096, "bsz": 1,
@@ -63,9 +73,9 @@ if __name__ == "__main__":
 			"wandb_project": "lobs5-2B-deep-d4096"
 		},
 		"1.8B-Wide": {
-			"d_model": 4096, "n_layers": 32, "blocks": 56, "ssm_size_base": 4096, "bsz": 1,
+			"d_model": 4144, "n_layers": 32, "blocks": 56, "ssm_size_base": 4144, "bsz": 4,
 			"ssm_lr_base": 0.00004, "lr_factor": 1,
-			"wandb_project": "lobs5-1.8B-wide-d4096"
+			"wandb_project": "lobs5-1.8B-wide-d4144"
 		},
 		"1.8B-Deep": {
 			"d_model": 3840, "n_layers": 40, "blocks": 60, "ssm_size_base": 3840, "bsz": 1,
@@ -82,7 +92,7 @@ if __name__ == "__main__":
 			"ssm_lr_base": 0.00010, "lr_factor": 1,
 			"wandb_project": "lobs5-1B-d3072"
 		},
-		"300M": {
+		"360M": {
 			"d_model": 2048, "n_layers": 24, "blocks": 32, "ssm_size_base": 2048, "bsz": 2,
 			"ssm_lr_base": 0.00020, "lr_factor": 1,
 			"wandb_project": "lobs5-300M-d2048"
