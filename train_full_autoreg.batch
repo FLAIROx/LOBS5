@@ -20,6 +20,21 @@ echo "GPUs per node: 4"
 echo "Total GPUs: $((SLURM_NNODES * 4))"
 echo "============================================"
 
+# ============================================
+# Model Preset Configuration
+# ============================================
+# Usage:
+#   MODEL_PRESET=55M sbatch train_full_autoreg.batch
+#   MODEL_PRESET=1B sbatch train_full_autoreg.batch
+#   MODEL_PRESET=1.4B sbatch train_full_autoreg.batch
+#
+# Available presets: 1.4B, 1B, 300M, 55M
+# If not set, defaults to individual parameter values below
+# ============================================
+MODEL_PRESET=${MODEL_PRESET:-1B}
+echo "[*] Model preset: $MODEL_PRESET"
+export MODEL_PRESET
+
 # Create logs directory
 mkdir -p logs_lobs5
 
@@ -31,11 +46,8 @@ GPUS_PER_NODE=4
 NNODES=$SLURM_NNODES
 TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
 
-# Batch size configuration
-PER_GPU_BSZ=${PER_GPU_BSZ:-16}
-EFFECTIVE_BSZ=$((PER_GPU_BSZ * TOTAL_GPUS))
-
-echo "[*] Batch size: $PER_GPU_BSZ per GPU × $TOTAL_GPUS GPUs = $EFFECTIVE_BSZ effective"
+echo "[*] Total GPUs: $TOTAL_GPUS ($NNODES nodes × $GPUS_PER_NODE GPUs/node)"
+echo "[*] Batch size will be set by MODEL_PRESET ($MODEL_PRESET)"
 
 # Multi-Node Setup
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
@@ -197,15 +209,13 @@ nvidia-smi --list-gpus | head -4
 # Run training
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
 python -u -B run_train.py \
+    --model_preset='"$MODEL_PRESET"' \
     --USE_WANDB=True \
     --wandb_entity=kang-oxford \
     --C_init=trunc_standard_normal \
     --prenorm=True \
     --batchnorm=False \
     --bidirectional=False \
-    --blocks=16 \
-    --bsz='"$EFFECTIVE_BSZ"' \
-    --d_model=1024 \
     --dataset=lobster-prediction \
     --merging=padded \
     --dir_name="'"$DATA_DIR"'" \
@@ -215,12 +225,8 @@ python -u -B run_train.py \
     --dt_global=False \
     --epochs=20 \
     --jax_seed=42 \
-    --lr_factor=1 \
-    --n_layers=12 \
     --opt_config=standard \
     --p_dropout=0.0 \
-    --ssm_lr_base=0.0005 \
-    --ssm_size_base=1024 \
     --warmup_end=1 \
     --weight_decay=0.05 \
     --msg_seq_len=500 \
@@ -243,6 +249,15 @@ python -u -B run_train.py \
     --use_bf16=True \
     --token_mode=24 \
 '
+    # NOTE: The following parameters are now controlled by --model_preset:
+    #   --blocks (preset controls)
+    #   --bsz (preset controls)
+    #   --d_model (preset controls)
+    #   --n_layers (preset controls)
+    #   --ssm_size_base (preset controls)
+    #   --ssm_lr_base (preset controls)
+    #   --lr_factor (preset controls)
+    #   --wandb_project (preset controls)
     # --restore=/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/likely-aardvark-15_p4k79dtn \
     # --restore_step=6
 

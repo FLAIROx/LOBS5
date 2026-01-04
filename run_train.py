@@ -38,6 +38,32 @@ if __name__ == "__main__":
 	#tf.config.experimental.set_memory_growth(physical_devices[0], True)
 	#tf.config.experimental.set_visible_devices([], "GPU")
 
+	# ============================================
+	# Model Presets: Pre-configured Model Settings
+	# ============================================
+	MODEL_PRESETS = {
+		"1.4B": {
+			"d_model": 3584, "n_layers": 32, "blocks": 56, "ssm_size_base": 3584, "bsz": 2,
+			"ssm_lr_base": 0.00005, "lr_factor": 1,
+			"wandb_project": "lobs5-1.4B-d3584"
+		},
+		"1B": {
+			"d_model": 3072, "n_layers": 32, "blocks": 48, "ssm_size_base": 3072, "bsz": 2,
+			"ssm_lr_base": 0.0001, "lr_factor": 1,
+			"wandb_project": "lobs5-1B-d3072"
+		},
+		"300M": {
+			"d_model": 2048, "n_layers": 24, "blocks": 32, "ssm_size_base": 2048, "bsz": 2,
+			"ssm_lr_base": 0.0002, "lr_factor": 1,
+			"wandb_project": "lobs5-300M-d2048"
+		},
+		"55M": {
+			"d_model": 1024, "n_layers": 12, "blocks": 16, "ssm_size_base": 1024, "bsz": 12,
+			"ssm_lr_base": 5e-5, "lr_factor": 1,
+			"wandb_project": "lobs5-55M-d1024"
+		},
+	}
+
 	parser = argparse.ArgumentParser()
 
 	parser.add_argument("--USE_WANDB", type=str2bool, default=True,
@@ -85,6 +111,11 @@ if __name__ == "__main__":
 		     			help="keep DataLoader workers alive between epochs")
 	parser.add_argument("--enable_goodput_monitor", type=str2bool, default=False,
 		     			help="enable goodput monitoring (data loading vs compute time)")
+
+	# Model Preset (overrides individual model parameters if specified)
+	parser.add_argument("--model_preset", type=str, default=None,
+						choices=list(MODEL_PRESETS.keys()),
+						help="Pre-configured model settings: 1.4B, 1B, 300M, 55M. Overrides d_model, n_layers, blocks, ssm_size_base, bsz, ssm_lr_base, lr_factor, wandb_project")
 
 	# Model Parameters
 	parser.add_argument("--n_message_layers", type=int, default=2,  # 2
@@ -194,6 +225,18 @@ if __name__ == "__main__":
 				help="Use BF16 mixed precision training")
 
 	args = parser.parse_args()
+
+	# ============================================
+	# Apply Model Preset (if specified)
+	# ============================================
+	if args.model_preset is not None:
+		preset = MODEL_PRESETS[args.model_preset]
+		print(f"[*] Using model preset: {args.model_preset}")
+		for key, value in preset.items():
+			setattr(args, key, value)
+		print(f"    d_model={args.d_model}, n_layers={args.n_layers}, blocks={args.blocks}, ssm_size_base={args.ssm_size_base}")
+		print(f"    bsz={args.bsz}, ssm_lr_base={args.ssm_lr_base}, lr_factor={args.lr_factor}")
+		print(f"    wandb_project={args.wandb_project}")
 
 	# Set BF16 environment variable based on command-line argument
 	os.environ['USE_BF16'] = '1' if args.use_bf16 else '0'
