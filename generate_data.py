@@ -14,8 +14,8 @@ import sys
 # from AlphaTrade import gymnax_exchange
 # from AlphaTrade.gymnax_exchange.jaxob.jorderbook import OrderBook
 
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-#os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".25"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".9"
 
 import torch
 torch.multiprocessing.set_start_method('spawn')
@@ -32,6 +32,7 @@ torch.multiprocessing.set_start_method('spawn')
 
 import jax
 from lob.encoding import Vocab, Message_Tokenizer
+from time import time
 
 from lob import inference_no_errcorr as inference
 from lob.init_train import init_train_state, load_checkpoint, load_metadata, load_args_from_checkpoint
@@ -43,8 +44,8 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument(
     "--stock", type=str)
-parser.add_argument(
-    "--save_folder", type=str, default='/nfs/home/peern/LOBS5/data_saved/m500/')
+# parser.add_argument(
+#     "--save_folder", type=str, default='/nfs/home/peern/LOBS5/data_saved/m500/')
 parser.add_argument(
     "--n_gen_msgs", type=int,
 	help="how many messages to generate following each input sequence")
@@ -56,8 +57,8 @@ parser.add_argument(
 	help="how many sequences to generate in parallel (vmap)")
 parser.add_argument(
     "--model_size", type=str, default='large',)
-parser.add_argument(
-    "--data_dir", type=str, default='/nfs/home/peern/LOBS5/data/test_set/',)
+# parser.add_argument(
+#     "--data_dir", type=str, default='/nfs/home/peern/LOBS5/data/test_set/',)
 
 args = parser.parse_args()
 
@@ -82,15 +83,23 @@ rng, rng_ = jax.random.split(rng)
 
 stock = args.stock # 'GOOG', 'INTC'
 
-if stock == 'GOOG':
-    # ckpt_path = './checkpoints/treasured-leaf-149_84yhvzjt/' # 0.5 y GOOG, (full model)
-    ckpt_path = './checkpoints/denim-elevator-754_czg1ss71/' # large model
-elif stock == 'INTC':
-    # ckpt_path = './checkpoints/pleasant-cherry-152_i6h5n74c/' # 0.5 y INTC, (full model)
-    # TODO:
-    ckpt_path = '.'
+
+if args.stock == 'GOOG':
+    ckpt_path = '/home/myuser/data/checkpoints/lobs5_v1/denim-elevator-754_czg1ss71/' #
+    # ckpt_path = '/home/myuser/data/checkpoints/lobs5_v2/dazzling-meadow-75_zpp3bf6z/' 
+    data_dir = '/home/myuser/data/processed_data/GOOG/2023_Jan'
+    save_dir = '/home/myuser/data/evalsequences/lobs5v1/GOOG/2023_Jan'
+elif args.stock == 'INTC':
+    # ckpt_path = '../checkpoints/pleasant-cherry-152_i6h5n74c/' # 0.5 y INTC, (full model)
+    # data_dir = '/nfs/home/peern/LOBS5/data/test_set/INTC/'
+    # save_dir = '/nfs/home/peern/LOBS5/data/results/INTC/inference/'
+    # ckpt_path = '/home/myuser/data/checkpoints/lobs5_v2/dazzling-meadow-75_zpp3bf6z/' # 0.5 y GOOG, (full model)
+    ckpt_path = '/home/myuser/data/checkpoints/lobs5_v1/eager-sea-755_2rw1ofs3/' # 0.5 y GOOG, (full model)
+    data_dir = '/home/myuser/data/processed_data/INTC/2023_Jan'
+    save_dir = '/home/myuser/data/evalsequences/s5v1/INTC/2023_Jan'
 else:
     raise ValueError(f'stock {stock} not recognized')
+
 
 print('Loading metadata:', ckpt_path)
 args_ckpt = load_metadata(ckpt_path)
@@ -125,7 +134,7 @@ model = model_cls(training=False, step_rescale=1.0)
 
 # entire test set after training data
 
-data_dir = args.data_dir + stock
+# data_dir = args.data_dir
 # if stock == 'GOOG':
 #     data_dir = args.data_dir + '/GOOG/'
 # elif stock == 'INTC':
@@ -138,6 +147,7 @@ ds = inference.get_dataset(data_dir, n_messages, n_eval_messages)
 print('Generating...')
 # m_seq_gen, b_seq_gen, msgs_decoded, l2_book_states, num_errors = inference.sample_new(
 # saves data to disk
+start= time()
 inference.sample_new(
     n_samples,
     batch_size,
@@ -151,6 +161,7 @@ inference.sample_new(
     batchnorm,
     v.ENCODING,
     stock,
-    save_folder=args.save_folder + '/' + stock + '/',
+    save_folder=save_dir,
 )
+print(f"Time taken to generate {n_samples} across {batch_size} batches: ",time()-start)
 print('DONE.')
