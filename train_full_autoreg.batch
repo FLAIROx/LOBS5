@@ -27,13 +27,20 @@ echo "============================================"
 #   MODEL_PRESET=55M sbatch train_full_autoreg.batch
 #   MODEL_PRESET=1B sbatch train_full_autoreg.batch
 #   MODEL_PRESET=1.4B sbatch train_full_autoreg.batch
+#   PER_GPU_BSZ=4 MODEL_PRESET=1.4B sbatch train_full_autoreg.batch
 #
 # Available presets: 1.4B, 1B, 300M, 55M
 # If not set, defaults to individual parameter values below
+# PER_GPU_BSZ overrides the preset's batch size (optional)
 # ============================================
 MODEL_PRESET=${MODEL_PRESET:-1B}
 echo "[*] Model preset: $MODEL_PRESET"
 export MODEL_PRESET
+
+if [ -n "$PER_GPU_BSZ" ]; then
+    echo "[*] Batch size override: $PER_GPU_BSZ (per GPU)"
+    export PER_GPU_BSZ
+fi
 
 # Create logs directory
 mkdir -p logs_lobs5

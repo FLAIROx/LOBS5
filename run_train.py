@@ -238,6 +238,15 @@ if __name__ == "__main__":
 		print(f"    bsz={args.bsz}, ssm_lr_base={args.ssm_lr_base}, lr_factor={args.lr_factor}")
 		print(f"    wandb_project={args.wandb_project}")
 
+	# Override bsz with PER_GPU_BSZ environment variable (if set)
+	# This allows batch size sweeps while using model presets
+	# Note: bsz is the GLOBAL batch size (across all devices)
+	# PER_GPU_BSZ specifies the batch size per GPU, so we multiply by num_devices
+	if 'PER_GPU_BSZ' in os.environ:
+		per_gpu_bsz = int(os.environ['PER_GPU_BSZ'])
+		args.bsz = per_gpu_bsz * args.num_devices
+		print(f"[*] Overriding with PER_GPU_BSZ={per_gpu_bsz} × {args.num_devices} devices = {args.bsz} (global bsz)")
+
 	# Set BF16 environment variable based on command-line argument
 	os.environ['USE_BF16'] = '1' if args.use_bf16 else '0'
 
