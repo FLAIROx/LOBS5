@@ -32,8 +32,7 @@ NNODES=$SLURM_NNODES
 TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
 
 # Batch size configuration
-PER_GPU_BSZ=16
-# PER_GPU_BSZ=8
+PER_GPU_BSZ=${PER_GPU_BSZ:-16}
 EFFECTIVE_BSZ=$((PER_GPU_BSZ * TOTAL_GPUS))
 
 echo "[*] Batch size: $PER_GPU_BSZ per GPU × $TOTAL_GPUS GPUs = $EFFECTIVE_BSZ effective"
@@ -69,22 +68,25 @@ echo "[Wrapper] SLURM_PROCID: ${SLURM_PROCID:-N/A}"
 echo "[Wrapper] CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-all}"
 echo "========================================"
 
-# # **************** CHOICE 1 ****************
-# # Source conda
-# source ~/miniforge3/etc/profile.d/conda.sh
-# conda activate lob
+# **************** CHOICE 1 ****************
+# Source conda
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate lob
 
-# # Load CUDA module
-# module load cuda/12.6
+# Load CUDA module
+module load cuda/12.6
 
-# # Set LD_LIBRARY_PATH
-# export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+# Set LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
-# # JAX environment
-# export XLA_PYTHON_CLIENT_PREALLOCATE=true
-# export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
-# export JAX_COORDINATOR_TIMEOUT_MS=600000
-# export JAX_PLATFORMS="cuda"
+# JAX environment
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+export JAX_COORDINATOR_TIMEOUT_MS=600000
+export JAX_PLATFORMS="cuda"
+
+
+
 #   | Job ID  | BSZ/GPU | Effective BSZ | status     | MFU    | memory    |
 #   |---------|---------|---------------|------------|--------|-----------|
 #   | 1821906 | 16      | 64            | ✅ Running | 13-16% | -         |
@@ -127,50 +129,52 @@ echo "========================================"
 #   | 1821915 | 34  | 136     | ✅ OK       | ❌ BFC OOM  | 0    | -              | 98.67 GiB  |
 
 
-# # # **************** CHOICE 1 ****************
+# # **************** CHOICE 1 ****************
 
 
-# **************** CHOICE 2 ****************
+# # **************** CHOICE 2 ****************
 
-#   cuda12.9
-#   | Job ID  | BSZ/GPU | Effective BSZ | Status     | MFU    | Memory Req |
-#   |---------|---------|---------------|------------|--------|------------|
-#   | 1821927 | 16      | 64            | ✅ Running | 13-15% | -          |
-#   | 1821928 | 18      | 72            | 🔴 OOM     | -      | 83.86 GiB  |
-#   | 1821929 | 20      | 80            | 🔴 OOM     | -      | 81.40 GiB  |
-#   | 1821930 | 22      | 88            | 🔴 OOM     | -      | 86.92 GiB  |
-#   | 1821931 | 24      | 96            | 🔴 OOM     | -      | 83.81 GiB  |
-#   | 1821932 | 26      | 104           | 🔴 OOM     | -      | 108.93 GiB |
-#   | 1821933 | 28      | 112           | 🔴 OOM     | -      | 117.61 GiB |
-#   | 1821934 | 30      | 120           | 🔴 OOM     | -      | 129.11 GiB |
-#   | 1821935 | 32      | 128           | 🔴 OOM     | -      | 119.14 GiB |
-#   | 1821936 | 34      | 136           | 🔴 OOM     | -      | 138.41 GiB |
-
-
+# #   cuda12.9
+# #   | Job ID  | BSZ/GPU | Effective BSZ | Status     | MFU    | Memory Req |
+# #   |---------|---------|---------------|------------|--------|------------|
+# #   | 1821927 | 16      | 64            | ✅ Running | 13-15% | -          |
+# #   | 1821928 | 18      | 72            | 🔴 OOM     | -      | 83.86 GiB  |
+# #   | 1821929 | 20      | 80            | 🔴 OOM     | -      | 81.40 GiB  |
+# #   | 1821930 | 22      | 88            | 🔴 OOM     | -      | 86.92 GiB  |
+# #   | 1821931 | 24      | 96            | 🔴 OOM     | -      | 83.81 GiB  |
+# #   | 1821932 | 26      | 104           | 🔴 OOM     | -      | 108.93 GiB |
+# #   | 1821933 | 28      | 112           | 🔴 OOM     | -      | 117.61 GiB |
+# #   | 1821934 | 30      | 120           | 🔴 OOM     | -      | 129.11 GiB |
+# #   | 1821935 | 32      | 128           | 🔴 OOM     | -      | 119.14 GiB |
+# #   | 1821936 | 34      | 136           | 🔴 OOM     | -      | 138.41 GiB |
 
 
-# Source conda
-source ~/miniforge3/etc/profile.d/conda.sh
-conda activate lob26
-
-# Skip module load cuda - lob26 conda env has CUDA 12.9 (ptxas in CONDA_PREFIX/bin)
-module load cuda/12.6
-
-# Use CUDA 12.9 ptxas from lob26 conda env for Triton and XLA
-# export TRITON_PTXAS_PATH=$CONDA_PREFIX/bin/ptxas
-
-# Set LD_LIBRARY_PATH
-export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
 
-# JAX environment
-export XLA_PYTHON_CLIENT_PREALLOCATE=true
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
-export JAX_COORDINATOR_TIMEOUT_MS=600000
-export JAX_PLATFORMS="cuda"
-export XLA_FLAGS="--xla_gpu_autotune_max_concurrent_compilations=1${XLA_FLAGS:+ $XLA_FLAGS}"
-# **************** CHOICE 2 ****************
+# # Source conda
+# source ~/miniforge3/etc/profile.d/conda.sh
+# conda activate lob26
 
+# # Skip module load cuda - lob26 conda env has CUDA 12.9 (ptxas in CONDA_PREFIX/bin)
+# module load cuda/12.6
+
+# # Use CUDA 12.9 ptxas from lob26 conda env for Triton and XLA
+# # export TRITON_PTXAS_PATH=$CONDA_PREFIX/bin/ptxas
+
+# # Set LD_LIBRARY_PATH
+# export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+
+
+# # JAX environment
+# export XLA_PYTHON_CLIENT_PREALLOCATE=true
+# export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+# export JAX_COORDINATOR_TIMEOUT_MS=600000
+# export JAX_PLATFORMS="cuda"
+# export XLA_FLAGS="--xla_gpu_autotune_max_concurrent_compilations=1${XLA_FLAGS:+ $XLA_FLAGS}"
+# # **************** CHOICE 2 ****************
+
+
+export TF_GPU_ALLOCATOR=cuda_malloc_async # added on Jan 4, 2026
 
 # Multi-node JAX config
 if [ -n "$JAX_COORDINATOR_ADDRESS" ]; then
