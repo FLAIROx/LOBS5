@@ -42,6 +42,16 @@ if __name__ == "__main__":
 	# Model Presets: Pre-configured Model Settings
 	# ============================================
 	MODEL_PRESETS = {
+		"2.5B-Wide": {
+			"d_model": 5120, "n_layers": 32, "blocks": 56, "ssm_size_base": 5120, "bsz": 1,
+			"ssm_lr_base": 0.00003, "lr_factor": 1,
+			"wandb_project": "lobs5-2.5B-wide-d5120"
+		},
+		"2.5B-Deep": {
+			"d_model": 4096, "n_layers": 48, "blocks": 72, "ssm_size_base": 4096, "bsz": 1,
+			"ssm_lr_base": 0.00003, "lr_factor": 1,
+			"wandb_project": "lobs5-2.5B-deep-d4096"
+		},
 		"1.4B": {
 			"d_model": 3584, "n_layers": 32, "blocks": 56, "ssm_size_base": 3584, "bsz": 2,
 			"ssm_lr_base": 0.00005, "lr_factor": 1,
@@ -115,7 +125,7 @@ if __name__ == "__main__":
 	# Model Preset (overrides individual model parameters if specified)
 	parser.add_argument("--model_preset", type=str, default=None,
 						choices=list(MODEL_PRESETS.keys()),
-						help="Pre-configured model settings: 1.4B, 1B, 300M, 55M. Overrides d_model, n_layers, blocks, ssm_size_base, bsz, ssm_lr_base, lr_factor, wandb_project")
+						help="Pre-configured model settings: 2.5B-Wide, 2.5B-Deep, 1.4B, 1B, 300M, 55M. Overrides d_model, n_layers, blocks, ssm_size_base, bsz, ssm_lr_base, lr_factor, wandb_project")
 
 	# Model Parameters
 	parser.add_argument("--n_message_layers", type=int, default=2,  # 2
