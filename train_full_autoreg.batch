@@ -69,12 +69,35 @@ echo "[Wrapper] SLURM_PROCID: ${SLURM_PROCID:-N/A}"
 echo "[Wrapper] CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-all}"
 echo "========================================"
 
+# # **************** CHOICE 1 ****************
+# # Source conda
+# source ~/miniforge3/etc/profile.d/conda.sh
+# conda activate lob
+
+# # Load CUDA module
+# module load cuda/12.6
+
+# # Set LD_LIBRARY_PATH
+# export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+
+# # JAX environment
+# export XLA_PYTHON_CLIENT_PREALLOCATE=true
+# export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+# export JAX_COORDINATOR_TIMEOUT_MS=600000
+# export JAX_PLATFORMS="cuda"
+# # **************** CHOICE 1 ****************
+
+
+# **************** CHOICE 2 ****************
 # Source conda
 source ~/miniforge3/etc/profile.d/conda.sh
-conda activate lob
+conda activate lob26
 
-# Load CUDA module
-module load cuda/12.6
+# Skip module load cuda - lob26 conda env has CUDA 12.9 (ptxas in CONDA_PREFIX/bin)
+# module load cuda/12.6
+
+# Use CUDA 12.9 ptxas from lob26 conda env for Triton and XLA
+export TRITON_PTXAS_PATH=$CONDA_PREFIX/bin/ptxas
 
 # Set LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
@@ -84,6 +107,9 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=true
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 export JAX_COORDINATOR_TIMEOUT_MS=600000
 export JAX_PLATFORMS="cuda"
+export XLA_FLAGS="--xla_gpu_autotune_max_concurrent_compilations=1${XLA_FLAGS:+ $XLA_FLAGS}"
+# **************** CHOICE 2 ****************
+
 
 # Multi-node JAX config
 if [ -n "$JAX_COORDINATOR_ADDRESS" ]; then
