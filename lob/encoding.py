@@ -500,7 +500,7 @@ class Message_Tokenizer:
     MSG_LEN = np.sum(TOK_LENS)
     # encoded message length: total length - length of reference fields
     NEW_MSG_LEN = MSG_LEN - \
-        (lambda tl=TOK_LENS, fields=FIELDS: np.sum(tl[i] for i, f in enumerate(fields) if f.endswith('_ref')))()
+        (lambda tl=TOK_LENS, fields=FIELDS: sum(tl[i] for i, f in enumerate(fields) if f.endswith('_ref')))()
 
     @classmethod
     def set_token_mode(cls, token_mode):
