@@ -111,7 +111,7 @@ def train(args):
             seed=args.jax_seed,
             mask_fn=mask_fn,
             msg_seq_len=args.msg_seq_len,
-            bsz=args.bsz,
+            global_bsz=args.global_bsz,
             use_book_data=args.use_book_data,
             use_simple_book=args.use_simple_book,
             book_transform=args.book_transform,
@@ -155,7 +155,7 @@ def train(args):
         # ==================================================================
         ssm_lr = args.ssm_lr_base
         lr = args.lr_factor * ssm_lr
-        steps_per_epoch = train_size // args.bsz
+        steps_per_epoch = train_size // args.global_bsz
         if hasattr(args, 'curtail_epochs') and args.curtail_epochs is not None:
             steps_per_epoch = min(steps_per_epoch, args.curtail_epochs + 1)
         total_steps = steps_per_epoch * args.epochs
@@ -199,8 +199,8 @@ def train(args):
             branch, commit = get_git_info()
             wandb.run.summary["git_branch"] = branch
             wandb.run.summary["git_commit"] = commit
-            wandb.run.summary["global_batch_size"] = args.bsz
-            wandb.run.summary["micro_batch_size"] = args.bsz // args.num_devices
+            wandb.run.summary["global_batch_size"] = args.global_bsz
+            wandb.run.summary["micro_batch_size"] = args.global_bsz // args.num_devices
             wandb.run.summary["num_devices"] = args.num_devices
 
         if args.restore is not None and args.restore != '':
@@ -214,7 +214,7 @@ def train(args):
             state = ckpt['model']
         
         val_model = model_cls(training=False, step_rescale=1)
-        init_hidden=model_cls().initialize_carry(batch_size=args.bsz//args.num_devices,
+        init_hidden=model_cls().initialize_carry(batch_size=args.global_bsz//args.num_devices,
                                                 hidden_size=(ssm_size // pow(2,int(args.conj_sym))),
                                                 n_message_layers=args.n_message_layers,
                                                 n_book_pre_layers=args.n_book_pre_layers ,
@@ -257,14 +257,14 @@ def train(args):
     count, best_val_loss = 0, 100000000  # This line is for early stopping purposes
     lr_count, opt_acc = 0, -100000000.0  # This line is for learning rate decay
     # step variable removed - optax tracks step internally via state.step
-    steps_per_epoch = int(train_size/args.bsz) if args.curtail_epochs is None else args.curtail_epochs+1
+    steps_per_epoch = int(train_size/args.global_bsz) if args.curtail_epochs is None else args.curtail_epochs+1
 
     # Log git information and batch size configuration
     branch, commit = get_git_info()
     log_with_timestamp(f"Git Branch: {branch}")
     log_with_timestamp(f"Git Commit: {commit}")
-    global_batch_size = args.bsz
-    micro_batch_size = args.bsz // args.num_devices
+    global_batch_size = args.global_bsz
+    micro_batch_size = args.global_bsz // args.num_devices
     log_with_timestamp(f"Global Batch Size (Gbs): {global_batch_size}")
     log_with_timestamp(f"Micro Batch Size (mbs/per_gpu_bsz): {micro_batch_size}")
     log_with_timestamp(f"Number of devices: {args.num_devices}")
@@ -390,7 +390,7 @@ def train(args):
             jit_train_step_fn=jit_train_step_fn,
             # MFU tracking parameters
             model_params=total_params,
-            batch_size=args.bsz,
+            batch_size=args.global_bsz,
             peak_tflops=1000.0,
             goodput_monitor=goodput_monitor,
             # Step-level checkpointing parameters
@@ -414,7 +414,7 @@ def train(args):
             trainloader = create_lobster_train_loader(
                 lobster_dataset,
                 int(random.randint(skey, (1,), 0, 100000)[0]),
-                args.bsz,
+                args.global_bsz,
                 num_workers=args.n_data_workers,
                 reset_train_offsets=args.random_offsets_train,
                 shuffle=args.shuffle_train,
@@ -606,3 +606,4 @@ def train(args):
         # jax.profiler.stop_trace()
         if count > args.early_stop_patience:
             break
+

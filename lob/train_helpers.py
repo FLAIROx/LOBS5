@@ -252,7 +252,7 @@ def create_train_state(model_cls,
                        book_dim,
                        book_seq_len,
                        in_dim=1,
-                       bsz=128,
+                       global_bsz=128,
                        seq_len=784,
                        weight_decay=0.01,
                        batchnorm=False,
@@ -273,7 +273,7 @@ def create_train_state(model_cls,
     :param padded:
     :param retrieval:
     :param in_dim:
-    :param bsz:
+    :param global_bsz:
     :param seq_len:
     :param weight_decay:
     :param batchnorm:
@@ -284,34 +284,34 @@ def create_train_state(model_cls,
     :return:
     """
 
-    # batch size is given for data across all devices
-    # i.e. batch is split between GPUs but dummy data is per GPU
-    assert bsz % num_devices == 0
-    bsz = bsz // num_devices
+    # global_bsz is total batch size across all devices
+    # micro_bsz is per-GPU batch size
+    assert global_bsz % num_devices == 0
+    micro_bsz = global_bsz // num_devices
 
     if padded:
         if retrieval:
             # For retrieval tasks we have two different sets of "documents"
-            dummy_input = (np.ones((2*bsz, seq_len, in_dim)), np.ones(2*bsz))
-            integration_timesteps = np.ones((2*bsz, seq_len,))
+            dummy_input = (np.ones((2*micro_bsz, seq_len, in_dim)), np.ones(2*micro_bsz))
+            integration_timesteps = np.ones((2*micro_bsz, seq_len,))
         else:
-            dummy_input = (np.ones((bsz, seq_len, in_dim)), np.ones(bsz))
-            integration_timesteps = np.ones((bsz, seq_len,))
+            dummy_input = (np.ones((micro_bsz, seq_len, in_dim)), np.ones(micro_bsz))
+            integration_timesteps = np.ones((micro_bsz, seq_len,))
     else:
         if use_book_data:
             dummy_input = (
-                # np.ones((bsz, seq_len, in_dim), dtype=np.int32),  # messages
-                np.ones((bsz, seq_len, ), dtype=np.int32),  # messages
-                np.ones((bsz, seq_len, book_dim)),  # books
+                # np.ones((micro_bsz, seq_len, in_dim), dtype=np.int32),  # messages
+                np.ones((micro_bsz, seq_len, ), dtype=np.int32),  # messages
+                np.ones((micro_bsz, seq_len, book_dim)),  # books
             )
             integration_timesteps = (
-                np.ones((bsz, seq_len, )),
-                np.ones((bsz, seq_len, )),
+                np.ones((micro_bsz, seq_len, )),
+                np.ones((micro_bsz, seq_len, )),
             )
         else:
-            # dummy_input = (np.ones((bsz, seq_len, in_dim), dtype=np.int32) , )
-            dummy_input = (np.ones((bsz, seq_len, ), dtype=np.int32) , )
-            integration_timesteps = (np.ones((bsz, seq_len, )), )
+            # dummy_input = (np.ones((micro_bsz, seq_len, in_dim), dtype=np.int32) , )
+            dummy_input = (np.ones((micro_bsz, seq_len, ), dtype=np.int32) , )
+            integration_timesteps = (np.ones((micro_bsz, seq_len, )), )
 
     model = model_cls(training=True)
     init_rng, dropout_rng = jax.random.split(rng, num=2)

@@ -316,3 +316,6 @@ echo "============================================"
 #  † B/C matmul: FP32 params cast to BF16 for matvec, result cast back to FP32 for associative_scan.
 #  ‡ All gradients cast to FP32 after backward pass (MaxText pattern) for numerical stability.
 #  § Loss computed in FP32 with z-loss (weight=0.0001) to prevent logits drift in BF16 training.
+
+
+

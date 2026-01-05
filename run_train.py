@@ -43,62 +43,62 @@ if __name__ == "__main__":
 	# ============================================
 	MODEL_PRESETS = {
 		"2.5B-Wide": {
-			"d_model": 5120, "n_layers": 32, "blocks": 64, "ssm_size_base": 5120, "bsz": 1,
+			"d_model": 5120, "n_layers": 32, "blocks": 64, "ssm_size_base": 5120, "micro_bsz": 1,
 			"ssm_lr_base": 0.00003, "lr_factor": 1,
 			"wandb_project": "lobs5-2.5B-wide-d5120"
 		},
 		"2.5B-Deep": {
-			"d_model": 4096, "n_layers": 48, "blocks": 64, "ssm_size_base": 4096, "bsz": 1,
+			"d_model": 4096, "n_layers": 48, "blocks": 64, "ssm_size_base": 4096, "micro_bsz": 1,
 			"ssm_lr_base": 0.00003, "lr_factor": 1,
 			"wandb_project": "lobs5-2.5B-deep-d4096"
 		},
 		"2.2B-Wide": {
-			"d_model": 4704, "n_layers": 32, "blocks": 56, "ssm_size_base": 4704, "bsz": 1,
+			"d_model": 4704, "n_layers": 32, "blocks": 56, "ssm_size_base": 4704, "micro_bsz": 1,
 			"ssm_lr_base": 0.000032, "lr_factor": 1,
 			"wandb_project": "lobs5-2.2B-wide-d4704"
 		},
 		"2.2B-Deep": {
-			"d_model": 4352, "n_layers": 48, "blocks": 64, "ssm_size_base": 4352, "bsz": 1,
+			"d_model": 4352, "n_layers": 48, "blocks": 64, "ssm_size_base": 4352, "micro_bsz": 1,
 			"ssm_lr_base": 0.000032, "lr_factor": 1,
 			"wandb_project": "lobs5-2.2B-deep-d4352"
 		},
 		"2B-Wide": {
-			"d_model": 4480, "n_layers": 32, "blocks": 56, "ssm_size_base": 4480, "bsz": 4,
+			"d_model": 4480, "n_layers": 32, "blocks": 56, "ssm_size_base": 4480, "micro_bsz": 4,
 			"ssm_lr_base": 0.000035, "lr_factor": 1,
 			"wandb_project": "lobs5-2B-wide-d4480"
 		},
 		"2B-Deep": {
-			"d_model": 4096, "n_layers": 44, "blocks": 64, "ssm_size_base": 4096, "bsz": 1,
+			"d_model": 4096, "n_layers": 44, "blocks": 64, "ssm_size_base": 4096, "micro_bsz": 1,
 			"ssm_lr_base": 0.000035, "lr_factor": 1,
 			"wandb_project": "lobs5-2B-deep-d4096"
 		},
 		"1.8B-Wide": {
-			"d_model": 4144, "n_layers": 32, "blocks": 56, "ssm_size_base": 4144, "bsz": 4,
+			"d_model": 4144, "n_layers": 32, "blocks": 56, "ssm_size_base": 4144, "micro_bsz": 4,
 			"ssm_lr_base": 0.00004, "lr_factor": 1,
 			"wandb_project": "lobs5-1.8B-wide-d4144"
 		},
 		"1.8B-Deep": {
-			"d_model": 3840, "n_layers": 40, "blocks": 60, "ssm_size_base": 3840, "bsz": 1,
+			"d_model": 3840, "n_layers": 40, "blocks": 60, "ssm_size_base": 3840, "micro_bsz": 1,
 			"ssm_lr_base": 0.00004, "lr_factor": 1,
 			"wandb_project": "lobs5-1.8B-deep-d3840"
 		},
 		"1.4B": {
-			"d_model": 3584, "n_layers": 32, "blocks": 56, "ssm_size_base": 3584, "bsz": 2,
+			"d_model": 3584, "n_layers": 32, "blocks": 56, "ssm_size_base": 3584, "micro_bsz": 2,
 			"ssm_lr_base": 0.00005, "lr_factor": 1,
 			"wandb_project": "lobs5-1.4B-d3584"
 		},
 		"1B": {
-			"d_model": 3072, "n_layers": 32, "blocks": 48, "ssm_size_base": 3072, "bsz": 2,
+			"d_model": 3072, "n_layers": 32, "blocks": 48, "ssm_size_base": 3072, "micro_bsz": 3,
 			"ssm_lr_base": 0.00010, "lr_factor": 1,
 			"wandb_project": "lobs5-1B-d3072"
 		},
 		"360M": {
-			"d_model": 2048, "n_layers": 24, "blocks": 32, "ssm_size_base": 2048, "bsz": 2,
+			"d_model": 2048, "n_layers": 24, "blocks": 32, "ssm_size_base": 2048, "micro_bsz": 8,
 			"ssm_lr_base": 0.00020, "lr_factor": 1,
 			"wandb_project": "lobs5-300M-d2048"
 		},
 		"55M": {
-			"d_model": 1024, "n_layers": 12, "blocks": 16, "ssm_size_base": 1024, "bsz": 12,
+			"d_model": 1024, "n_layers": 12, "blocks": 16, "ssm_size_base": 1024, "micro_bsz": 12,
 			"ssm_lr_base": 5e-5, "lr_factor": 1,
 			"wandb_project": "lobs5-55M-d1024"
 		},
@@ -155,7 +155,7 @@ if __name__ == "__main__":
 	# Model Preset (overrides individual model parameters if specified)
 	parser.add_argument("--model_preset", type=str, default=None,
 						choices=list(MODEL_PRESETS.keys()),
-						help="Pre-configured model settings: 2.5B-Wide, 2.5B-Deep, 2B-Wide, 2B-Deep, 1.8B-Wide, 1.8B-Deep, 1.4B, 1B, 300M, 55M. Overrides d_model, n_layers, blocks, ssm_size_base, bsz, ssm_lr_base, lr_factor, wandb_project")
+						help="Pre-configured model settings: 2.5B-Wide, 2.5B-Deep, 2B-Wide, 2B-Deep, 1.8B-Wide, 1.8B-Deep, 1.4B, 1B, 300M, 55M. Overrides d_model, n_layers, blocks, ssm_size_base, micro_bsz (converted to global_bsz), ssm_lr_base, lr_factor, wandb_project")
 
 	# Model Parameters
 	parser.add_argument("--n_message_layers", type=int, default=2,  # 2
@@ -206,7 +206,7 @@ if __name__ == "__main__":
 						help="True: use batchnorm, False: use layernorm")
 	parser.add_argument("--bn_momentum", type=float, default=0.95,
 						help="batchnorm momentum")
-	parser.add_argument("--bsz", type=int, default=16, #64, (max 16 with full size)
+	parser.add_argument("--global_bsz", type=int, default=16, #64, (max 16 with full size)
 						help="batch size")
 	parser.add_argument("--num_devices", type=int, default=1,
 		     			help="number of devices (GPUs) to use")
@@ -320,19 +320,24 @@ if __name__ == "__main__":
 		preset = MODEL_PRESETS[args.model_preset]
 		print(f"[*] Using model preset: {args.model_preset}")
 		for key, value in preset.items():
+			if key == "micro_bsz":
+				continue  # Handle micro_bsz separately below
 			setattr(args, key, value)
 		print(f"    d_model={args.d_model}, n_layers={args.n_layers}, blocks={args.blocks}, ssm_size_base={args.ssm_size_base}")
-		print(f"    bsz={args.bsz}, ssm_lr_base={args.ssm_lr_base}, lr_factor={args.lr_factor}")
+		# Preset micro_bsz is PER-GPU batch size, convert to GLOBAL batch size
+		micro_bsz = preset["micro_bsz"]
+		args.global_bsz = micro_bsz * args.num_devices
+		print(f"    micro_bsz={micro_bsz}/GPU × {args.num_devices} devices = {args.global_bsz} (global_bsz)")
+		print(f"    ssm_lr_base={args.ssm_lr_base}, lr_factor={args.lr_factor}")
 		print(f"    wandb_project={args.wandb_project}")
 
-	# Override bsz with PER_GPU_BSZ environment variable (if set)
+	# Override global_bsz with PER_GPU_BSZ environment variable (if set)
 	# This allows batch size sweeps while using model presets
-	# Note: bsz is the GLOBAL batch size (across all devices)
-	# PER_GPU_BSZ specifies the batch size per GPU, so we multiply by num_devices
+	# PER_GPU_BSZ specifies the micro batch size per GPU, so we multiply by num_devices
 	if 'PER_GPU_BSZ' in os.environ:
-		per_gpu_bsz = int(os.environ['PER_GPU_BSZ'])
-		args.bsz = per_gpu_bsz * args.num_devices
-		print(f"[*] Overriding with PER_GPU_BSZ={per_gpu_bsz} × {args.num_devices} devices = {args.bsz} (global bsz)")
+		micro_bsz = int(os.environ['PER_GPU_BSZ'])
+		args.global_bsz = micro_bsz * args.num_devices
+		print(f"[*] Overriding: micro_bsz={micro_bsz} × {args.num_devices} devices = {args.global_bsz} (global_bsz)")
 
 	# Set BF16 environment variable based on command-line argument
 	os.environ['USE_BF16'] = '1' if args.use_bf16 else '0'
