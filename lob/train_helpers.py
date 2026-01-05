@@ -1264,14 +1264,17 @@ def create_jit_eval_step(mesh: Mesh, state: train_state.TrainState, has_book_dat
     # 3. Define in_shardings
     # IMPORTANT: in_shardings only includes NON-STATIC parameters!
     # Order corresponds to eval_step NON-STATIC parameters:
-    # (batch_inputs, batch_labels, batch_integration_timesteps, state)
-    # apply_fn, batchnorm, apply_method, init_hiddens, ignore_times are static - NOT included!
+    # (batch_inputs, batch_labels, batch_integration_timesteps, state, init_hiddens)
+    # apply_fn, batchnorm, apply_method, ignore_times are static - NOT included!
+    # Note: init_hiddens is NOT static because JAX arrays are not hashable
+    # Use None to let JAX infer sharding (init_hiddens can be array or complex pytree)
     in_shardings = (
         inputs_shardings,         # param 0: batch_inputs - sharded
         labels_sharding,          # param 1: batch_labels - sharded
         timesteps_shardings,      # param 2: batch_integration_timesteps - sharded
         state_shardings,          # param 3: state - replicated
-        # params 4-8 (apply_fn, batchnorm, apply_method, init_hiddens, ignore_times) are static!
+        None,                     # param 7: init_hiddens - auto (None lets JAX handle pytree of arrays)
+        # params 4-6, 8 (apply_fn, batchnorm, apply_method, ignore_times) are static!
     )
 
     # 4. Define out_shardings
@@ -1288,7 +1291,7 @@ def create_jit_eval_step(mesh: Mesh, state: train_state.TrainState, has_book_dat
         eval_step,
         in_shardings=in_shardings,
         out_shardings=out_shardings,
-        static_argnums=(4, 5, 6, 8),  # apply_fn, batchnorm, apply_method, ignore_times
+        static_argnums=(4, 5, 6, 8),  # apply_fn, batchnorm, apply_method, ignore_times (NOT init_hiddens - JAX arrays not hashable)
         # Don't use donate_argnums because eval doesn't modify state
     )
 

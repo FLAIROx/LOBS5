@@ -29,7 +29,7 @@ echo "============================================"
 #   MODEL_PRESET=1.4B sbatch train_full_autoreg.batch
 #   PER_GPU_BSZ=4 MODEL_PRESET=1.4B sbatch train_full_autoreg.batch
 #
-# Available presets: 1.4B, 1B, 300M, 55M
+# Available presets: 2.5B-Wide, 2.5B-Deep, 2.2B-Wide, 2.2B-Deep, 2B-Wide, 2B-Deep, 1.8B-Wide, 1.8B-Deep, 1.4B, 1B, 360M, 55M
 # If not set, defaults to individual parameter values below
 # PER_GPU_BSZ overrides the preset's batch size (optional)
 # ============================================
@@ -40,6 +40,13 @@ export MODEL_PRESET
 if [ -n "$PER_GPU_BSZ" ]; then
     echo "[*] Batch size override: $PER_GPU_BSZ (per GPU)"
     export PER_GPU_BSZ
+fi
+
+# CURTAIL_EPOCHS: Optional - end each epoch early after N steps (for quick testing)
+# Usage: CURTAIL_EPOCHS=10 MODEL_PRESET=360M sbatch train_full_autoreg.batch
+if [ -n "$CURTAIL_EPOCHS" ]; then
+    echo "[*] Curtail epochs: $CURTAIL_EPOCHS steps (quick test mode)"
+    export CURTAIL_EPOCHS
 fi
 
 # Create logs directory
@@ -255,6 +262,7 @@ python -u -B run_train.py \
     --lr_patience=2 \
     --use_bf16=True \
     --token_mode=24 \
+    ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS} \
 '
     # NOTE: The following parameters are now controlled by --model_preset:
     #   --blocks (preset controls)

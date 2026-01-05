@@ -14,7 +14,8 @@ from lob.dataloading import create_lobster_prediction_dataset, create_lobster_tr
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import reduce_lr_on_plateau, linear_warmup, \
     cosine_annealing, constant_lr, train_epoch, validate, \
-    create_jit_train_step, create_jit_eval_step, initialize_mesh, get_global_mesh  # New: JIT compilation functions
+    create_jit_train_step, create_jit_eval_step, initialize_mesh, get_global_mesh, \
+    create_lobs5_learning_rate_schedule  # New: JIT compilation functions + LR schedule
 
 # WandB configuration (must be set before wandb import)
 os.environ["WANDB_MODE"] = "online"
@@ -133,6 +134,9 @@ def train(args):
         val_model=None
         init_hidden=None
         total_params=None
+        # Dummy schedules for debug mode
+        lr_schedule = lambda step: 0.0
+        ssm_lr_schedule = lambda step: 0.0
     else:
         state, model_cls, total_params = init_train_state(
             args,
@@ -143,6 +147,35 @@ def train(args):
             train_size=train_size,  # NEW: for schedule calculation
             print_shapes=True
         )
+
+        # ==================================================================
+        # Create LR schedules for logging (mirrors init_train.py logic)
+        # These are used to compute current LR from state.step for WandB logging
+        # ==================================================================
+        ssm_lr = args.ssm_lr_base
+        lr = args.lr_factor * ssm_lr
+        steps_per_epoch = train_size // args.bsz
+        if hasattr(args, 'curtail_epochs') and args.curtail_epochs is not None:
+            steps_per_epoch = min(steps_per_epoch, args.curtail_epochs + 1)
+        total_steps = steps_per_epoch * args.epochs
+        warmup_end_step = steps_per_epoch * args.warmup_end
+
+        ssm_lr_schedule = create_lobs5_learning_rate_schedule(
+            base_lr=ssm_lr,
+            warmup_end_step=warmup_end_step,
+            total_steps=total_steps,
+            lr_min=args.lr_min,
+            use_cosine_anneal=args.cosine_anneal,
+        )
+        lr_schedule = create_lobs5_learning_rate_schedule(
+            base_lr=lr,
+            warmup_end_step=warmup_end_step,
+            total_steps=total_steps,
+            lr_min=args.lr_min,
+            use_cosine_anneal=args.cosine_anneal,
+        )
+        log_with_timestamp(f"LR schedules created for logging: base_lr={lr}, ssm_lr={ssm_lr}")
+        # ==================================================================
 
         # Log BF16 status
         import os
@@ -460,6 +493,12 @@ def train(args):
             ce_table=wandb.Table(columns=ce_table.columns,data=ce_table.data)
         
 
+        # Compute learning rate from schedule using state.step
+        # With optax schedules (MaxText way), LR is not stored in hyperparams but
+        # computed on-the-fly from the schedule functions
+        current_lr = lr_schedule(int(state.step))
+        current_ssm_lr = ssm_lr_schedule(int(state.step))
+
         if valloader is not None:
             wandb.log(
                 {
@@ -471,10 +510,8 @@ def train(args):
                     "count": count,
                     "Learning rate count": lr_count,
                     "Opt acc": opt_acc,
-                    # Old (pmap): learning_rate had device dimension, needed [0]
-                    # New (jit+shardings): learning_rate is scalar, no indexing
-                    "lr": float(state.opt_state.inner_states['regular'].inner_state.hyperparams['learning_rate']),
-                    "ssm_lr": float(state.opt_state.inner_states['ssm'].inner_state.hyperparams['learning_rate']),
+                    "lr": float(current_lr),
+                    "ssm_lr": float(current_ssm_lr),
                     # "Training CE by token":ce_table
                 }
             )
@@ -487,10 +524,8 @@ def train(args):
                     "count": count,
                     "Learning rate count": lr_count,
                     "Opt acc": opt_acc,
-                    # Old (pmap): learning_rate had device dimension, needed [0]
-                    # New (jit+shardings): learning_rate is scalar, no indexing
-                    "lr": float(state.opt_state.inner_states['regular'].inner_state.hyperparams['learning_rate']),
-                    "ssm_lr": float(state.opt_state.inner_states['ssm'].inner_state.hyperparams['learning_rate']),
+                    "lr": float(current_lr),
+                    "ssm_lr": float(current_ssm_lr),
                     # "Training CE by token":ce_table
                 }
             )
