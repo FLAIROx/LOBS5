@@ -687,6 +687,12 @@ def train_epoch(
         batch_size=None,
         peak_tflops=1000.0,
         goodput_monitor=None,
+        # Step-level checkpointing parameters
+        checkpoint_callback=None,  # Callable: (state, epoch, step, loss) -> None
+        checkpoint_every_n_steps=1000,  # Save every N steps, or "auto" for ~1 hour intervals
+        job_start_time=None,  # Job start time for time-aware checkpointing
+        max_job_hours=24.0,  # Maximum job duration in hours
+        save_before_timeout_minutes=30,  # Save checkpoint this many minutes before timeout
     ):
 
     """
@@ -697,6 +703,13 @@ def train_epoch(
     - No manual lr_params needed
     - No update_learning_rate_per_step() calls needed
     - No buffer copying needed (eliminates donate_argnums aliasing)
+
+    Step-level checkpointing:
+    - checkpoint_callback: Called at intervals and before timeout
+    - checkpoint_every_n_steps: Save every N steps (default: 1000)
+    - job_start_time: For time-aware checkpointing (detect 24hr limit)
+    - max_job_hours: Maximum job duration (default: 24.0)
+    - save_before_timeout_minutes: Save this many minutes before timeout (default: 30)
     """
     # Store Metrics
     batch_losses = []
@@ -706,6 +719,19 @@ def train_epoch(
     mfu_tracker = None
     if model_params is not None and batch_size is not None:
         mfu_tracker = MFUTracker(model_params, batch_size, seq_len, num_devices, peak_tflops)
+
+    # =========================================================================
+    # AUTO MODE TIMING (WALL CLOCK):
+    #   - WANDB LOSS LOGGING: EVERY 10 MINUTES
+    #   - CHECKPOINT SAVING:  EVERY 30 MINUTES
+    # =========================================================================
+    auto_checkpoint_mode = checkpoint_every_n_steps == "auto"
+    if auto_checkpoint_mode:
+        checkpoint_every_n_steps = 0  # Disable step-based, use time-based instead
+        last_checkpoint_time = time.time()  # Track when last checkpoint was saved
+        last_wandb_log_time = time.time()   # Track when last wandb log happened
+        auto_checkpoint_interval_seconds = 1800  # 30 MINUTES FOR CHECKPOINT
+        auto_wandb_log_interval_seconds = 600    # 10 MINUTES FOR WANDB LOGGING
 
     # No more lr_params unpacking - optax handles LR scheduling internally
     # Step tracking is done via state.step (maintained by optax)
@@ -789,7 +815,10 @@ def train_epoch(
                 cross_entropies.append(ce)
 
             # Update tqdm with MFU and goodput metrics
+            # NOTE: Loss is NOT shown here to avoid GPU sync overhead
+            # Loss is accumulated in batch_losses and averaged at epoch end
             postfix = {}
+
             if mfu_tracker is not None:
                 mfu = mfu_tracker.tick()
                 if mfu is not None:
@@ -808,6 +837,68 @@ def train_epoch(
 
             # No more manual LR updates - optax schedules handle this automatically!
             # No more buffer copying needed - eliminates donate_argnums aliasing
+
+            # =========================================================================
+            # TIMING LOGIC (AUTO MODE):
+            #   - WANDB LOSS LOGGING: EVERY 10 MINUTES
+            #   - CHECKPOINT SAVING:  EVERY 30 MINUTES
+            # =========================================================================
+            should_checkpoint = False
+            should_wandb_log = False
+            timeout_imminent = False
+
+            # Check if we should save at regular step intervals (manual mode)
+            if checkpoint_callback is not None and checkpoint_every_n_steps > 0:
+                if (batch_idx + 1) % checkpoint_every_n_steps == 0:
+                    should_checkpoint = True
+                    should_wandb_log = True
+
+            # Check if we should log/save based on wall clock time (auto mode)
+            if checkpoint_callback is not None and auto_checkpoint_mode:
+                now = time.time()
+                # WANDB LOGGING: EVERY 10 MINUTES
+                if now - last_wandb_log_time >= auto_wandb_log_interval_seconds:
+                    should_wandb_log = True
+                # CHECKPOINT SAVING: EVERY 30 MINUTES
+                if now - last_checkpoint_time >= auto_checkpoint_interval_seconds:
+                    should_checkpoint = True
+                    should_wandb_log = True  # Also log when saving
+
+            # Check if we're approaching the time limit
+            if checkpoint_callback is not None and job_start_time is not None:
+                elapsed_hours = (time.time() - job_start_time) / 3600.0
+                remaining_hours = max_job_hours - elapsed_hours
+                remaining_minutes = remaining_hours * 60
+
+                if remaining_minutes <= save_before_timeout_minutes:
+                    should_checkpoint = True
+                    should_wandb_log = True
+                    timeout_imminent = True
+
+            # Execute callback (with save_checkpoint flag)
+            if should_wandb_log or should_checkpoint:
+                current_loss = float(loss)
+                elapsed_mins = (time.time() - job_start_time) / 60.0 if job_start_time else 0
+                if should_checkpoint:
+                    print(f"\n[Checkpoint] SAVING at epoch {epoch+1}, step {batch_idx+1}, loss={current_loss:.4f}, elapsed={elapsed_mins:.1f}min")
+                else:
+                    print(f"\n[WandB Log] Logging at epoch {epoch+1}, step {batch_idx+1}, loss={current_loss:.4f}, elapsed={elapsed_mins:.1f}min")
+                # CALLBACK SIGNATURE: (state, epoch, step, loss, save_checkpoint)
+                checkpoint_callback(state, epoch, batch_idx, current_loss, should_checkpoint)
+
+                # Update timing for auto mode
+                if auto_checkpoint_mode:
+                    if should_wandb_log:
+                        last_wandb_log_time = time.time()
+                    if should_checkpoint:
+                        last_checkpoint_time = time.time()
+
+                if timeout_imminent:
+                    print(f"[Checkpoint] Timeout imminent! Saved checkpoint and exiting.")
+                    print(f"[Checkpoint] Resume from: epoch={epoch}, step={batch_idx+1}")
+                    # Return early with partial epoch results
+                    loss_mean = np.mean(np.array(batch_losses)) if batch_losses else float('nan')
+                    return state, loss_mean, None, batch_idx + 1  # Return step for resume
 
             if (state.step>20) & (state.step<=21) & debug_profiler:
                 jax.profiler.stop_trace()
@@ -828,7 +919,8 @@ def train_epoch(
     # jax.debug.print("CE of epoch by token: {}",ce_means.shape)
     loss_mean=np.mean(np.array(batch_losses))
     # No more returning step - optax tracks it internally via state.step
-    return state, loss_mean, ce_means
+    # Return None for completed_step to indicate full epoch completed
+    return state, loss_mean, ce_means, None
 
 
 @partial(jax.vmap,in_axes=(0,0,None),out_axes=(0,0))

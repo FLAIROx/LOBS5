@@ -264,6 +264,53 @@ if __name__ == "__main__":
 	parser.add_argument("--use_bf16", type=str2bool, default=True,
 				help="Use BF16 mixed precision training")
 
+	# ============================================================================
+	# Step-Level Checkpointing for Long-Running Jobs (12.5-14h epochs, 24h max)
+	# ============================================================================
+	#
+	# This system provides mid-epoch checkpoint saves and time-aware auto-save:
+	#
+	# Usage:
+	#   # Time-based (auto mode, using wall clock):
+	#   #   - WANDB LOSS LOGGING: EVERY 10 MINUTES
+	#   #   - CHECKPOINT SAVING:  EVERY 30 MINUTES
+	#   python run_train.py --model_preset 55M --checkpoint_every_n_steps auto
+	#
+	#   # Manual interval (every 5000 steps):
+	#   python run_train.py --model_preset 55M --checkpoint_every_n_steps 5000
+	#
+	#   # Resume from mid-epoch checkpoint:
+	#   python run_train.py --model_preset 55M \
+	#       --restore checkpoints/[run_name]/ \
+	#       --restore_step [global_step]
+	#
+	# What gets saved in each checkpoint (verified):
+	#   - state.step      - Training step counter (affects LR schedule)
+	#   - opt_state.mu    - Adam first moment (momentum) ~130 params
+	#   - opt_state.nu    - Adam second moment ~130 params
+	#   - params          - Model parameters, 133 keys
+	#   - Total: 686 keys, 553 optimizer state (80%)
+	#
+	# Why optimizer state matters:
+	#   - Preserves Adam momentum for smooth training continuation
+	#   - LR schedule continues from correct step (no restart)
+	#   - No "cold start" penalty when resuming
+	#
+	# Time-aware auto-save:
+	#   - Monitors elapsed time vs max_job_hours
+	#   - Auto-saves checkpoint when save_before_timeout_minutes remaining
+	#   - Prints resume command on timeout exit
+	#
+	# ============================================================================
+	parser.add_argument("--checkpoint_every_n_steps", type=str, default="auto",
+				help="'auto': wandb every 10min, checkpoint every 30min. Integer: both at N steps. 0: disable.")
+	parser.add_argument("--max_job_hours", type=float, default=24.0,
+				help="Maximum job duration in hours (default: 24.0). Used for time-aware checkpointing.")
+	parser.add_argument("--save_before_timeout_minutes", type=int, default=30,
+				help="Save checkpoint this many minutes before max_job_hours timeout (default: 30).")
+	parser.add_argument("--resume_from_step", type=int, default=None,
+				help="When restoring, skip to this step within the epoch. Used for mid-epoch resume.")
+
 	args = parser.parse_args()
 
 	# ============================================
@@ -289,6 +336,12 @@ if __name__ == "__main__":
 
 	# Set BF16 environment variable based on command-line argument
 	os.environ['USE_BF16'] = '1' if args.use_bf16 else '0'
+
+	# Parse checkpoint_every_n_steps: "auto", "0", or integer
+	if args.checkpoint_every_n_steps.lower() == "auto":
+		args.checkpoint_every_n_steps = "auto"  # Keep as string, train.py will calculate
+	else:
+		args.checkpoint_every_n_steps = int(args.checkpoint_every_n_steps)
 
 	import torch
 	torch.multiprocessing.set_start_method('spawn')

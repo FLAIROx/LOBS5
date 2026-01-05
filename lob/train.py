@@ -1,4 +1,5 @@
 import os
+import time
 import jax
 from jax import random
 import jax.numpy as jnp
@@ -314,6 +315,54 @@ def train(args):
     from lob.profiling_utils import GoodputMonitor
     goodput_monitor = GoodputMonitor() if args.enable_goodput_monitor else None
 
+    # Track job start time for time-aware checkpointing
+    job_start_time = time.time()
+
+    # Handle "auto" checkpoint interval: use wall clock time
+    # AUTO MODE: WANDB EVERY 10 MIN, CHECKPOINT EVERY 30 MIN
+    checkpoint_every_n_steps = args.checkpoint_every_n_steps
+    if checkpoint_every_n_steps == "auto":
+        log_with_timestamp(f"Job started. Max duration: {args.max_job_hours}h, AUTO mode: wandb every 10min, checkpoint every 30min")
+    else:
+        log_with_timestamp(f"Job started. Max duration: {args.max_job_hours}h, checkpoint every {checkpoint_every_n_steps} steps")
+
+    # =========================================================================
+    # CALLBACK FOR WANDB LOGGING AND CHECKPOINT SAVING (DIFFERENT FREQUENCIES)
+    # AUTO MODE:
+    #   - WANDB LOSS LOGGING: EVERY 10 MINUTES
+    #   - CHECKPOINT SAVING:  EVERY 30 MINUTES
+    # =========================================================================
+    def step_checkpoint_callback(state, epoch, step, loss, save_checkpoint_flag=True):
+        """Log to wandb and optionally save checkpoint."""
+        global_step = int(state.step)
+
+        # WANDB LOSS LOGGING (EVERY 10 MINUTES IN AUTO MODE)
+        wandb.log({
+            "step_loss": loss,
+            "epoch": epoch + 1,
+            "step_in_epoch": step + 1,
+            "global_step": global_step,
+        }, step=global_step)
+
+        # CHECKPOINT SAVING (EVERY 30 MINUTES IN AUTO MODE)
+        if save_checkpoint_flag:
+            ckpt = {
+                'model': deduplicate_trainstate(state),
+                'config': vars(args),
+                'metrics': {
+                    'loss_train': float(loss),
+                    'epoch': epoch,
+                    'step': step,  # Step within epoch for resume
+                }
+            }
+            save_checkpoint(ckpt_mgr, ckpt, global_step)
+            log_with_timestamp(f"Checkpoint SAVED: epoch={epoch+1}, step={step+1}, global_step={global_step}, loss={loss:.4f}")
+        else:
+            log_with_timestamp(f"WandB logged: epoch={epoch+1}, step={step+1}, global_step={global_step}, loss={loss:.4f}")
+
+    # Track resume state
+    resume_from_step = getattr(args, 'resume_from_step', None)
+
     for epoch in range(args.epochs):
         print(f"[*] Starting Training Epoch {epoch + 1}...")
         # LR scheduling now handled by optax schedules - no manual switching needed
@@ -323,7 +372,7 @@ def train(args):
         train_rng, skey = random.split(train_rng)
 
         #Pass an initial hidden state to be used in case of the 'RNN' forward pass being used.
-        state, train_loss, ce_by_tok = train_epoch(
+        state, train_loss, ce_by_tok, interrupted_at_step = train_epoch(
             state,
             skey,
             trainloader,
@@ -344,7 +393,19 @@ def train(args):
             batch_size=args.bsz,
             peak_tflops=1000.0,
             goodput_monitor=goodput_monitor,
+            # Step-level checkpointing parameters
+            checkpoint_callback=step_checkpoint_callback,
+            checkpoint_every_n_steps=checkpoint_every_n_steps,
+            job_start_time=job_start_time,
+            max_job_hours=args.max_job_hours,
+            save_before_timeout_minutes=args.save_before_timeout_minutes,
         )
+
+        # Check if epoch was interrupted due to timeout
+        if interrupted_at_step is not None:
+            log_with_timestamp(f"Epoch {epoch+1} interrupted at step {interrupted_at_step} due to timeout")
+            log_with_timestamp(f"To resume, use: --restore <checkpoint_path> --resume_from_step {interrupted_at_step}")
+            break  # Exit training loop
 
         if args.random_offsets_train:
             # reinit training loader, so that sequences are initialised with
