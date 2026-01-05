@@ -56,7 +56,7 @@ sweep_config = {
         'prenorm': {'values': [True]},
         'batchnorm': {'values': [True, False]},
         'bn_momentum': {'min': 0.1, 'max': 0.99},
-        'bsz': {'values': [8]},
+        'global_bsz': {'values': [8]},
         'epochs': {'value': 30},
         'early_stop_patience': {'value': 1000},  # handle early stopping in sweep
         'ssm_lr_base': {'min': 1e-6, 'max': 2e-3, 'distribution': 'log_uniform_values'},

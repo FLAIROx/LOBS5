@@ -308,7 +308,7 @@ def init_train_state(
     # ===========================================================================
     # Create learning rate schedules (MaxText-style optax schedules)
     # ===========================================================================
-    steps_per_epoch = train_size // args.bsz
+    steps_per_epoch = train_size // args.global_bsz
     if hasattr(args, 'curtail_epochs') and args.curtail_epochs is not None:
         steps_per_epoch = min(steps_per_epoch, args.curtail_epochs + 1)
 
@@ -350,7 +350,7 @@ def init_train_state(
         in_dim=1,
         book_dim=book_dim,
         book_seq_len=book_seq_len,
-        bsz=args.bsz,
+        global_bsz=args.global_bsz,
         seq_len=seq_len,
         weight_decay=args.weight_decay,
         batchnorm=args.batchnorm,

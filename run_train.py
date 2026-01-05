@@ -63,7 +63,7 @@ if __name__ == "__main__":
 			"wandb_project": "lobs5-2.2B-deep-d4352"
 		},
 		"2B-Wide": {
-			"d_model": 4480, "n_layers": 32, "blocks": 56, "ssm_size_base": 4480, "micro_bsz": 4,
+			"d_model": 4480, "n_layers": 32, "blocks": 56, "ssm_size_base": 4480, "micro_bsz": 1,
 			"ssm_lr_base": 0.000035, "lr_factor": 1,
 			"wandb_project": "lobs5-2B-wide-d4480"
 		},
@@ -73,7 +73,7 @@ if __name__ == "__main__":
 			"wandb_project": "lobs5-2B-deep-d4096"
 		},
 		"1.8B-Wide": {
-			"d_model": 4144, "n_layers": 32, "blocks": 56, "ssm_size_base": 4144, "micro_bsz": 4,
+			"d_model": 4144, "n_layers": 32, "blocks": 56, "ssm_size_base": 4144, "micro_bsz": 1,
 			"ssm_lr_base": 0.00004, "lr_factor": 1,
 			"wandb_project": "lobs5-1.8B-wide-d4144"
 		},
@@ -98,7 +98,7 @@ if __name__ == "__main__":
 			"wandb_project": "lobs5-300M-d2048"
 		},
 		"55M": {
-			"d_model": 1024, "n_layers": 12, "blocks": 16, "ssm_size_base": 1024, "micro_bsz": 12,
+			"d_model": 1024, "n_layers": 12, "blocks": 16, "ssm_size_base": 1024, "micro_bsz": 28,
 			"ssm_lr_base": 5e-5, "lr_factor": 1,
 			"wandb_project": "lobs5-55M-d1024"
 		},
