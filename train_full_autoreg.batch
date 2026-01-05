@@ -2,7 +2,11 @@
 #SBATCH --job-name=lobs5_autoreg
 #SBATCH --output=logs_lobs5/lobs5_%j.out
 #SBATCH --error=logs_lobs5/lobs5_%j.err
-#SBATCH --nodes=1
+# === 1-node config (commented out) ===
+# #SBATCH --nodes=1
+
+# === 25-node 360M config (active) ===
+#SBATCH --nodes=25
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
@@ -10,6 +14,8 @@
 #SBATCH --contiguous
 #SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
 
+# === 25-node 360M config: micro_bsz=8 ===
+export PER_GPU_BSZ=8
 
 echo "============================================"
 echo "Job started at: $(date)"
@@ -222,9 +228,18 @@ nvidia-smi --list-gpus | head -4
 
 # Run training
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+# === 25-node 360M config (explicit params, bypass preset) ===
+# ssm_lr_base: 0.0002 (1-node) * 25 = 0.0005 (linear scaling)
+# Original preset: --model_preset=360M
 python -u -B run_train.py \
-    --model_preset='"$MODEL_PRESET"' \
     --USE_WANDB=True \
+    --d_model=2048 \
+    --n_layers=24 \
+    --blocks=32 \
+    --ssm_size_base=2048 \
+    --ssm_lr_base=0.0005 \
+    --lr_factor=1 \
+    --wandb_project=lobs5-360M-25node \
     --wandb_entity=kang-oxford \
     --C_init=trunc_standard_normal \
     --prenorm=True \
