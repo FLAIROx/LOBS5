@@ -6,7 +6,49 @@ import sys
 sys.path.insert(0, '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5')
 from es_lobs5.models.lob_model import ES_LobBookModel, ES_PaddedLobPredModel
 from es_lobs5.models.common import CommonParams, simple_es_tree_key
-from es_lobs5.utils.import_utils import get_all_noisers
+
+
+class NoopNoiser:
+    """Local mock NoopNoiser for testing without HyperscaleES dependency.
+
+    This is a noop noiser that passes through parameters unchanged,
+    allowing tests to verify model forward shapes without actual ES perturbation.
+    """
+
+    @classmethod
+    def init_noiser(cls, params, sigma, lr, *args, solver=None, solver_kwargs=None, **kwargs):
+        """Return empty frozen and noiser params."""
+        return {}, {}
+
+    @classmethod
+    def do_mm(cls, frozen_noiser_params, noiser_params, param, base_key, iterinfo, x):
+        """Matrix multiply: x @ param.T"""
+        return x @ param.T
+
+    @classmethod
+    def do_Tmm(cls, frozen_noiser_params, noiser_params, param, base_key, iterinfo, x):
+        """Transposed matrix multiply: x @ param"""
+        return x @ param
+
+    @classmethod
+    def do_emb(cls, frozen_noiser_params, noiser_params, param, base_key, iterinfo, x):
+        """Embedding lookup: param[x]"""
+        return param[x]
+
+    @classmethod
+    def get_noisy_standard(cls, frozen_noiser_params, noiser_params, param, base_key, iterinfo):
+        """Return param unchanged (noop)."""
+        return param
+
+    @classmethod
+    def convert_fitnesses(cls, frozen_noiser_params, noiser_params, raw_scores, num_episodes_list=None):
+        """Return raw scores unchanged."""
+        return raw_scores
+
+    @classmethod
+    def do_updates(cls, frozen_noiser_params, noiser_params, params, base_keys, fitnesses, iterinfos, es_map):
+        """Return params unchanged (noop update)."""
+        return noiser_params, params
 
 
 def test_lob_model_forward():
@@ -38,9 +80,8 @@ def test_lob_model_forward():
         activation='gelu',
     )
 
-    # Setup noiser (noop for testing)
-    noisers = get_all_noisers()
-    noiser = noisers['noop']
+    # Setup noiser (local noop mock for testing)
+    noiser = NoopNoiser
     es_tree_key = simple_es_tree_key(model_init.params, key, model_init.scan_map)
 
     common_params = CommonParams(
@@ -100,9 +141,8 @@ def test_lob_model_rnn_step():
         activation='gelu',
     )
 
-    # Setup noiser
-    noisers = get_all_noisers()
-    noiser = noisers['noop']
+    # Setup noiser (local noop mock for testing)
+    noiser = NoopNoiser
     es_tree_key = simple_es_tree_key(model_init.params, key, model_init.scan_map)
 
     common_params = CommonParams(

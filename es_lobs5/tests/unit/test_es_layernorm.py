@@ -14,16 +14,20 @@ sys.path.insert(0, '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5')
 from es_lobs5.models.common import (
     ES_LayerNorm, ES_Parameter, CommonParams, simple_es_tree_key, EXCLUDED
 )
-from es_lobs5.utils.import_utils import get_all_noisers
+
+
+class NoopNoiser:
+    """Mock noiser that returns parameters unchanged (no noise added)."""
+    @classmethod
+    def get_noisy_standard(cls, frozen_noiser_params, noiser_params, params, es_tree_key, iterinfo):
+        return params
 
 
 def _build_common_params(es_init, key):
     """Helper to build CommonParams with noop noiser."""
-    noisers = get_all_noisers()
-    noiser = noisers['noop']
     es_tree_key = simple_es_tree_key(es_init.params, key, es_init.scan_map)
     return CommonParams(
-        noiser=noiser,
+        noiser=NoopNoiser,
         frozen_noiser_params=None,
         noiser_params=None,
         frozen_params=es_init.frozen_params,

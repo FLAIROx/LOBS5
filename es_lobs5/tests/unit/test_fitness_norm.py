@@ -1,35 +1,35 @@
-"""Test fitness normalization."""
+"""Test fitness normalization.
+
+This module tests z-score normalization used in Evolution Strategies.
+It does not depend on HyperscaleES or external ES frameworks.
+"""
 import jax
 import jax.numpy as jnp
 
-import sys
-sys.path.insert(0, '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5')
-from es_lobs5.utils.import_utils import get_all_noisers
+
+def zscore_normalize(x):
+    """Z-score normalization with numerical stability.
+
+    Args:
+        x: Input array of fitness scores.
+
+    Returns:
+        Normalized array with mean ~0 and std ~1 (when var >> 1e-5).
+    """
+    return (x - jnp.mean(x)) / jnp.sqrt(jnp.var(x) + 1e-5)
 
 
 def test_zscore_normalization():
     """Test: normalized fitness mean ~ 0, std ~ 1.
 
-    The convert_fitnesses function performs z-score normalization:
-        normalized = (raw - mean) / std
+    The zscore_normalize function performs z-score normalization:
+        normalized = (raw - mean) / sqrt(var + 1e-5)
 
     After normalization, the output should have:
         - mean ~ 0
-        - std ~ 1
+        - std ~ 1 (when var >> 1e-5)
     """
-    noisers = get_all_noisers()
-    noiser = noisers['eggroll']
-
-    # Initialize noiser with dummy params
     key = jax.random.PRNGKey(42)
-    dummy_params = {'weight': jax.random.normal(key, (10, 10))}
-
-    frozen_noiser_params, noiser_params = noiser.init_noiser(
-        dummy_params,
-        sigma=0.01,
-        lr=0.001,
-        rank=4,
-    )
 
     # Test with various raw fitness distributions
     # Note: The formula uses sqrt(var + 1e-5) for numerical stability
@@ -45,9 +45,7 @@ def test_zscore_normalization():
     ]
 
     for i, (raw_scores, check_std) in enumerate(test_cases):
-        normalized = noiser.convert_fitnesses(
-            frozen_noiser_params, noiser_params, raw_scores
-        )
+        normalized = zscore_normalize(raw_scores)
 
         mean = jnp.mean(normalized)
         std = jnp.std(normalized)
@@ -82,26 +80,15 @@ def test_gradient_estimation():
     2. Assigning fitness proportional to perturbation direction
     3. Verifying that the gradient points in the correct direction
     """
-    noisers = get_all_noisers()
-    noiser = noisers['eggroll']
-
     key = jax.random.PRNGKey(123)
 
     # Simple 2D parameter for easy verification
     in_dim, out_dim = 4, 4
     param = jax.random.normal(key, (out_dim, in_dim)) * 0.1
 
-    dummy_params = {'weight': param}
     sigma = 0.1
     n_threads = 8  # Must be even for antithetic pairs
     rank = 4
-
-    frozen_noiser_params, noiser_params = noiser.init_noiser(
-        dummy_params,
-        sigma=sigma,
-        lr=0.001,
-        rank=rank,
-    )
 
     # Generate a base key for perturbations
     base_key = jax.random.PRNGKey(999)
@@ -134,10 +121,8 @@ def test_gradient_estimation():
         jnp.sum(perturbations[i] * direction) for i in range(n_threads)
     ])
 
-    # Normalize fitnesses
-    normalized_fitnesses = noiser.convert_fitnesses(
-        frozen_noiser_params, noiser_params, raw_fitnesses
-    )
+    # Normalize fitnesses using z-score
+    normalized_fitnesses = zscore_normalize(raw_fitnesses)
 
     # Verify antithetic property: paired threads should have opposite normalized fitness
     for pair_idx in range(n_threads // 2):

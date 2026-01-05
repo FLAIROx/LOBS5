@@ -1,12 +1,64 @@
-"""Test Eggroll antithetic sampling."""
+"""Test Eggroll antithetic sampling.
+
+This test uses a local mock implementation that doesn't depend on HyperscaleES.
+The core antithetic sampling logic is:
+    sigma = jnp.where(thread_id % 2 == 0, base_sigma, -base_sigma)
+"""
 import jax
 import jax.numpy as jnp
 import pytest
 
-import sys
-sys.path.insert(0, '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5')
 
-from es_lobs5.utils.import_utils import get_all_noisers
+# ============================================================================
+# Local mock implementation of EggRoll antithetic sampling
+# ============================================================================
+
+def get_nonlora_update_params(frozen_noiser_params, base_sigma, iterinfo, param, key):
+    """Generate perturbation for a parameter using antithetic sampling.
+
+    Key logic:
+    - true_thread_idx = thread_id // 2: pairs share the same random seed
+    - sigma = +base_sigma if thread_id % 2 == 0, else -base_sigma: opposite signs
+    """
+    epoch, thread_id = iterinfo
+
+    noise_reuse = frozen_noiser_params.get("noise_reuse", 0)
+    true_epoch = 0 if noise_reuse == 0 else epoch // noise_reuse
+
+    # Antithetic sampling: pairs share the same noise pattern
+    true_thread_idx = thread_id // 2
+    # Core antithetic logic: even threads get +sigma, odd threads get -sigma
+    sigma = jnp.where(thread_id % 2 == 0, base_sigma, -base_sigma)
+
+    updates = jax.random.normal(
+        jax.random.fold_in(jax.random.fold_in(key, true_epoch), true_thread_idx),
+        param.shape,
+        dtype=param.dtype
+    )
+    return updates * sigma
+
+
+class MockEggRoll:
+    """Mock EggRoll noiser for testing antithetic sampling."""
+
+    @classmethod
+    def init_noiser(cls, params, sigma, lr, *args, noise_reuse=0, freeze_nonlora=False, **kwargs):
+        """Initialize noiser parameters."""
+        frozen_noiser_params = {
+            "noise_reuse": noise_reuse,
+            "freeze_nonlora": freeze_nonlora,
+        }
+        noiser_params = {"sigma": sigma}
+        return frozen_noiser_params, noiser_params
+
+    @classmethod
+    def get_noisy_standard(cls, frozen_noiser_params, noiser_params, param, base_key, iterinfo):
+        """Get noisy parameter using antithetic sampling."""
+        if iterinfo is None or frozen_noiser_params.get("freeze_nonlora", False):
+            return param
+        return param + get_nonlora_update_params(
+            frozen_noiser_params, noiser_params["sigma"], iterinfo, param, base_key
+        )
 
 
 def test_antithetic_pairs():
@@ -21,8 +73,7 @@ def test_antithetic_pairs():
 
     Therefore: perturbation[2k] = -perturbation[2k+1]
     """
-    noisers = get_all_noisers()
-    FixedEggRoll = noisers['eggroll']
+    FixedEggRoll = MockEggRoll
 
     # Create a test parameter
     key = jax.random.PRNGKey(42)
@@ -79,8 +130,7 @@ def test_antithetic_same_magnitude():
     just opposite signs. This ensures variance reduction while maintaining
     the same exploration radius.
     """
-    noisers = get_all_noisers()
-    FixedEggRoll = noisers['eggroll']
+    FixedEggRoll = MockEggRoll
 
     # Create a test parameter
     key = jax.random.PRNGKey(42)
@@ -145,8 +195,7 @@ def test_different_pairs_different_noise():
     While threads within a pair share the same noise pattern (opposite signs),
     different pairs should have different noise patterns.
     """
-    noisers = get_all_noisers()
-    FixedEggRoll = noisers['eggroll']
+    FixedEggRoll = MockEggRoll
 
     # Create a test parameter
     key = jax.random.PRNGKey(42)

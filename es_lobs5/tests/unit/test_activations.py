@@ -35,7 +35,7 @@ def test_gelu_activation():
     ]
 
     for name, x in test_cases:
-        output = nn.gelu(x)
+        output = jax.nn.gelu(x)
 
         # Basic shape preservation
         assert output.shape == x.shape, f"Shape mismatch for {name}: {output.shape} != {x.shape}"
@@ -51,14 +51,14 @@ def test_gelu_activation():
         print(f"[PASS] GELU {name}: shape={output.shape}, range=[{jnp.min(output):.4f}, {jnp.max(output):.4f}]")
 
     # Test GELU(0) = 0
-    zero_out = nn.gelu(jnp.array([0.0]))
+    zero_out = jax.nn.gelu(jnp.array([0.0]))
     assert jnp.allclose(zero_out, 0.0, atol=1e-6), f"GELU(0) should be 0, got {zero_out}"
     print("[PASS] GELU(0) = 0")
 
     # Test positive input: GELU(x) < x for positive x (since Phi(x) < 1)
     # But GELU(x) approaches x as x -> inf
     pos_x = jnp.array([0.5, 1.0, 2.0, 5.0])
-    pos_out = nn.gelu(pos_x)
+    pos_out = jax.nn.gelu(pos_x)
     assert jnp.all(pos_out <= pos_x), "GELU(x) should be <= x for positive x"
     assert jnp.all(pos_out > 0), "GELU(x) should be > 0 for positive x"
     print("[PASS] GELU(x) <= x for positive x")
@@ -133,7 +133,7 @@ def test_glu_variants_shape():
     out1_params = jax.random.normal(key1, (d_model, d_model)) * 0.02
     out2_params = jax.random.normal(key2, (d_model, d_model)) * 0.02
 
-    gelu_x = nn.gelu(x)
+    gelu_x = jax.nn.gelu(x)
     out1 = gelu_x @ out1_params
     gate = jax.nn.sigmoid(gelu_x @ out2_params)
     full_glu_out = out1 * gate
@@ -151,7 +151,7 @@ def test_glu_variants_shape():
     print(f"[PASS] half_glu1 output shape: {half_glu1_out.shape}")
 
     # half_glu2: x * sigmoid(Dense(gelu(x)))
-    gelu_for_gate = nn.gelu(x)
+    gelu_for_gate = jax.nn.gelu(x)
     gate = jax.nn.sigmoid(gelu_for_gate @ out2_params)
     half_glu2_out = x * gate
 
@@ -180,7 +180,7 @@ def test_gelu_gradient_flow():
 
     # Compute gradient of sum(gelu(x)) w.r.t. x
     def gelu_sum(x):
-        return jnp.sum(nn.gelu(x))
+        return jnp.sum(jax.nn.gelu(x))
 
     grad_fn = jax.grad(gelu_sum)
     grads = grad_fn(x)

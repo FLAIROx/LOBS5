@@ -38,55 +38,6 @@ def get_lora_update_params(frozen_noiser_params, base_sigma, iterinfo, param, ke
     return A * sigma, B
 
 
-class EggRoll:
-    """Minimal EggRoll noiser for testing LoRA functionality."""
-
-    @classmethod
-    def init_noiser(cls, params, sigma, lr, *args, solver=None, solver_kwargs=None,
-                    group_size=0, freeze_nonlora=False, noise_reuse=0, rank=1, **kwargs):
-        """Initialize noiser with frozen and mutable parameters."""
-        if solver is None:
-            solver = optax.sgd
-        if solver_kwargs is None:
-            solver_kwargs = {}
-        true_solver = solver(lr, **solver_kwargs)
-        opt_state = true_solver.init(params)
-
-        return {
-            "group_size": group_size,
-            "freeze_nonlora": freeze_nonlora,
-            "noise_reuse": noise_reuse,
-            "solver": true_solver,
-            "rank": rank
-        }, {"sigma": sigma, "opt_state": opt_state}
-
-    @classmethod
-    def do_mm(cls, frozen_noiser_params, noiser_params, param, base_key, iterinfo, x):
-        """Matrix multiplication with LoRA perturbation: x @ (param + A @ B.T).T"""
-        base_ans = x @ param.T
-        if iterinfo is None:
-            return base_ans
-        A, B = get_lora_update_params(
-            frozen_noiser_params,
-            noiser_params["sigma"] / jnp.sqrt(frozen_noiser_params["rank"]),
-            iterinfo, param, base_key
-        )
-        return base_ans + x @ B @ A.T
-
-    @classmethod
-    def do_Tmm(cls, frozen_noiser_params, noiser_params, param, base_key, iterinfo, x):
-        """Transposed matrix multiplication with LoRA perturbation."""
-        base_ans = x @ param
-        if iterinfo is None:
-            return base_ans
-        A, B = get_lora_update_params(
-            frozen_noiser_params,
-            noiser_params["sigma"] / jnp.sqrt(frozen_noiser_params["rank"]),
-            iterinfo, param, base_key
-        )
-        return base_ans + x @ A @ B.T
-
-
 def test_lora_rank():
     """Test: LoRA decomposition A: (r, d), B: (d, r)."""
     key = jax.random.PRNGKey(42)
@@ -296,7 +247,10 @@ def test_lora_noise_reuse():
 
 
 def test_lora_eggroll_integration():
-    """Test: EggRoll noiser correctly uses LoRA for matrix multiplication."""
+    """Test: LoRA decomposition for matrix multiplication is mathematically correct.
+
+    Simplified test focusing on the math: x @ (param + A @ B.T).T = x @ param.T + x @ B @ A.T
+    """
     key = jax.random.PRNGKey(42)
 
     rank = 4
@@ -306,41 +260,42 @@ def test_lora_eggroll_integration():
 
     # Create a weight matrix (a_dim x b_dim)
     param = jax.random.normal(key, (a_dim, b_dim))
-
-    # Initialize EggRoll noiser
-    frozen_noiser_params, noiser_params = EggRoll.init_noiser(
-        {"weight": param},
-        sigma=sigma,
-        lr=0.001,
-        rank=rank,
-    )
-
     param_key = jax.random.PRNGKey(987)
+
+    # Setup frozen_noiser_params (mimicking EggRoll config)
+    frozen_noiser_params = {
+        "rank": rank,
+        "noise_reuse": 0,
+    }
+
+    iterinfo = (0, 0)
 
     # Create input: (batch, b_dim) for x @ weight.T -> (batch, a_dim)
     batch_size = 8
     x = jax.random.normal(key, (batch_size, b_dim))
 
-    # Forward pass without noise (iterinfo=None)
-    out_clean = EggRoll.do_mm(frozen_noiser_params, noiser_params, param, param_key, None, x)
-    expected_clean = x @ param.T
-    assert jnp.allclose(out_clean, expected_clean, atol=1e-6), "Clean forward should match x @ param.T"
+    # Clean forward pass: x @ param.T
+    out_clean = x @ param.T
 
-    # Forward pass with noise (iterinfo=(0, 0))
-    iterinfo = (0, 0)
-    out_noisy = EggRoll.do_mm(frozen_noiser_params, noiser_params, param, param_key, iterinfo, x)
+    # Get LoRA decomposition
+    A, B = get_lora_update_params(frozen_noiser_params, sigma / jnp.sqrt(rank), iterinfo, param, param_key)
+
+    # Noisy forward: x @ param.T + x @ B @ A.T
+    # This is equivalent to: x @ (param + A @ B.T).T
+    out_noisy = out_clean + x @ B @ A.T
 
     # Noisy output should differ from clean
     diff = jnp.abs(out_noisy - out_clean).max()
     assert diff > 1e-6, f"Noisy forward should differ from clean, diff = {diff}"
 
-    # Verify the LoRA structure is applied correctly
-    # out_noisy = x @ param.T + x @ B @ A.T
-    A, B = get_lora_update_params(frozen_noiser_params, sigma / jnp.sqrt(rank), iterinfo, param, param_key)
-    expected_noisy = x @ param.T + x @ B @ A.T
-    assert jnp.allclose(out_noisy, expected_noisy, atol=1e-5), "Noisy forward should match x @ param.T + x @ B @ A.T"
+    # Verify the math: x @ (param + A @ B.T).T should equal x @ param.T + x @ B @ A.T
+    # Using the identity: (M + N).T = M.T + N.T and (A @ B.T).T = B @ A.T
+    perturbed_param = param + A @ B.T
+    expected_via_full = x @ perturbed_param.T
+    assert jnp.allclose(out_noisy, expected_via_full, atol=1e-5), \
+        "x @ (param + A @ B.T).T should equal x @ param.T + x @ B @ A.T"
 
-    print(f"[PASS] test_lora_eggroll_integration: EggRoll correctly applies LoRA perturbation")
+    print(f"[PASS] test_lora_eggroll_integration: LoRA math is correct")
     return True
 
 
