@@ -26,14 +26,24 @@ def create_simple_mesh(num_devices: int) -> Mesh:
     - This is the minimal change approach for migrating from pmap
 
     Args:
-        num_devices: Number of devices
+        num_devices: Number of devices (local devices for this process)
 
     Returns:
         Mesh: A mesh with only the 'data' axis
+
+    Note on multi-node:
+    - In multi-node mode, jax.devices() returns ALL global devices (e.g., 40 GPUs)
+    - But we need LOCAL devices for this process (e.g., 4 GPUs)
+    - jax.local_devices() returns only the devices assigned to this process
     """
     from jax.experimental import mesh_utils
 
-    devices = jax.devices()[:num_devices]
+    # CRITICAL: Use local_devices() for multi-node support
+    # jax.devices() returns all global devices, but we need devices local to this process
+    local_devs = jax.local_devices()
+    devices = local_devs[:num_devices]
+
+    print(f"[Sharding] Process {jax.process_index()}: Using {len(devices)} local devices out of {len(local_devs)} available")
 
     # Use mesh_utils.create_device_mesh (MaxText approach)
     # This properly handles device topology and returns a numpy array of devices

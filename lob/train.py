@@ -66,28 +66,44 @@ def train(args):
     best_test_loss = 100000000
     best_test_acc = -10000.0
 
+    # =========================================================================
+    # Multi-node handling: Only rank 0 should run WandB and checkpointing
+    # =========================================================================
+    is_distributed = getattr(args, 'is_distributed', False)
+    process_rank = getattr(args, 'process_index', 0)
+    is_main_process = (process_rank == 0)
+
+    if is_distributed:
+        print(f"[Train] Distributed mode: rank {process_rank}, is_main_process={is_main_process}")
+
     #for parameter sweep: get args from wandb server
     if args is None:
         args = wandb.config
     else:
-        if args.USE_WANDB:
-            # Make wandb config dictionary
-            run = wandb.init(
-                project=args.wandb_project,
-                job_type='model_training',
-                config=vars(args),
-                entity=args.wandb_entity,
-                settings=wandb.Settings(_disable_stats=False, _disable_meta=False)
-            )
+        # Only main process initializes WandB in online mode
+        if is_main_process:
+            if args.USE_WANDB:
+                # Make wandb config dictionary
+                run = wandb.init(
+                    project=args.wandb_project,
+                    job_type='model_training',
+                    config=vars(args),
+                    entity=args.wandb_entity,
+                    settings=wandb.Settings(_disable_stats=False, _disable_meta=False)
+                )
+            else:
+                run = wandb.init(mode='offline')
         else:
-            run = wandb.init(mode='offline')
+            # Non-main processes: use offline/disabled mode
+            run = wandb.init(mode='disabled')
 
     ssm_size = args.ssm_size_base
     ssm_lr = args.ssm_lr_base
 
     # determine the size of initial blocks
     block_size = int(ssm_size / args.blocks)
-    wandb.log({"block_size": block_size})
+    if is_main_process:
+        wandb.log({"block_size": block_size})
 
     # Set global learning rate lr (e.g. encoders, etc.) as function of ssm_lr
     lr = args.lr_factor * ssm_lr
@@ -243,8 +259,8 @@ def train(args):
             log_with_timestamp("  - Optimizer states: FP32")
             log_with_timestamp("  - Decoder: FP32 (for numerical stability)")
 
-        # Log to WandB
-        if args.USE_WANDB:
+        # Log to WandB (only main process)
+        if args.USE_WANDB and is_main_process:
             wandb.log({
                 "use_bf16": use_bf16,
                 "precision_mode": "bf16_mixed" if use_bf16 else "fp32",
@@ -337,30 +353,36 @@ def train(args):
       
     # print("USING VERY INFREQUENT CHECKPOINTING FOR TINY EPOCH SIZE ")
 
-    mgr_options = ocp.CheckpointManagerOptions(
-        save_interval_steps=1,
-        create=True,
-        max_to_keep=10,
-        keep_period=5,
-        # step_prefix=f'{run.name}_{run.id}',
-        # enable_async_checkpointing=False,
-    )
-    ckpt_mgr = ocp.CheckpointManager(
-        os.path.abspath(f'checkpoints/{run.name}_{run.id}/'),
-        # ocp.Checkpointer(ocp.PyTreeCheckpointHandler()),
-        # ocp.Checkpointer(ocp.StandardCheckpointHandler()),
-        item_names=('state', 'metadata'),
-        options=mgr_options,
-        metadata=vars(args)
-    )
+    # Only main process creates checkpoint manager
+    ckpt_mgr = None
+    if is_main_process:
+        mgr_options = ocp.CheckpointManagerOptions(
+            save_interval_steps=1,
+            create=True,
+            max_to_keep=10,
+            keep_period=5,
+            # step_prefix=f'{run.name}_{run.id}',
+            # enable_async_checkpointing=False,
+        )
+        ckpt_mgr = ocp.CheckpointManager(
+            os.path.abspath(f'checkpoints/{run.name}_{run.id}/'),
+            # ocp.Checkpointer(ocp.PyTreeCheckpointHandler()),
+            # ocp.Checkpointer(ocp.StandardCheckpointHandler()),
+            item_names=('state', 'metadata'),
+            options=mgr_options,
+            metadata=vars(args)
+        )
 
 
-    if args.ignore_times:
-        # Removing the 5 abs time tokens from the length of the sequence.  
-        dt = [[x] for (x,) in zip([*range(seq_len-5*args.msg_seq_len)])]
-    else:
-        dt = [[x] for (x,) in zip([*range(seq_len)])]
-    ce_table=wandb.Table(columns=["tok"] ,data=dt)
+    # ce_table only used by main process for logging
+    ce_table = None
+    if is_main_process:
+        if args.ignore_times:
+            # Removing the 5 abs time tokens from the length of the sequence.
+            dt = [[x] for (x,) in zip([*range(seq_len-5*args.msg_seq_len)])]
+        else:
+            dt = [[x] for (x,) in zip([*range(seq_len)])]
+        ce_table=wandb.Table(columns=["tok"] ,data=dt)
 
     ignore_times=args.ignore_times
     batchnorm=args.batchnorm
@@ -387,7 +409,11 @@ def train(args):
     #   - CHECKPOINT SAVING:  EVERY 30 MINUTES
     # =========================================================================
     def step_checkpoint_callback(state, epoch, step, loss, save_checkpoint_flag=True):
-        """Log to wandb and optionally save checkpoint."""
+        """Log to wandb and optionally save checkpoint. Only main process does this."""
+        # Only main process logs and saves checkpoints
+        if not is_main_process:
+            return
+
         global_step = int(state.step)
 
         # WANDB LOSS LOGGING (EVERY 10 MINUTES IN AUTO MODE)
@@ -399,7 +425,7 @@ def train(args):
         }, step=global_step)
 
         # CHECKPOINT SAVING (EVERY 30 MINUTES IN AUTO MODE)
-        if save_checkpoint_flag:
+        if save_checkpoint_flag and ckpt_mgr is not None:
             ckpt = {
                 'model': deduplicate_trainstate(state),
                 'config': vars(args),
@@ -474,8 +500,8 @@ def train(args):
             # Extract estimated LR from Prodigy
             estimated_lr = extract_prodigy_estimated_lr(state, lr_multiplier=prodigy_lr_multiplier)
 
-            # Log to WandB
-            if args.USE_WANDB:
+            # Log to WandB (only main process)
+            if args.USE_WANDB and is_main_process:
                 wandb.log({
                     "prodigy_estimated_lr": estimated_lr,
                     "prodigy_switch_step": int(state.step),
@@ -619,19 +645,20 @@ def train(args):
                 f" Test Accuracy: {val_acc:.4f}"
             )
 
-        #save checkpoint
-        ckpt = {
-            'model': deduplicate_trainstate(state),
-            'config': vars(args),
-            'metrics': {
-                'loss_train': float(train_loss),
-                'loss_val_ar': float(val_loss),
-                'loss_test_rnn': float(test_loss),
-                'acc_val_ar': float(val_acc),
-                'acc_test_rnn': float(test_acc),
+        #save checkpoint (only main process)
+        if is_main_process and ckpt_mgr is not None:
+            ckpt = {
+                'model': deduplicate_trainstate(state),
+                'config': vars(args),
+                'metrics': {
+                    'loss_train': float(train_loss),
+                    'loss_val_ar': float(val_loss),
+                    'loss_test_rnn': float(test_loss),
+                    'acc_val_ar': float(val_acc),
+                    'acc_test_rnn': float(test_acc),
+                }
             }
-        }
-        save_checkpoint(ckpt_mgr, ckpt, epoch)
+            save_checkpoint(ckpt_mgr, ckpt, epoch)
 
         # For early stopping purposes
         if val_loss < best_val_loss:
@@ -663,14 +690,14 @@ def train(args):
             f" {best_test_acc:.4f} at Epoch {best_epoch + 1}\n"
         )
 
-        if args.log_ce_tables:
+        if args.log_ce_tables and is_main_process:
             ce_table.add_column(name="val_ce_"+str(epoch),data=val_ce_means.tolist())
             ce_table.add_column(name="test_ce_"+str(epoch),data=test_ce_means.tolist())
             ce_table.add_column(name="val_acc_"+str(epoch),data=val_acc_means.tolist())
             ce_table.add_column(name="test_acc_"+str(epoch),data=test_acc_means.tolist())
             ce_table.add_column(name="train_ce_"+str(epoch),data=ce_by_tok.tolist())
             ce_table=wandb.Table(columns=ce_table.columns,data=ce_table.data)
-        
+
 
         # Compute learning rate from schedule using state.step
         # With optax schedules (MaxText way), LR is not stored in hyperparams but
@@ -678,44 +705,46 @@ def train(args):
         current_lr = lr_schedule(int(state.step))
         current_ssm_lr = ssm_lr_schedule(int(state.step))
 
-        if valloader is not None:
-            wandb.log(
-                {
-                    "Training Loss": train_loss,
-                    "Val loss": val_loss,
-                    "Val Accuracy": val_acc,
-                    "Test Loss": test_loss,
-                    "Test Accuracy": test_acc,
-                    "count": count,
-                    "Learning rate count": lr_count,
-                    "Opt acc": opt_acc,
-                    "lr": float(current_lr),
-                    "ssm_lr": float(current_ssm_lr),
-                    # "Training CE by token":ce_table
-                }
-            )
-        else:
-            wandb.log(
-                {
-                    "Training Loss": train_loss,
-                    "Val loss": val_loss,
-                    "Val Accuracy": val_acc,
-                    "count": count,
-                    "Learning rate count": lr_count,
-                    "Opt acc": opt_acc,
-                    "lr": float(current_lr),
-                    "ssm_lr": float(current_ssm_lr),
-                    # "Training CE by token":ce_table
-                }
-            )
+        # Only main process logs to WandB
+        if is_main_process:
+            if valloader is not None:
+                wandb.log(
+                    {
+                        "Training Loss": train_loss,
+                        "Val loss": val_loss,
+                        "Val Accuracy": val_acc,
+                        "Test Loss": test_loss,
+                        "Test Accuracy": test_acc,
+                        "count": count,
+                        "Learning rate count": lr_count,
+                        "Opt acc": opt_acc,
+                        "lr": float(current_lr),
+                        "ssm_lr": float(current_ssm_lr),
+                        # "Training CE by token":ce_table
+                    }
+                )
+            else:
+                wandb.log(
+                    {
+                        "Training Loss": train_loss,
+                        "Val loss": val_loss,
+                        "Val Accuracy": val_acc,
+                        "count": count,
+                        "Learning rate count": lr_count,
+                        "Opt acc": opt_acc,
+                        "lr": float(current_lr),
+                        "ssm_lr": float(current_ssm_lr),
+                        # "Training CE by token":ce_table
+                    }
+                )
 
-        if args.log_ce_tables:
-            wandb.log({"CE by token": ce_table})
-        wandb.run.summary["Best Val Loss"] = best_loss
-        wandb.run.summary["Best Val Accuracy"] = best_acc
-        wandb.run.summary["Best Epoch"] = best_epoch
-        wandb.run.summary["Best Test Loss"] = best_test_loss
-        wandb.run.summary["Best Test Accuracy"] = best_test_acc
+            if args.log_ce_tables:
+                wandb.log({"CE by token": ce_table})
+            wandb.run.summary["Best Val Loss"] = best_loss
+            wandb.run.summary["Best Val Accuracy"] = best_acc
+            wandb.run.summary["Best Epoch"] = best_epoch
+            wandb.run.summary["Best Test Loss"] = best_test_loss
+            wandb.run.summary["Best Test Accuracy"] = best_test_acc
         # print("IGNORING EARLY STOPPING FOR TINY EPOCH SIZE ")
         # After each epoch
         gc.collect()

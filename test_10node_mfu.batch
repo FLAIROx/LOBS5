@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
-#SBATCH --time=00:30:00
+# #SBATCH --time=00:30:00
 #SBATCH --contiguous
 #SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
 
@@ -31,9 +31,9 @@ if [ -n "$PER_GPU_BSZ" ]; then
 fi
 
 # Quick test mode - only run 100 steps per epoch
-CURTAIL_EPOCHS=100
-echo "[*] Quick MFU test mode: $CURTAIL_EPOCHS steps only"
-export CURTAIL_EPOCHS
+# CURTAIL_EPOCHS=100
+# echo "[*] Quick MFU test mode: $CURTAIL_EPOCHS steps only"
+# export CURTAIL_EPOCHS
 
 mkdir -p logs_lobs5
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
@@ -143,8 +143,8 @@ python -u -B run_train.py \
     --debug_overfit=False \
     --lr_patience=2 \
     --use_bf16=True \
-    --token_mode=24 \
-    --curtail_epochs=$CURTAIL_EPOCHS
+    --token_mode=24
+    # --curtail_epochs=$CURTAIL_EPOCHS
 '
 
 echo "============================================"
