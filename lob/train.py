@@ -10,13 +10,24 @@ import gc
 from datetime import datetime
 import subprocess
 
-from lob.init_train import init_train_state, load_checkpoint, save_checkpoint, deduplicate_trainstate
+from lob.init_train import (
+    init_train_state,
+    init_train_state_with_prodigy,
+    load_checkpoint,
+    save_checkpoint,
+    deduplicate_trainstate,
+)
 from lob.dataloading import create_lobster_prediction_dataset, create_lobster_train_loader#, Datasets
 from lob.lobster_dataloader import LOBSTER_Dataset
-from lob.train_helpers import reduce_lr_on_plateau, linear_warmup, \
-    cosine_annealing, constant_lr, train_epoch, validate, \
-    create_jit_train_step, create_jit_eval_step, initialize_mesh, get_global_mesh, \
-    create_lobs5_learning_rate_schedule  # New: JIT compilation functions + LR schedule
+from lob.train_helpers import (
+    reduce_lr_on_plateau, linear_warmup,
+    cosine_annealing, constant_lr, train_epoch, validate,
+    create_jit_train_step, create_jit_eval_step, initialize_mesh, get_global_mesh,
+    create_lobs5_learning_rate_schedule,
+    # Prodigy LR estimation (Plan B)
+    extract_prodigy_estimated_lr,
+    switch_optimizer_after_prodigy_warmup,
+)
 
 # WandB configuration (must be set before wandb import)
 os.environ["WANDB_MODE"] = "online"
@@ -130,6 +141,19 @@ def train(args):
 
 
     log_with_timestamp(f"Starting S5 Training on {ds} =>> Initializing...")
+
+    # ==================================================================
+    # Prodigy LR Estimation Mode (Plan B)
+    # ==================================================================
+    prodigy_warmup_steps = getattr(args, 'prodigy_warmup_steps', 0)
+    prodigy_lr_multiplier = getattr(args, 'prodigy_lr_multiplier', 1.0)
+    prodigy_mode = prodigy_warmup_steps > 0
+    prodigy_schedule_info = None  # Will be set if prodigy_mode is True
+
+    if prodigy_mode:
+        log_with_timestamp(f"[Prodigy Mode] LR estimation enabled for {prodigy_warmup_steps} steps")
+        log_with_timestamp(f"[Prodigy Mode] LR multiplier: {prodigy_lr_multiplier}x")
+
     if args.debug_loading:
         state=None
         val_model=None
@@ -139,28 +163,49 @@ def train(args):
         lr_schedule = lambda step: 0.0
         ssm_lr_schedule = lambda step: 0.0
     else:
-        state, model_cls, total_params = init_train_state(
-            args,
-            n_classes=n_classes,
-            seq_len=seq_len,
-            book_dim=book_dim,
-            book_seq_len=book_seq_len,
-            train_size=train_size,  # NEW: for schedule calculation
-            print_shapes=True
-        )
+        # ==================================================================
+        # Initialize with Prodigy or standard optimizer
+        # ==================================================================
+        if prodigy_mode:
+            # Phase 1: Initialize with Prodigy optimizer
+            state, model_cls, total_params, prodigy_schedule_info = init_train_state_with_prodigy(
+                args,
+                n_classes=n_classes,
+                seq_len=seq_len,
+                book_dim=book_dim,
+                book_seq_len=book_seq_len,
+                train_size=train_size,
+                print_shapes=True
+            )
+            # Use schedule_info for LR logging during warmup
+            ssm_lr = prodigy_schedule_info['ssm_lr_base']
+            lr = args.lr_factor * ssm_lr  # Will be replaced after warmup
+            steps_per_epoch = prodigy_schedule_info['steps_per_epoch']
+            total_steps = prodigy_schedule_info['total_steps']
+            warmup_end_step = prodigy_schedule_info['warmup_end_step']
+        else:
+            # Standard initialization (no Prodigy)
+            state, model_cls, total_params = init_train_state(
+                args,
+                n_classes=n_classes,
+                seq_len=seq_len,
+                book_dim=book_dim,
+                book_seq_len=book_seq_len,
+                train_size=train_size,  # NEW: for schedule calculation
+                print_shapes=True
+            )
+            ssm_lr = args.ssm_lr_base
+            lr = args.lr_factor * ssm_lr
+            steps_per_epoch = train_size // args.global_bsz
+            if hasattr(args, 'curtail_epochs') and args.curtail_epochs is not None:
+                steps_per_epoch = min(steps_per_epoch, args.curtail_epochs + 1)
+            total_steps = steps_per_epoch * args.epochs
+            warmup_end_step = steps_per_epoch * args.warmup_end
 
         # ==================================================================
         # Create LR schedules for logging (mirrors init_train.py logic)
         # These are used to compute current LR from state.step for WandB logging
         # ==================================================================
-        ssm_lr = args.ssm_lr_base
-        lr = args.lr_factor * ssm_lr
-        steps_per_epoch = train_size // args.global_bsz
-        if hasattr(args, 'curtail_epochs') and args.curtail_epochs is not None:
-            steps_per_epoch = min(steps_per_epoch, args.curtail_epochs + 1)
-        total_steps = steps_per_epoch * args.epochs
-        warmup_end_step = steps_per_epoch * args.warmup_end
-
         ssm_lr_schedule = create_lobs5_learning_rate_schedule(
             base_lr=ssm_lr,
             warmup_end_step=warmup_end_step,
@@ -363,6 +408,9 @@ def train(args):
     # Track resume state
     resume_from_step = getattr(args, 'resume_from_step', None)
 
+    # Track Prodigy optimizer switch status
+    prodigy_switched = False
+
     for epoch in range(args.epochs):
         print(f"[*] Starting Training Epoch {epoch + 1}...")
         # LR scheduling now handled by optax schedules - no manual switching needed
@@ -406,6 +454,67 @@ def train(args):
             log_with_timestamp(f"Epoch {epoch+1} interrupted at step {interrupted_at_step} due to timeout")
             log_with_timestamp(f"To resume, use: --restore <checkpoint_path> --resume_from_step {interrupted_at_step}")
             break  # Exit training loop
+
+        # ==================================================================
+        # Prodigy Optimizer Switch Check (Plan B)
+        # ==================================================================
+        # After warmup steps, switch from Prodigy to AdamW + cosine annealing
+        if prodigy_mode and not prodigy_switched and int(state.step) >= prodigy_warmup_steps:
+            log_with_timestamp(f"[Prodigy] Reached {prodigy_warmup_steps} warmup steps, switching optimizer...")
+
+            # Extract estimated LR from Prodigy
+            estimated_lr = extract_prodigy_estimated_lr(state, lr_multiplier=prodigy_lr_multiplier)
+
+            # Log to WandB
+            if args.USE_WANDB:
+                wandb.log({
+                    "prodigy_estimated_lr": estimated_lr,
+                    "prodigy_switch_step": int(state.step),
+                })
+                wandb.run.summary["prodigy_estimated_lr"] = estimated_lr
+
+            # Switch optimizer
+            mesh = get_global_mesh()
+            state = switch_optimizer_after_prodigy_warmup(
+                state=state,
+                estimated_lr=estimated_lr,
+                ssm_lr_base=prodigy_schedule_info['ssm_lr_base'],
+                warmup_end_step=prodigy_schedule_info['warmup_end_step'],
+                total_steps=prodigy_schedule_info['total_steps'],
+                lr_min=prodigy_schedule_info['lr_min'],
+                use_cosine_anneal=prodigy_schedule_info['use_cosine_anneal'],
+                weight_decay=prodigy_schedule_info['weight_decay'],
+                opt_config=prodigy_schedule_info['opt_config'],
+                dt_global=prodigy_schedule_info['dt_global'],
+                mesh=mesh,
+            )
+
+            # Update LR schedules for logging
+            lr = estimated_lr
+            lr_schedule = create_lobs5_learning_rate_schedule(
+                base_lr=estimated_lr,
+                warmup_end_step=max(prodigy_schedule_info['warmup_end_step'], int(state.step)),
+                total_steps=prodigy_schedule_info['total_steps'],
+                lr_min=prodigy_schedule_info['lr_min'],
+                use_cosine_anneal=prodigy_schedule_info['use_cosine_anneal'],
+            )
+
+            # Recreate JIT-compiled train_step with new optimizer
+            log_with_timestamp("[Prodigy] Recreating JIT-compiled train_step...")
+            jit_train_step_fn = create_jit_train_step(
+                mesh,
+                state,
+                has_book_data=args.use_book_data
+            )
+            jit_eval_step_fn = create_jit_eval_step(
+                mesh,
+                state,
+                has_book_data=args.use_book_data
+            )
+
+            prodigy_switched = True
+            log_with_timestamp(f"[Prodigy] Switch complete! New base LR: {estimated_lr:.6f}")
+        # ==================================================================
 
         if args.random_offsets_train:
             # reinit training loader, so that sequences are initialised with

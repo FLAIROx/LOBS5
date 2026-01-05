@@ -111,6 +111,242 @@ def create_lobs5_learning_rate_schedule(
 
 
 # ==============================================================================
+# Prodigy LR Estimation Functions (Plan B)
+# ==============================================================================
+#
+# These functions support a two-phase training approach:
+# Phase 1: Use Prodigy to estimate optimal learning rate
+# Phase 2: Switch to AdamW + cosine annealing with estimated LR
+#
+# This preserves your existing schedule architecture while letting Prodigy
+# find the optimal base learning rate automatically.
+# ==============================================================================
+
+def create_prodigy_optimizer(
+    ssm_lr_schedule: optax.Schedule,
+    weight_decay: float = 0.05,
+    opt_config: str = "standard",
+    dt_global: bool = False,
+) -> Tuple[optax.GradientTransformation, callable]:
+    """
+    Create optimizer with Prodigy for 'regular' params and Adam for SSM params.
+
+    Returns:
+        tx: The multi_transform optimizer
+        ssm_fn: The parameter labeling function (needed for recreation)
+    """
+    if dt_global:
+        ssm_fn = map_nested_fn(
+            lambda k, _: "ssm"
+            if k in ["B", "Lambda_re", "Lambda_im", "norm"]
+            else ("none" if k in [] else "regular")
+        )
+    else:
+        ssm_fn = map_nested_fn(
+            lambda k, _: "ssm"
+            if k in ["B", "Lambda_re", "Lambda_im", "log_step", "norm"]
+            else ("none" if k in [] else "regular")
+        )
+
+    tx = optax.multi_transform(
+        {
+            "none": optax.sgd(learning_rate=0.0),
+            "ssm": optax.adam(learning_rate=ssm_lr_schedule),
+            "regular": optax.contrib.prodigy(
+                learning_rate=1.0,  # Prodigy scales this automatically
+                betas=(0.9, 0.999),
+                weight_decay=weight_decay,
+            ),
+        },
+        ssm_fn,
+    )
+    return tx, ssm_fn
+
+
+def extract_prodigy_estimated_lr(
+    state: train_state.TrainState,
+    lr_multiplier: float = 1.0,
+) -> float:
+    """
+    Extract the estimated learning rate from Prodigy optimizer state.
+
+    Prodigy internally computes an optimal learning rate 'd' based on:
+    - Gradient statistics
+    - Parameter update magnitudes
+    - Loss curvature estimates
+
+    The estimated LR is stored in ProdigyState.estim_lr
+
+    Args:
+        state: Training state containing Prodigy optimizer
+        lr_multiplier: Multiplier for the estimated LR (default 1.0)
+                       Use <1.0 for conservative, >1.0 for aggressive
+
+    Returns:
+        Estimated optimal learning rate
+    """
+    # Navigate to Prodigy state within multi_transform
+    # Structure: opt_state.inner_states['regular'] -> ProdigyState
+    try:
+        prodigy_state = state.opt_state.inner_states['regular']
+        # ProdigyState fields: (exp_avg, exp_avg_sq, grad_sum, params0, estim_lr, numerator_weighted, count)
+        estim_lr = float(prodigy_state.estim_lr)
+
+        # Apply multiplier
+        estimated_lr = estim_lr * lr_multiplier
+
+        print(f"[Prodigy] Estimated LR: {estim_lr:.6f}")
+        print(f"[Prodigy] With multiplier ({lr_multiplier}x): {estimated_lr:.6f}")
+
+        return estimated_lr
+    except AttributeError as e:
+        raise RuntimeError(
+            f"Failed to extract estim_lr from Prodigy state. "
+            f"Ensure the optimizer was created with Prodigy. Error: {e}"
+        )
+
+
+def switch_optimizer_after_prodigy_warmup(
+    state: train_state.TrainState,
+    estimated_lr: float,
+    ssm_lr_base: float,
+    warmup_end_step: int,
+    total_steps: int,
+    lr_min: float,
+    use_cosine_anneal: bool,
+    weight_decay: float,
+    opt_config: str,
+    dt_global: bool,
+    mesh,  # JAX Mesh for sharding
+) -> train_state.TrainState:
+    """
+    Switch from Prodigy optimizer to AdamW + cosine annealing.
+
+    This preserves:
+    - Model parameters (params)
+    - Training step counter (step)
+
+    This resets:
+    - Optimizer state (mu, nu) - fresh start with new optimizer
+
+    Why reset optimizer state:
+    - Prodigy's momentum is tuned for its adaptive LR algorithm
+    - AdamW needs fresh momentum to properly converge with cosine schedule
+    - Keeping Prodigy's momentum would cause training instability
+
+    Args:
+        state: Current training state with Prodigy optimizer
+        estimated_lr: Learning rate estimated by Prodigy (used for 'regular' params)
+        ssm_lr_base: Base LR for SSM params (unchanged from original)
+        warmup_end_step: Step at which warmup ends
+        total_steps: Total training steps
+        lr_min: Minimum LR for cosine annealing
+        use_cosine_anneal: Whether to use cosine annealing
+        weight_decay: Weight decay for AdamW
+        opt_config: Optimization config (standard, BandCdecay, etc.)
+        dt_global: Whether dt is global parameter
+        mesh: JAX Mesh for sharding
+
+    Returns:
+        New training state with AdamW + cosine schedule optimizer
+    """
+    from lob.sharding_utils import create_state_shardings
+
+    # Get current step (we want to continue from here, not reset to 0)
+    current_step = int(state.step)
+
+    print(f"[Switch] Switching optimizer at step {current_step}")
+    print(f"[Switch] estimated_lr (for regular params): {estimated_lr:.6f}")
+    print(f"[Switch] ssm_lr_base (for SSM params): {ssm_lr_base:.6f}")
+
+    # Create new schedules starting from current_step
+    # Adjust warmup to account for Prodigy phase
+    # Since we already did warmup via Prodigy, skip to cosine phase
+    adjusted_warmup_end = max(warmup_end_step, current_step)
+
+    # Create SSM schedule (uses original ssm_lr_base)
+    ssm_lr_schedule = create_lobs5_learning_rate_schedule(
+        base_lr=ssm_lr_base,
+        warmup_end_step=adjusted_warmup_end,
+        total_steps=total_steps,
+        lr_min=lr_min,
+        use_cosine_anneal=use_cosine_anneal,
+    )
+
+    # Create regular schedule (uses Prodigy-estimated LR)
+    lr_schedule = create_lobs5_learning_rate_schedule(
+        base_lr=estimated_lr,
+        warmup_end_step=adjusted_warmup_end,
+        total_steps=total_steps,
+        lr_min=lr_min,
+        use_cosine_anneal=use_cosine_anneal,
+    )
+
+    # Create new optimizer with schedules
+    if dt_global:
+        ssm_fn = map_nested_fn(
+            lambda k, _: "ssm"
+            if k in ["B", "Lambda_re", "Lambda_im", "norm"]
+            else ("none" if k in [] else "regular")
+        )
+    else:
+        ssm_fn = map_nested_fn(
+            lambda k, _: "ssm"
+            if k in ["B", "Lambda_re", "Lambda_im", "log_step", "norm"]
+            else ("none" if k in [] else "regular")
+        )
+
+    if opt_config in ["standard"]:
+        tx = optax.multi_transform(
+            {
+                "none": optax.sgd(learning_rate=0.0),
+                "ssm": optax.adam(learning_rate=ssm_lr_schedule),
+                "regular": optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay),
+            },
+            ssm_fn,
+        )
+    elif opt_config in ["BandCdecay"]:
+        tx = optax.multi_transform(
+            {
+                "none": optax.adamw(learning_rate=ssm_lr_schedule, weight_decay=weight_decay),
+                "ssm": optax.adam(learning_rate=ssm_lr_schedule),
+                "regular": optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay),
+            },
+            ssm_fn,
+        )
+    else:
+        # Default to standard
+        tx = optax.multi_transform(
+            {
+                "none": optax.sgd(learning_rate=0.0),
+                "ssm": optax.adam(learning_rate=ssm_lr_schedule),
+                "regular": optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay),
+            },
+            ssm_fn,
+        )
+
+    # Initialize new optimizer state
+    new_opt_state = tx.init(state.params)
+
+    # Create new TrainState preserving params and step
+    new_state = state.replace(
+        tx=tx,
+        opt_state=new_opt_state,
+        # step is preserved automatically
+    )
+
+    # Apply sharding
+    state_shardings = create_state_shardings(new_state, mesh)
+    new_state = jax.jit(lambda s: s, out_shardings=state_shardings)(new_state)
+
+    print(f"[Switch] Optimizer switched successfully")
+    print(f"[Switch] Current LR (regular): {lr_schedule(current_step):.6f}")
+    print(f"[Switch] Current LR (SSM): {ssm_lr_schedule(current_step):.6f}")
+
+    return new_state
+
+
+# ==============================================================================
 # Old LR schedulers (DEPRECATED - replaced by create_lobs5_learning_rate_schedule)
 # ==============================================================================
 # LR schedulers

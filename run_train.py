@@ -265,6 +265,34 @@ if __name__ == "__main__":
 				help="Use BF16 mixed precision training")
 
 	# ============================================================================
+	# Prodigy LR Estimation Mode (Plan B)
+	# ============================================================================
+	#
+	# Instead of guessing ssm_lr_base, use Prodigy to estimate optimal LR:
+	#
+	# Usage:
+	#   # Enable Prodigy warmup for 1000 steps:
+	#   python run_train.py --model_preset 55M --prodigy_warmup_steps 1000
+	#
+	# What happens:
+	#   1. Phase 1 (warmup): Train with Prodigy optimizer for N steps
+	#   2. Extract estimated LR from Prodigy state (estim_lr)
+	#   3. Phase 2: Switch to AdamW + cosine annealing with estimated LR
+	#
+	# Benefits:
+	#   - No manual LR tuning needed
+	#   - Prodigy adapts to model size and data distribution
+	#   - Preserves your existing schedule architecture
+	#
+	# ============================================================================
+	parser.add_argument("--prodigy_warmup_steps", type=int, default=0,
+				help="Number of steps to run Prodigy LR estimation (0=disabled). "
+				     "After warmup, switches to AdamW with estimated LR + cosine annealing.")
+	parser.add_argument("--prodigy_lr_multiplier", type=float, default=1.0,
+				help="Multiplier for Prodigy's estimated LR (default 1.0). "
+				     "Use <1.0 for more conservative, >1.0 for more aggressive.")
+
+	# ============================================================================
 	# Step-Level Checkpointing for Long-Running Jobs (12.5-14h epochs, 24h max)
 	# ============================================================================
 	#
