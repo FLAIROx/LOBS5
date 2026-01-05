@@ -26,8 +26,22 @@ from lob.dataloading import Datasets
 
 if __name__ == "__main__":
 	import argparse
+	import time
 	from s5.utils.util import str2bool
-	os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
+
+	# ============================================
+	# Step 1: Detect Multi-Node Environment
+	# ============================================
+	is_slurm_multi_node = int(os.environ.get('SLURM_NNODES', '1')) > 1
+
+	if is_slurm_multi_node:
+		# Multi-node environment: Don't override CUDA_VISIBLE_DEVICES, let Slurm manage it
+		print(f"[*] Detected Slurm multi-node environment ({os.environ.get('SLURM_NNODES')} nodes)")
+		print(f"[*] Using Slurm GPU allocation: {os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
+	else:
+		# Single machine environment: Set CUDA_VISIBLE_DEVICES
+		os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
+
 	os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"]="0.9"
 	os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
 	os.environ["NCCL_TIMEOUT"] = "600"  # 10 minutes
@@ -376,16 +390,87 @@ if __name__ == "__main__":
 	else:
 		args.checkpoint_every_n_steps = int(args.checkpoint_every_n_steps)
 
+	# ============================================
+	# Step 2: JAX Distributed Initialization (for Multi-Node)
+	# ============================================
+	import jax
+	from jax.experimental import multihost_utils
+
+	if is_slurm_multi_node or os.environ.get('JAX_COORDINATOR_ADDRESS'):
+		# Multi-node mode: Explicitly initialize JAX distributed
+		coord = os.environ.get('JAX_COORDINATOR_ADDRESS')
+		pid = int(os.environ.get('JAX_PROCESS_INDEX', os.environ.get('SLURM_PROCID', '0')))
+		pcnt = int(os.environ.get('JAX_PROCESS_COUNT', os.environ.get('SLURM_NNODES', '1')))
+
+		if not coord:
+			raise RuntimeError('JAX_COORDINATOR_ADDRESS is not set for multi-node run')
+
+		# CRITICAL: Infer local visible GPUs and explicitly specify local_device_ids
+		cvd = os.environ.get('CUDA_VISIBLE_DEVICES', '')
+		if cvd and cvd != '-1':
+			try:
+				n_local = len([d for d in cvd.split(',') if d.strip() != ''])
+			except Exception:
+				n_local = 1
+		else:
+			n_local = 1
+		local_device_ids = list(range(n_local))
+
+		print(f"\n[*] Initializing JAX distributed: coord={coord}, pid={pid}, pcnt={pcnt}")
+		print(f"[*] CRITICAL: Explicitly specifying local_device_ids={local_device_ids}")
+
+		jax.distributed.initialize(
+			coordinator_address=coord,
+			num_processes=pcnt,
+			process_id=pid,
+			local_device_ids=local_device_ids  # CRITICAL: ensures all 4 local GPUs are used
+		)
+
+		is_distributed = True
+		process_index = jax.process_index()
+		process_count = jax.process_count()
+		local_device_count = jax.local_device_count()
+
+		print(f"[*] JAX distributed mode enabled:")
+		print(f"    Process ID: {process_index}/{process_count}")
+		print(f"    GPUs per process: {local_device_count}")
+		print(f"    Total global GPUs: {len(jax.devices())}")
+
+		# Sync barrier after distributed init
+		print(f"[*] Synchronization barrier: waiting for all {process_count} nodes...")
+		sync_start = time.time()
+		multihost_utils.sync_global_devices("jax_distributed_init")
+		print(f"[*] ✓ All nodes synchronized (took: {time.time() - sync_start:.2f}s)")
+
+		# CRITICAL: In multi-node mode, num_devices should equal local device count
+		args.num_devices = local_device_count
+		print(f"    Adjusted num_devices: {args.num_devices} (local device count)")
+	else:
+		# Single machine mode
+		is_distributed = False
+		process_index = 0
+		process_count = 1
+		print(f"\n[*] Single machine mode (no distributed init)")
+
+	# Add distributed info to args
+	args.is_distributed = is_distributed
+	args.process_index = process_index
+	args.process_count = process_count
+
 	import torch
 	torch.multiprocessing.set_start_method('spawn')
 
 	from lob.train import train
-	#import tensorflow as tf
-	# import jax	
-	# import cProfile
 
-	#with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
 	train(args)
+
+	# Clean shutdown for multi-node
+	if is_distributed:
+		print(f"[*] Process {process_index}: entering final sync...")
+		multihost_utils.sync_global_devices("end-of-train")
+		print(f"[*] Process {process_index}: shutting down JAX distributed...")
+		jax.distributed.shutdown()
+		print(f"[*] Process {process_index}: shutdown complete")
 	#cProfile.run('train(parser.parse_args())')
 
 

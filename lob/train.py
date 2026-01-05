@@ -115,6 +115,11 @@ def train(args):
     else:
         ValueError('Issue with mask function: logic for '+args.masking+' not implemented.')
 
+    # Get distributed training parameters (set by run_train.py)
+    is_distributed = getattr(args, 'is_distributed', False)
+    process_rank = getattr(args, 'process_index', 0)
+    process_count = getattr(args, 'process_count', 1)
+
     (lobster_dataset, trainloader, valloader, testloader, aux_dataloaders,
         n_classes, seq_len, in_dim, book_seq_len, book_dim, train_size) = \
         create_lobster_prediction_dataset(
@@ -135,7 +140,11 @@ def train(args):
             debug_overfit=args.debug_overfit,
             pin_memory=args.pin_memory,
             prefetch_factor=args.prefetch_factor,
-            persistent_workers=args.persistent_workers
+            persistent_workers=args.persistent_workers,
+            # Multi-node distributed training
+            use_distributed_sampler=is_distributed,
+            process_rank=process_rank,
+            process_count=process_count,
         )
 
 
