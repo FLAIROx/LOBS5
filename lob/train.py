@@ -347,7 +347,8 @@ def train(args):
                                         curtail_epoch=args.curtail_epochs,
                                         apply_method='__call_ar__',
                                         ignore_times=ignore_times,
-                                        log_ce_tables=args.log_ce_tables)
+                                        log_ce_tables=args.log_ce_tables,
+                                        eval_step_fn=jit_eval_step_fn)
 
             # Print goodput statistics if enabled
             if goodput_monitor:
@@ -369,7 +370,8 @@ def train(args):
                                            curtail_epoch=args.curtail_epochs,
                                            apply_method='__call_ar__',
                                            ignore_times=ignore_times,
-                                           log_ce_tables=args.log_ce_tables)
+                                           log_ce_tables=args.log_ce_tables,
+                                           eval_step_fn=jit_eval_step_fn)
 
             print(f"\n=>> Epoch {epoch + 1} Metrics ===")
             print(
@@ -394,7 +396,8 @@ def train(args):
                                          epoch,
                                          curtail_epoch=args.curtail_epochs,
                                          ignore_times=ignore_times,
-                                         log_ce_tables=args.log_ce_tables)
+                                         log_ce_tables=args.log_ce_tables,
+                                         eval_step_fn=jit_eval_step_fn)
             val_loss=test_loss
             val_acc=test_acc
 

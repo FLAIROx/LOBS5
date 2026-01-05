@@ -1073,15 +1073,24 @@ def validate(state,
              step_rescale=1.0,
              apply_method: str ='__call_ar__',
              init_hiddens=(np.array([0])),
-             log_ce_tables : bool =False):
-    """Validation function that loops over batches"""
+             log_ce_tables : bool =False,
+             eval_step_fn=None):
+    """Validation function that loops over batches
+
+    Args:
+        eval_step_fn: Optional JIT-compiled eval_step function. If None, falls back
+                      to un-JIT'd eval_step (slow - causes recompilation each batch).
+    """
+    # Use JIT-compiled eval_step if provided, otherwise fall back to raw eval_step
+    _eval_step = eval_step_fn if eval_step_fn is not None else eval_step
+
     # losses, accuracies, preds = np.array([]), np.array([]), np.array([])
     losses, accuracies, preds = [], [], []
     for batch_idx, batch in enumerate(tqdm(testloader)):
         inputs, labels, integration_timesteps = prep_batch(batch, seq_len, num_devices)
         # print("eval step with method: ", apply_method)
         # print("Validataion: Inputs 0:5:", inputs[0][0,0:5,:])
-        loss, acc, pred = eval_step(
+        loss, acc, pred = _eval_step(
             inputs, labels, integration_timesteps, state, apply_fn, batchnorm,apply_method,init_hiddens,ignore_times)
         # losses = np.append(losses, loss)
         # accuracies = np.append(accuracies, acc)
