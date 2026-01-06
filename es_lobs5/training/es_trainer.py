@@ -592,8 +592,12 @@ class ESTrainer:
     # Pattern: build_generate_thread returns pure function -> jit(vmap(...)).lower().compile()
     # ========================================================================
 
-    def _build_eval_thread(self):
+    def _build_eval_thread(self, in_shard_map: bool = False):
         """Build a pure eval function with no self references for AOT compilation.
+
+        Args:
+            in_shard_map: If True, the returned function will be called inside
+                         shard_map and will apply pvary to scan carry values.
 
         Returns a function that accepts all dynamic parameters explicitly:
         - noiser_params: Updated each epoch
@@ -627,6 +631,9 @@ class ESTrainer:
         # Import simulate_episode dependencies
         ES_PaddedLobPredModel = _get_es_model()
 
+        # H2: Capture in_shard_map flag for closure
+        _in_shard_map = in_shard_map
+
         def eval_thread(noiser_params, params, key, thread_id, epoch,
                         initial_sim_state, initial_msg_history):
             """Pure eval function for single thread."""
@@ -656,10 +663,12 @@ class ESTrainer:
             # Note: This is a hybrid approach - we've extracted the CommonParams creation
             # but the simulate_episode call still uses self. Full AOT would require
             # inlining simulate_episode here, but that's a larger refactor.
+            # H2: Pass in_shard_map flag to enable pvary for scan carry values
             return self.simulate_episode(
                 key, world_common_params, policy_common_params,
                 initial_sim_state, initial_msg_history,
-                thread_id=thread_id
+                thread_id=thread_id,
+                in_shard_map=_in_shard_map,
             )
 
         return eval_thread
@@ -675,6 +684,9 @@ class ESTrainer:
         H1: When multi-GPU is available, uses shard_map to distribute threads
         across devices. Each device runs n_threads/n_devices threads in parallel.
 
+        H2: When using shard_map, passes in_shard_map=True to _build_eval_thread
+        so that pvary is applied to scan carry values.
+
         Returns a JIT-compiled function that can be called directly.
 
         Note: Full AOT compilation (.lower().compile()) requires ShapeDtypeStruct
@@ -682,12 +694,14 @@ class ESTrainer:
         implementation uses standard JIT which will compile on first call and
         cache for subsequent calls.
         """
-        _eval_thread = self._build_eval_thread()
-
         # Check if multi-GPU is available
         n_devices = getattr(self, '_n_devices', 1)
 
-        if n_devices > 1 and hasattr(self, '_mesh'):
+        # H2: Build eval_thread with in_shard_map flag based on whether we're using multi-GPU
+        use_shard_map = n_devices > 1 and hasattr(self, '_mesh')
+        _eval_thread = self._build_eval_thread(in_shard_map=use_shard_map)
+
+        if use_shard_map:
             # ====================================================================
             # H1: shard_map + vmap for multi-GPU distribution
             # Reference: HyperscaleES/llm_experiments/general_do_evolution_multi_gpu.py
@@ -696,8 +710,11 @@ class ESTrainer:
             # - shard_map distributes data across devices (outer layer)
             # - vmap handles threads per device (inner layer)
             # - Each device gets n_threads/n_devices threads
+            #
+            # H2: in_shard_map=True enables pvary for scan carry values
             # ====================================================================
             print(f"[H1] Using shard_map with {n_devices} devices")
+            print(f"[H2] pvary enabled for scan carry values")
 
             # Inner vmap: vectorize over keys and thread_ids within each device
             # After sharding, each device sees (n_threads/n_devices,) shaped arrays
@@ -780,9 +797,15 @@ class ESTrainer:
         sim_state: 'LobState',
         initial_msg_history: Optional[jnp.ndarray] = None,
         thread_id: int = -1,
+        in_shard_map: bool = False,  # H2: Flag to indicate if called from within shard_map
     ) -> Tuple[float, Dict]:
         """
         Run a complete episode with step-by-step interleaved simulation.
+
+        Args:
+            in_shard_map: If True, applies jax.lax.pvary to scan carry values
+                         to mark them as varying along the 'data' axis.
+                         Required when this function is called inside shard_map.
 
         Returns:
             (fitness, info_dict)
@@ -802,6 +825,25 @@ class ESTrainer:
         replay_tokens = self.replay_tokens
         replay_data_raw = self.replay_data_raw
         n_replay_msgs = replay_tokens.shape[0] if replay_tokens is not None else 0
+        # ========================================================================
+
+        # ========================================================================
+        # H2: Helper function to apply pvary when inside shard_map
+        # Reference: https://docs.jax.dev/en/latest/notebooks/shard_map.html#scan-vmap
+        # When using shard_map + scan, initial carry values must be marked as
+        # "varying" along the sharded axis using jax.lax.pvary.
+        # ========================================================================
+        def maybe_pvary(x):
+            """Apply pvary if inside shard_map context."""
+            if in_shard_map:
+                return jax.lax.pvary(x, ('data',))
+            return x
+
+        def maybe_pvary_tree(tree):
+            """Apply pvary to all leaves of a pytree if inside shard_map."""
+            if in_shard_map:
+                return jax.tree.map(lambda x: jax.lax.pvary(x, ('data',)), tree)
+            return tree
         # ========================================================================
 
         # Get ES model class
@@ -910,9 +952,15 @@ class ESTrainer:
                     return (key_t, msg_hist_t, hidden_t), next_token
 
                 key, sample_key = jax.random.split(key)
+                # H2: Apply pvary to initial carry values when inside shard_map
+                world_token_init = (
+                    maybe_pvary(sample_key),
+                    maybe_pvary(msg_hist),
+                    maybe_pvary_tree(hidden),
+                )
                 (key, msg_hist, hidden), world_msg = jax.lax.scan(
                     sample_one_token,
-                    (sample_key, msg_hist, hidden),
+                    world_token_init,
                     None,
                     length=msg_len,
                 )
@@ -941,10 +989,20 @@ class ESTrainer:
                 replay_ptr_init = jnp.int32(0)
 
             # Generate background messages
+            # H2: Apply pvary to initial carry values when inside shard_map
+            background_scan_init = (
+                maybe_pvary(key_world),
+                maybe_pvary(msg_history),
+                maybe_pvary_tree(hiddens_world),
+                maybe_pvary_tree(sim_state),
+                maybe_pvary(book_feat),
+                maybe_pvary(world_oid_offset),
+                maybe_pvary(replay_ptr_init),
+            )
             (key_world, msg_history, hiddens_world, sim_state, book_feat,
              world_oid_offset, _), _ = jax.lax.scan(
                 step_fn_background,
-                (key_world, msg_history, hiddens_world, sim_state, book_feat, world_oid_offset, replay_ptr_init),
+                background_scan_init,
                 jnp.arange(config.world_msgs_per_step),
                 length=config.world_msgs_per_step,
             )
@@ -967,9 +1025,15 @@ class ESTrainer:
                 return (key_p, msg_hist_p, hidden_p), next_token_p
 
             key_policy, sample_key = jax.random.split(key_policy)
+            # H2: Apply pvary to initial carry values when inside shard_map
+            policy_token_init = (
+                maybe_pvary(sample_key),
+                maybe_pvary(msg_history),
+                maybe_pvary_tree(hiddens_policy),
+            )
             (key_policy, msg_history, hiddens_policy), policy_msg = jax.lax.scan(
                 sample_policy_token,
-                (sample_key, msg_history, hiddens_policy),
+                policy_token_init,
                 None,
                 length=msg_len,
             )
@@ -1017,10 +1081,21 @@ class ESTrainer:
                     book_feat, world_oid_offset, quant_executed), None
 
         # Run episode
+        # H2: Apply pvary to initial carry values when inside shard_map
+        # This marks arrays as "varying" along the sharded axis to satisfy scan's type requirements
+        main_scan_init = (
+            maybe_pvary(key),
+            maybe_pvary(msg_history),
+            maybe_pvary_tree(hiddens_world),
+            maybe_pvary_tree(hiddens_policy),
+            maybe_pvary_tree(sim_state),
+            maybe_pvary(book_feat),
+            maybe_pvary(jnp.int32(0)),
+            maybe_pvary(jnp.int32(0)),
+        )
         (_, _, _, _, final_state, _, _, final_quant_executed), _ = jax.lax.scan(
             step_fn,
-            (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-             book_feat, jnp.int32(0), jnp.int32(0)),
+            main_scan_init,
             jnp.arange(config.n_steps),
             length=config.n_steps,
         )
