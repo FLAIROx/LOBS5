@@ -168,21 +168,30 @@ def load_model_and_data():
 
 
 def create_dummy_noiser():
-    """Create a dummy noiser that returns parameters unchanged."""
+    """Create a dummy noiser that returns parameters unchanged.
+
+    Matches HyperscaleES noiser interface (base_noiser.py):
+    - do_mm: Matrix multiply (x @ param.T for MM which stores as (out, in))
+    - do_Tmm: Transposed multiply (x @ param for TMM which stores as (in, out))
+    - do_emb: Embedding lookup
+    - get_noisy_standard: Standard parameter access
+    """
     class DummyNoiser:
         """Dummy noiser for inference (no perturbation)."""
 
         def get_noisy_standard(self, frozen_noiser_params, noiser_params, params, es_tree_key, iterinfo):
             return params
 
-        def get_noisy_mm(self, frozen_noiser_params, noiser_params, params, es_tree_key, iterinfo, x):
-            return x @ params
+        def do_mm(self, frozen_noiser_params, noiser_params, param, base_key, iterinfo, x):
+            # MM stores weight as (out_dim, in_dim), so x @ param.T
+            return x @ param.T
 
-        def get_noisy_tmm(self, frozen_noiser_params, noiser_params, params, es_tree_key, iterinfo, x):
-            return x @ params.T
+        def do_Tmm(self, frozen_noiser_params, noiser_params, param, base_key, iterinfo, x):
+            # TMM stores weight as (in_dim, out_dim), so x @ param
+            return x @ param
 
-        def get_noisy_embedding(self, frozen_noiser_params, noiser_params, params, es_tree_key, iterinfo, idx):
-            return params[idx]
+        def do_emb(self, frozen_noiser_params, noiser_params, param, base_key, iterinfo, x):
+            return param[x]
 
     return DummyNoiser()
 
