@@ -299,12 +299,18 @@ def transform_L2_state_wrapper(
     return book_feat_batched[0]
 
 
-def get_mid_price(sim_state: 'LobState', tick_size: int = 100) -> int:
-    """Get current mid price from order book state."""
+def get_mid_price(cfg: 'Configuration', sim_state: 'LobState', tick_size: int = 100) -> int:
+    """Get current mid price from order book state.
+
+    Args:
+        cfg: JaxLOB Configuration (required for get_best_bid_and_ask)
+        sim_state: Current LobState
+        tick_size: Tick size in cents
+    """
     _lazy_import_jaxlob()
     DEFAULT_MID = 10000
 
-    best_ask, best_bid = get_best_bid_and_ask(sim_state.asks, sim_state.bids)
+    best_ask, best_bid = get_best_bid_and_ask(cfg, sim_state.asks, sim_state.bids)
 
     bid_valid = (best_bid > 0) & (best_bid < 900000000)
     ask_valid = (best_ask > 0) & (best_ask < 900000000)
@@ -355,18 +361,15 @@ class ESTrainer:
         print(f"[INIT]   background_mode: {config.background_mode}")
 
     def _init_noiser(self):
-        """Initialize EGGROLL noiser for Policy with gradient clipping."""
-        import optax
+        """Initialize EGGROLL noiser for Policy.
+
+        Note: solver=None uses default optax.sgd. The init_noiser API expects
+        a callable (like optax.sgd), not a pre-built optimizer chain.
+        See learned_lessons.md Lesson 4 for details.
+        """
         config = self.config
         all_noisers = _get_all_noisers()
         NOISER = all_noisers[config.noiser]
-
-        # Create optimizer with gradient clipping to handle high-variance fitness
-        grad_clip = getattr(config, 'grad_clip', 1.0)
-        solver = optax.chain(
-            optax.clip_by_global_norm(grad_clip),
-            optax.sgd(learning_rate=config.lr),
-        )
 
         self.noiser_cls = NOISER
         self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
@@ -376,18 +379,28 @@ class ESTrainer:
             rank=config.lora_rank,
             freeze_nonlora=False,
             noise_reuse=0,
-            solver=solver,
+            solver=None,  # Uses default optax.sgd
         )
 
     def _init_jaxlob(self):
-        """Initialize JaxLOB order book simulator."""
+        """Initialize JaxLOB order book simulator.
+
+        Uses Configuration-based API (nOrders/nTrades are in the config).
+        """
         _lazy_import_jaxlob()
 
+        # JaxLOB OrderBook now uses Configuration-based API
+        from gymnax_exchange.jaxob.jaxob_config import Configuration
+        from dataclasses import replace
+
+        # Calculate required capacity
         expected_orders = 500 + self.config.n_steps * (self.config.world_msgs_per_step + 1)
         n_orders = max(1000, int(expected_orders * 1.5))
         n_trades = max(500, self.config.n_steps * 2)
 
-        self.sim = OrderBook(nOrders=n_orders, nTrades=n_trades)
+        # Create configuration with custom capacity
+        jaxlob_cfg = replace(Configuration(), nOrders=n_orders, nTrades=n_trades)
+        self.sim = OrderBook(cfg=jaxlob_cfg)
 
         # Create encoder from Vocab
         from lob.encoding import Vocab
