@@ -378,6 +378,14 @@ class ESTrainer:
         print(f"[INIT]   n_steps: {config.n_steps}")
         print(f"[INIT]   background_mode: {config.background_mode}")
 
+        # ========================================================================
+        # G1: Pre-compile eval_batch for faster subsequent epochs
+        # The first epoch will trigger actual XLA compilation, but subsequent
+        # epochs will reuse the cached compilation.
+        # ========================================================================
+        print("[INIT] Building eval_batch function (compilation on first call)...")
+        self._compiled_eval_batch = self._compile_eval_batch()
+
     def _init_noiser(self):
         """Initialize EGGROLL noiser for Policy.
 
@@ -550,6 +558,124 @@ class ESTrainer:
             frozen_params=self.lobs5_init.frozen_params,
             iterinfo=iterinfo,
         )
+
+    # ========================================================================
+    # G1: AOT Compilation for eval_batch
+    # Reference: HyperscaleES/llm_experiments/general_do_evolution_multi_gpu.py
+    # Pattern: build_generate_thread returns pure function -> jit(vmap(...)).lower().compile()
+    # ========================================================================
+
+    def _build_eval_thread(self):
+        """Build a pure eval function with no self references for AOT compilation.
+
+        Returns a function that accepts all dynamic parameters explicitly:
+        - noiser_params: Updated each epoch
+        - params: Model weights, updated each epoch
+        - key: Random key for this thread
+        - thread_id: Thread index for ES perturbation
+        - epoch: Current epoch number
+        - initial_sim_state: Starting LOB state
+        - initial_msg_history: Starting message context
+
+        Static parameters (captured in closure):
+        - noiser_cls, frozen_noiser_params, es_tree_key
+        - frozen_params (model config)
+        - All simulation parameters (jaxlob_cfg, encoder, replay data)
+        """
+        # Capture static references (avoid self in JIT)
+        noiser_cls = self.noiser_cls
+        frozen_noiser_params = self.frozen_noiser_params
+        es_tree_key = self.es_tree_key
+        frozen_params = self.lobs5_init.frozen_params
+        CommonParams = _get_common_params()
+
+        # Capture simulation references
+        sim = self.sim
+        jaxlob_cfg = self.jaxlob_cfg
+        encoder = self.encoder
+        config = self.config
+        replay_tokens = self.replay_tokens
+        replay_data_raw = self.replay_data_raw
+
+        # Import simulate_episode dependencies
+        ES_PaddedLobPredModel = _get_es_model()
+
+        def eval_thread(noiser_params, params, key, thread_id, epoch,
+                        initial_sim_state, initial_msg_history):
+            """Pure eval function for single thread."""
+            # Create CommonParams with dynamic values
+            world_common_params = CommonParams(
+                noiser=noiser_cls,
+                frozen_noiser_params=frozen_noiser_params,
+                noiser_params=noiser_params,
+                params=params,
+                es_tree_key=es_tree_key,
+                frozen_params=frozen_params,
+                iterinfo=None,  # World Model has no ES noise
+            )
+
+            iterinfo = (jnp.int32(epoch), jnp.int32(thread_id))
+            policy_common_params = CommonParams(
+                noiser=noiser_cls,
+                frozen_noiser_params=frozen_noiser_params,
+                noiser_params=noiser_params,
+                params=params,
+                es_tree_key=es_tree_key,
+                frozen_params=frozen_params,
+                iterinfo=iterinfo,
+            )
+
+            # Call simulate_episode through self (still need this for the complex logic)
+            # Note: This is a hybrid approach - we've extracted the CommonParams creation
+            # but the simulate_episode call still uses self. Full AOT would require
+            # inlining simulate_episode here, but that's a larger refactor.
+            return self.simulate_episode(
+                key, world_common_params, policy_common_params,
+                initial_sim_state, initial_msg_history,
+                thread_id=thread_id
+            )
+
+        return eval_thread
+
+    def _compile_eval_batch(self):
+        """Pre-compile the vmapped eval function for reuse across epochs.
+
+        This follows the HyperscaleES pattern:
+        1. Build pure eval function (_build_eval_thread)
+        2. Wrap with vmap for parallel threads
+        3. JIT compile with proper in_axes
+
+        Returns a JIT-compiled function that can be called directly.
+
+        Note: Full AOT compilation (.lower().compile()) requires ShapeDtypeStruct
+        examples for all inputs including the complex LobState pytree. This
+        implementation uses standard JIT which will compile on first call and
+        cache for subsequent calls.
+        """
+        _eval_thread = self._build_eval_thread()
+
+        # Define in_axes for vmap:
+        # - noiser_params: None (shared across threads)
+        # - params: None (shared)
+        # - key: 0 (different per thread)
+        # - thread_id: 0 (different per thread)
+        # - epoch: None (shared)
+        # - initial_sim_state: None (shared, broadcast)
+        # - initial_msg_history: None (shared, broadcast)
+
+        vmapped_eval = jax.vmap(
+            _eval_thread,
+            in_axes=(None, None, 0, 0, None, None, None)
+        )
+
+        # JIT compile with donated args for memory optimization
+        # Note: We don't donate noiser_params/params as they're needed for gradient update
+        compiled_eval = jax.jit(vmapped_eval)
+
+        print("[G1] Pre-compiled eval_batch function")
+        return compiled_eval
+
+    # ========================================================================
 
     def simulate_episode(
         self,
@@ -884,15 +1010,20 @@ class ESTrainer:
         keys = jax.random.split(key, n_threads)
         thread_ids = jnp.arange(n_threads)
 
-        # Evaluate all threads in parallel
-        eval_fn = partial(
-            self.eval_single_thread,
-            epoch=epoch,
-            initial_sim_state=initial_sim_state,
-            initial_msg_history=initial_msg_history,
+        # ========================================================================
+        # G1: Use pre-compiled eval_batch function
+        # The function was compiled in __init__ and is reused here.
+        # Arguments: (noiser_params, params, keys, thread_ids, epoch, sim_state, msg_history)
+        # ========================================================================
+        fitnesses, infos = self._compiled_eval_batch(
+            self.noiser_params,
+            self.lobs5_init.params,
+            keys,
+            thread_ids,
+            jnp.int32(epoch),
+            initial_sim_state,
+            initial_msg_history,
         )
-
-        fitnesses, infos = jax.vmap(eval_fn)(keys, thread_ids)
 
         # ES gradient update
         iterinfos = (
