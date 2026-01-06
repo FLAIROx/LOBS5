@@ -146,13 +146,24 @@ def test_checkpoint_restore():
     print(f"  ✓ Decoder weights match (shape: {decoder_weight_restored.shape})")
 
     # Verify noiser_params restored
+    # Note: noiser_params may contain tuples (e.g., optax opt_state), so we use tree comparison
     assert trainer2.noiser_params is not None, "noiser_params should be restored"
-    noiser_match = True
-    for key in trainer1.noiser_params:
-        if key in trainer2.noiser_params:
-            if not jnp.allclose(trainer1.noiser_params[key], trainer2.noiser_params[key], rtol=1e-5):
-                noiser_match = False
-                break
+
+    def compare_trees(tree1, tree2):
+        """Recursively compare pytrees, handling tuples and arrays."""
+        leaves1 = jax.tree.leaves(tree1)
+        leaves2 = jax.tree.leaves(tree2)
+        if len(leaves1) != len(leaves2):
+            return False
+        for l1, l2 in zip(leaves1, leaves2):
+            if hasattr(l1, 'shape'):  # It's an array
+                if not jnp.allclose(l1, l2, rtol=1e-5):
+                    return False
+            elif l1 != l2:  # Scalar comparison
+                return False
+        return True
+
+    noiser_match = compare_trees(trainer1.noiser_params, trainer2.noiser_params)
     assert noiser_match, "noiser_params don't match after restore"
     print(f"  ✓ noiser_params match")
 
