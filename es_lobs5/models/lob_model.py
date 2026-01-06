@@ -453,8 +453,9 @@ class ES_PaddedLobPredModel(Model):
         # Book encoding
         x_b = call_submodule(ES_LobBookModel, 'book_encoder', common_params, x_b, book_integration_timesteps)
 
-        # Concatenate message and book features
-        x = jnp.concatenate([x_m, x_b], axis=0)
+        # Concatenate message and book features along feature dimension
+        # x_m: (L, d_model), x_b: (L, d_model) -> x: (L, 2*d_model)
+        x = jnp.concatenate([x_m, x_b], axis=-1)
 
         # Fused encoding
         x = call_submodule(ES_StackedEncoder, 'fused_encoder', common_params, x)
@@ -496,8 +497,9 @@ class ES_PaddedLobPredModel(Model):
         # Book encoding
         x_b = call_submodule(ES_LobBookModel, 'book_encoder', common_params, x_b, book_integration_timesteps)
 
-        # Concatenate
-        x = jnp.concatenate([x_m, x_b], axis=0)
+        # Concatenate along feature dimension
+        # x_m: (L, d_model), x_b: (L, d_model) -> x: (L, 2*d_model)
+        x = jnp.concatenate([x_m, x_b], axis=-1)
 
         # Fused encoding
         x = call_submodule(ES_StackedEncoder, 'fused_encoder', common_params, x)
