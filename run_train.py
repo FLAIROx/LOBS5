@@ -445,6 +445,14 @@ if __name__ == "__main__":
 		# CRITICAL: In multi-node mode, num_devices should equal local device count
 		args.num_devices = local_device_count
 		print(f"    Adjusted num_devices: {args.num_devices} (local device count)")
+
+		# NOTE: Currently each node trains independently with local gradient sync only
+		# True distributed training requires cross-node gradient aggregation (psum across processes)
+		# TODO: Implement proper multi-node gradient sync for effective global batch = micro_bsz × total_gpus
+		total_global_devices = len(jax.devices())
+		micro_bsz = args.global_bsz // local_device_count
+		print(f"[*] Multi-node status: {jax.process_count()} processes × {local_device_count} GPUs = {total_global_devices} total")
+		print(f"[*] Local batch: {micro_bsz}/GPU × {local_device_count} = {args.global_bsz} (gradient sync within node only)")
 	else:
 		# Single machine mode
 		is_distributed = False

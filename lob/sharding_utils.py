@@ -38,22 +38,29 @@ def create_simple_mesh(num_devices: int) -> Mesh:
     """
     from jax.experimental import mesh_utils
 
-    # CRITICAL: Use local_devices() for multi-node support
-    # jax.devices() returns all global devices, but we need devices local to this process
+    # For multi-node JAX distributed training:
+    # - Each process creates LOCAL mesh with its own devices
+    # - Gradient sync across nodes is handled by jax.lax.psum in train_step
+    # - DO NOT use global mesh with all devices (causes OOM in device_put)
     local_devs = jax.local_devices()
     devices = local_devs[:num_devices]
 
-    print(f"[Sharding] Process {jax.process_index()}: Using {len(devices)} local devices out of {len(local_devs)} available")
+    if jax.process_count() > 1:
+        print(f"[Sharding] Multi-node mode: Process {jax.process_index()}/{jax.process_count()}")
+        print(f"[Sharding] Using {len(devices)} LOCAL devices (gradient sync via psum)")
+    else:
+        print(f"[Sharding] Single-node mode: Using {len(devices)} local devices")
 
     # Use mesh_utils.create_device_mesh (MaxText approach)
     # This properly handles device topology and returns a numpy array of devices
+    actual_num_devices = len(devices)
     devices_array = mesh_utils.create_device_mesh(
-        [num_devices],  # 1D mesh shape
+        [actual_num_devices],  # 1D mesh shape - use actual device count
         devices,
     )
 
     mesh = Mesh(devices_array, axis_names=('data',))
-    print(f"[Sharding] Created mesh with {num_devices} devices along 'data' axis")
+    print(f"[Sharding] Created mesh with {actual_num_devices} devices along 'data' axis")
     print(f"[Sharding] Mesh shape: {mesh.shape}")
     return mesh
 
