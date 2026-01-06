@@ -23,7 +23,22 @@ Key Features:
 - Supports two background modes: world_model (autoregressive) and historical_replay (data)
 """
 
+import os
 import jax
+
+# ============================================================================
+# G4: Configure JAX persistent compilation cache (HyperscaleES pattern)
+# This caches XLA compilation results to disk, allowing subsequent runs
+# to skip the expensive compilation step (~150s -> <10s for warm start)
+# Reference: HyperscaleES/llm_experiments/general_do_evolution_multi_gpu.py:9-11
+# ============================================================================
+_jax_cache_dir = os.path.expanduser("~/.cache/es_lobs5_jax_compilation")
+os.makedirs(_jax_cache_dir, exist_ok=True)
+jax.config.update("jax_compilation_cache_dir", _jax_cache_dir)
+jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)  # Cache all sizes
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)  # Cache all compile times
+# ============================================================================
+
 import jax.numpy as jnp
 from functools import partial
 import argparse
@@ -555,15 +570,18 @@ class ESTrainer:
         fp = self.lobs5_init.frozen_params
         jaxlob_cfg = self.jaxlob_cfg  # Capture for use in nested functions
 
-        # [EXPERIMENTAL] Capture object references outside scan to potentially avoid JIT recompilation
-        # Uncomment below if profiling shows recompilation issues with self.xxx inside jax.lax.scan
-        # process_order_array = self.sim.process_order_array
-        # sim_obj = self.sim
-        # encoder = self.encoder
-        # replay_tokens = self.replay_tokens
-        # replay_data_raw = self.replay_data_raw
-        # Then replace: self.sim.process_order_array -> process_order_array
-        #               self.sim -> sim_obj, self.encoder -> encoder, etc.
+        # ========================================================================
+        # G5 + G2: Extract self references to avoid capturing entire self in JIT
+        # This prevents JAX from potentially recompiling when self attributes change
+        # Reference: HyperscaleES/llm_experiments/utils.py - build_generate_thread pattern
+        # ========================================================================
+        process_order_array = self.sim.process_order_array
+        sim_obj = self.sim
+        encoder = self.encoder
+        replay_tokens = self.replay_tokens
+        replay_data_raw = self.replay_data_raw
+        n_replay_msgs = replay_tokens.shape[0] if replay_tokens is not None else 0
+        # ========================================================================
 
         # Get ES model class
         ES_PaddedLobPredModel = _get_es_model()
@@ -630,20 +648,20 @@ class ESTrainer:
                 """Load pre-encoded messages from historical data."""
                 key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr = wcarry
 
-                replayed_msg_tokens = self.replay_tokens[replay_ptr]
-                replayed_msg_raw = self.replay_data_raw[replay_ptr]
+                replayed_msg_tokens = replay_tokens[replay_ptr]
+                replayed_msg_raw = replay_data_raw[replay_ptr]
 
                 sim_msg = decoded_msg_to_jaxlob_format(replayed_msg_raw)
                 bg_order_id = WORLD_ORDER_ID_START + oid_offset
                 sim_msg = sim_msg.at[4].set(bg_order_id)
                 sim_msg = sim_msg.at[5].set(-2000)
 
-                sim_st = self.sim.process_order_array(sim_st, sim_msg)
+                sim_st = process_order_array(sim_st, sim_msg)
                 book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], replayed_msg_tokens])
 
                 new_replay_ptr = replay_ptr + 1
-                n_replay_msgs = self.replay_tokens.shape[0]
+                # Use pre-extracted n_replay_msgs instead of self.replay_tokens.shape[0]
                 new_replay_ptr = jnp.where(new_replay_ptr >= n_replay_msgs, jnp.int32(500), new_replay_ptr)
                 oid_offset = oid_offset + 1
 
@@ -682,11 +700,11 @@ class ESTrainer:
                 mid_price = get_mid_price(jaxlob_cfg, sim_st, config.tick_size)
                 world_order_id = WORLD_ORDER_ID_START + oid_offset
                 sim_msg, _ = get_sim_msg_es(
-                    world_msg, self.sim, sim_st, mid_price, world_order_id, config.tick_size, self.encoder,
+                    world_msg, sim_obj, sim_st, mid_price, world_order_id, config.tick_size, encoder,
                     trader_id=-2000, token_mode=config.token_mode
                 )
 
-                sim_st = self.sim.process_order_array(sim_st, sim_msg)
+                sim_st = process_order_array(sim_st, sim_msg)
                 book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], world_msg])
                 oid_offset = oid_offset + 1
@@ -739,7 +757,7 @@ class ESTrainer:
             mid_price = get_mid_price(jaxlob_cfg, sim_state, config.tick_size)
             policy_order_id = POLICY_ORDER_ID_START + step_idx
             sim_msg, msg_decoded = get_sim_msg_es(
-                policy_msg, self.sim, sim_state, mid_price, policy_order_id, config.tick_size, self.encoder,
+                policy_msg, sim_obj, sim_state, mid_price, policy_order_id, config.tick_size, encoder,
                 trader_id=-1000, token_mode=config.token_mode
             )
 
@@ -761,7 +779,7 @@ class ESTrainer:
             sim_msg = sim_msg.at[2].set(truncated_qty)
 
             # Process order
-            sim_state = self.sim.process_order_array(sim_state, sim_msg)
+            sim_state = process_order_array(sim_state, sim_msg)
 
             # Track execution
             trades = sim_state.trades
