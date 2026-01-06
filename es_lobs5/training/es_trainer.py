@@ -40,6 +40,8 @@ jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)  # Cache all 
 # ============================================================================
 
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from jax.experimental.shard_map import shard_map
 from functools import partial
 import argparse
 from tqdm import tqdm
@@ -379,9 +381,20 @@ class ESTrainer:
         print(f"[INIT]   background_mode: {config.background_mode}")
 
         # ========================================================================
-        # G1: Pre-compile eval_batch for faster subsequent epochs
+        # H3: Multi-GPU Mesh Configuration (MUST be before _compile_eval_batch)
+        # Reference: HyperscaleES/llm_experiments/general_do_evolution_multi_gpu.py
+        # Creates a 1D mesh along 'data' axis for data-parallel ES evaluation
+        # ========================================================================
+        self._n_devices = len(jax.devices())
+        self._mesh = Mesh(jax.devices(), ('data',))
+        print(f"[H3] Created mesh with {self._n_devices} devices")
+        print(f"[H3] Mesh axis: {self._mesh.axis_names}")
+
+        # ========================================================================
+        # G1 + H1: Pre-compile eval_batch for faster subsequent epochs
         # The first epoch will trigger actual XLA compilation, but subsequent
         # epochs will reuse the cached compilation.
+        # H1: With mesh available, this will use shard_map for multi-GPU.
         # ========================================================================
         print("[INIT] Building eval_batch function (compilation on first call)...")
         self._compiled_eval_batch = self._compile_eval_batch()
@@ -468,6 +481,20 @@ class ESTrainer:
         # Pre-encode all messages
         self.replay_tokens = encode_msgs(msg_raw, self.encoder, token_mode=self.config.token_mode)
         self.replay_data_raw = jnp.array(msg_raw)
+
+    def _shard_to_mesh(self, x):
+        """Shard array across devices along 'data' axis.
+
+        H3: Helper method for multi-GPU data distribution.
+        Reference: HyperscaleES/llm_experiments/general_do_evolution_multi_gpu.py
+
+        Args:
+            x: Array to shard (typically population data with leading dimension = n_threads)
+
+        Returns:
+            Sharded array distributed across devices
+        """
+        return jax.device_put(x, NamedSharding(self._mesh, P('data')))
 
     def _create_initial_sim_state(self) -> Tuple['LobState', jnp.ndarray]:
         """
@@ -645,6 +672,9 @@ class ESTrainer:
         2. Wrap with vmap for parallel threads
         3. JIT compile with proper in_axes
 
+        H1: When multi-GPU is available, uses shard_map to distribute threads
+        across devices. Each device runs n_threads/n_devices threads in parallel.
+
         Returns a JIT-compiled function that can be called directly.
 
         Note: Full AOT compilation (.lower().compile()) requires ShapeDtypeStruct
@@ -654,25 +684,90 @@ class ESTrainer:
         """
         _eval_thread = self._build_eval_thread()
 
-        # Define in_axes for vmap:
-        # - noiser_params: None (shared across threads)
-        # - params: None (shared)
-        # - key: 0 (different per thread)
-        # - thread_id: 0 (different per thread)
-        # - epoch: None (shared)
-        # - initial_sim_state: None (shared, broadcast)
-        # - initial_msg_history: None (shared, broadcast)
+        # Check if multi-GPU is available
+        n_devices = getattr(self, '_n_devices', 1)
 
-        vmapped_eval = jax.vmap(
-            _eval_thread,
-            in_axes=(None, None, 0, 0, None, None, None)
-        )
+        if n_devices > 1 and hasattr(self, '_mesh'):
+            # ====================================================================
+            # H1: shard_map + vmap for multi-GPU distribution
+            # Reference: HyperscaleES/llm_experiments/general_do_evolution_multi_gpu.py
+            #
+            # Strategy:
+            # - shard_map distributes data across devices (outer layer)
+            # - vmap handles threads per device (inner layer)
+            # - Each device gets n_threads/n_devices threads
+            # ====================================================================
+            print(f"[H1] Using shard_map with {n_devices} devices")
 
-        # JIT compile with donated args for memory optimization
-        # Note: We don't donate noiser_params/params as they're needed for gradient update
-        compiled_eval = jax.jit(vmapped_eval)
+            # Inner vmap: vectorize over keys and thread_ids within each device
+            # After sharding, each device sees (n_threads/n_devices,) shaped arrays
+            vmapped_eval = jax.vmap(
+                _eval_thread,
+                in_axes=(None, None, 0, 0, None, None, None)
+            )
 
-        print("[G1] Pre-compiled eval_batch function")
+            # Outer shard_map: distribute across devices
+            # in_specs:
+            #   - noiser_params: P() - replicated (shared across all devices)
+            #   - params: P() - replicated
+            #   - keys: P('data') - sharded along data axis
+            #   - thread_ids: P('data') - sharded
+            #   - epoch: P() - replicated
+            #   - initial_sim_state: P() - replicated (broadcast)
+            #   - initial_msg_history: P() - replicated (broadcast)
+            # out_specs:
+            #   - fitnesses: P('data') - sharded (gather results)
+            #   - infos: P('data') - sharded (pytree, handled automatically)
+            sharded_eval = shard_map(
+                vmapped_eval,
+                mesh=self._mesh,
+                in_specs=(
+                    P(),        # noiser_params: replicated
+                    P(),        # params: replicated
+                    P('data'),  # keys: sharded
+                    P('data'),  # thread_ids: sharded
+                    P(),        # epoch: replicated
+                    P(),        # initial_sim_state: replicated
+                    P(),        # initial_msg_history: replicated
+                ),
+                out_specs=(
+                    P('data'),  # fitnesses: sharded
+                    P('data'),  # infos: sharded (pytree)
+                ),
+            )
+
+            # JIT compile with donated args for memory optimization
+            compiled_eval = jax.jit(sharded_eval)
+
+            print("[H1] Pre-compiled eval_batch function with shard_map")
+            print(f"[H1]   Mesh: {self._mesh.axis_names}")
+            print(f"[H1]   Devices: {n_devices}")
+        else:
+            # ====================================================================
+            # Fallback to single-GPU vmap (original G1 implementation)
+            # ====================================================================
+            print("[H1] Using single-GPU vmap (no mesh or single device)")
+
+            # Define in_axes for vmap:
+            # - noiser_params: None (shared across threads)
+            # - params: None (shared)
+            # - key: 0 (different per thread)
+            # - thread_id: 0 (different per thread)
+            # - epoch: None (shared)
+            # - initial_sim_state: None (shared, broadcast)
+            # - initial_msg_history: None (shared, broadcast)
+
+            vmapped_eval = jax.vmap(
+                _eval_thread,
+                in_axes=(None, None, 0, 0, None, None, None)
+            )
+
+            # JIT compile with donated args for memory optimization
+            # Note: We don't donate noiser_params/params as they're needed for gradient update
+            compiled_eval = jax.jit(vmapped_eval)
+
+            print("[G1] Pre-compiled eval_batch function (single-GPU)")
+
         return compiled_eval
 
     # ========================================================================
@@ -1005,6 +1100,17 @@ class ESTrainer:
     ) -> Tuple[float, jnp.ndarray, Dict]:
         """Run one training epoch."""
         n_threads = self.config.n_threads
+        n_devices = getattr(self, '_n_devices', 1)
+
+        # ========================================================================
+        # H1: Validate n_threads divisibility for shard_map
+        # When using multi-GPU, n_threads must be evenly divisible by n_devices
+        # so each device gets the same number of threads to evaluate.
+        # ========================================================================
+        if n_devices > 1:
+            assert n_threads % n_devices == 0, \
+                f"[H1 ERROR] n_threads ({n_threads}) must be divisible by n_devices ({n_devices}). " \
+                f"Consider using n_threads={n_devices * (n_threads // n_devices)} or n_threads={n_devices * ((n_threads // n_devices) + 1)}"
 
         # Generate keys for all threads
         keys = jax.random.split(key, n_threads)
