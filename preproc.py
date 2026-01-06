@@ -110,6 +110,51 @@ def transform_L2_state_gpu(
     return mybook
 
 
+# =============================================================================
+# Pure versions for shard_map compatibility (no internal JIT)
+# =============================================================================
+
+def _transform_L2_state_impl(
+        book: jax.Array,
+        price_levels: int,
+        tick_size: int = 100,
+    ) -> jax.Array:
+    """Core implementation without JIT/vmap decorators.
+
+    This is the inner implementation used by both JIT and pure versions.
+    For use inside shard_map, we need a version without JIT to avoid
+    device placement conflicts.
+    """
+    delta_p_mid_and_time, book = book[:3], book[3:]
+    book = book.reshape((-1, 2))
+    mid_price = jnp.ceil((book[0, 0] + book[1, 0]) / (2*tick_size)).__mul__(tick_size).astype(int)
+    book = book.at[:, 0].set((book[:, 0] - mid_price) // tick_size)
+    book = book.at[:, 0].set(book[:, 0] + price_levels // 2)
+    book = jnp.where(book < 0, -price_levels-1, book)
+
+    mybook = jnp.zeros(price_levels, dtype=jnp.int32)
+    mybook = mybook.at[book[:, 0]].set(book[:, 1])
+
+    delta_p_mid_and_time = delta_p_mid_and_time.astype(jnp.float32)
+    delta_p_mid_and_time = delta_p_mid_and_time.at[1].set((delta_p_mid_and_time[1]-34200)/23400)
+    delta_p_mid_and_time = delta_p_mid_and_time.at[2].set(delta_p_mid_and_time[2]/1e9)
+
+    mybook = mybook.at[price_levels // 2:].set(mybook[price_levels // 2:] * -1)
+    mybook = jnp.concatenate((
+        delta_p_mid_and_time.astype(jnp.float32),
+        mybook.astype(jnp.float32) / 1000
+    ))
+    return mybook
+
+
+# Pure version: vmap only, no jit - for use inside shard_map
+transform_L2_state_pure = jax.vmap(
+    _transform_L2_state_impl,
+    in_axes=(0, None, None),
+    out_axes=0
+)
+
+
 @partial(np.vectorize,signature="(c),(),()->(d)")
 def transform_L2_state_numpy(
         book: np.ndarray, 

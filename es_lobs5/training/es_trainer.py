@@ -287,35 +287,50 @@ def transform_L2_state_wrapper(
     sim_state: 'LobState',
     price_levels: int = 500,
     tick_size: int = 100,
+    in_shard_map: bool = False,
 ) -> jnp.ndarray:
     """
     Convert JaxLOB sim_state to model book input.
 
     Args:
-        cfg: JaxLOB Configuration (required for get_L2_state)
+        cfg: JaxLOB Configuration (not used, kept for API compatibility)
         sim_state: JaxLOB LobState
         price_levels: Volume image size (default 500)
         tick_size: Tick size in cents
+        in_shard_map: If True, use pure versions without internal JIT to avoid
+                      device placement conflicts in shard_map context.
 
     Returns:
         book_feat: (503,) = [mid_diff, time_s_norm, time_ns_norm, volume_image(500)]
     """
     _lazy_import_jaxlob()
-    from gymnax_exchange.jaxob.JaxOrderBookArrays import get_L2_state
-    from preproc import transform_L2_state_gpu
+
+    # Select function versions based on context
+    if in_shard_map:
+        # Pure versions for shard_map compatibility (no internal JIT)
+        from gymnax_exchange.jaxob.JaxOrderBookArrays import get_L2_state_pure
+        from preproc import transform_L2_state_pure
+        _get_L2 = get_L2_state_pure
+        _transform = transform_L2_state_pure
+    else:
+        # Original JIT versions for single-GPU performance
+        from gymnax_exchange.jaxob.JaxOrderBookArrays import get_L2_state
+        from preproc import transform_L2_state_gpu
+        _get_L2 = get_L2_state
+        _transform = transform_L2_state_gpu
 
     # Extract L2 from JaxLOB
-    # Note: get_L2_state signature is (asks, bids, n_levels, cfg)
-    l2_state = get_L2_state(sim_state.asks, sim_state.bids, 10, cfg)
+    # Note: get_L2_state signature is (asks, bids, n_levels)
+    l2_state = _get_L2(sim_state.asks, sim_state.bids, 10)
     l2_state = jnp.asarray(l2_state, dtype=jnp.int32)
 
     # Construct (43,) input
     metadata = jnp.array([0, 34200, 0], dtype=jnp.int32)
     book_input = jnp.concatenate([metadata, l2_state])
 
-    # Apply training transform (use GPU version for device consistency)
+    # Apply training transform
     book_input_batched = book_input[None, :]
-    book_feat_batched = transform_L2_state_gpu(book_input_batched, price_levels, tick_size)
+    book_feat_batched = _transform(book_input_batched, price_levels, tick_size)
     return book_feat_batched[0]
 
 
@@ -896,7 +911,7 @@ class ESTrainer:
             msg_history = jnp.zeros((context_len,), dtype=jnp.int32)
 
         book_depth = fp.get('book_depth', 500)
-        book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size)
+        book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
 
         task_size = jnp.int32(config.task_size)
 
@@ -921,7 +936,7 @@ class ESTrainer:
                 sim_msg = sim_msg.at[5].set(-2000)
 
                 sim_st = process_order_array(sim_st, sim_msg)
-                book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size)
+                book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], replayed_msg_tokens])
 
                 new_replay_ptr = replay_ptr + 1
@@ -975,7 +990,7 @@ class ESTrainer:
                 )
 
                 sim_st = process_order_array(sim_st, sim_msg)
-                book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size)
+                book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], world_msg])
                 oid_offset = oid_offset + 1
 
@@ -1075,7 +1090,7 @@ class ESTrainer:
             quant_executed = quant_executed + step_executed
 
             # Update state
-            book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size)
+            book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
 
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
