@@ -751,6 +751,7 @@ class ESTrainer:
                     P('data'),  # fitnesses: sharded
                     P('data'),  # infos: sharded (pytree)
                 ),
+                check_rep=False,  # H2: Disable VMA check due to complex scan carry types
             )
 
             # JIT compile with donated args for memory optimization
