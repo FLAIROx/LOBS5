@@ -150,9 +150,20 @@ def load_model_and_data():
 
     # Prepare book features (should be float32)
     # Book data typically has shape (n_events, features) where features includes depth levels
+    # The raw data may have fewer columns than d_book, so we need to pad with zeros
     if len(raw_book.shape) == 2:
-        # Take first msg_seq_len rows and first d_book columns
-        book_features = raw_book[:msg_seq_len, :d_book].astype(np.float32)
+        # Take first msg_seq_len rows
+        raw_book_slice = raw_book[:msg_seq_len].astype(np.float32)
+        n_rows, n_cols = raw_book_slice.shape
+
+        if n_cols < d_book:
+            # Pad with zeros to match d_book dimension
+            book_features = np.zeros((n_rows, d_book), dtype=np.float32)
+            book_features[:, :n_cols] = raw_book_slice
+            print(f"      Padded book features from {n_cols} to {d_book} columns")
+        else:
+            # Take first d_book columns
+            book_features = raw_book_slice[:, :d_book]
     else:
         # Reshape if needed
         book_features = raw_book[:msg_seq_len * d_book].reshape(msg_seq_len, d_book).astype(np.float32)

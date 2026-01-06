@@ -240,3 +240,8 @@ xla_pallas/**
 new2
 docs/**
 **.txt
+xvla_actual_params.py
+xvla_detailed_timing.py
+xvla_params_only.py
+xvla_timing_benchmark.py
+xvla_timing.slurm
