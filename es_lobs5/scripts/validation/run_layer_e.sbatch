@@ -32,8 +32,8 @@ mkdir -p logs_validation
 export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/JaxMARL-HFT:$PYTHONPATH"
 echo "PYTHONPATH: $PYTHONPATH"
 
-# Python path
-PYTHON=/lus/lfs1aip2/home/s5e/kangli.s5e/miniforge3/envs/es-lob/bin/python
+# Python path - use -u for unbuffered output to see progress in real-time
+PYTHON="/lus/lfs1aip2/home/s5e/kangli.s5e/miniforge3/envs/es-lob/bin/python -u"
 
 # Helper function to clear GPU memory between tests
 clear_gpu_memory() {

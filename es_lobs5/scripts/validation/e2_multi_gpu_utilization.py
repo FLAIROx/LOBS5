@@ -47,9 +47,11 @@ class ESConfig:
     grad_clip: float = 1.0
 
     # Training configuration (256 threads = 64 per GPU on 4 GPUs)
+    # NOTE: n_steps=10 to avoid 55+ min XLA compilation (100 steps = 3.7M ops)
+    # NOTE: n_epochs=5 for validation (full training would take 2+ hours)
     n_threads: int = 256
-    n_epochs: int = 10
-    n_steps: int = 100
+    n_epochs: int = 5   # Reduced from 50 for faster validation
+    n_steps: int = 10   # Reduced from 100 to avoid XLA compilation hang
     world_msgs_per_step: int = 5
 
     # Token mode (24 matches the checkpoint)
@@ -278,7 +280,7 @@ def test_vmap_multi_gpu():
 def test_es_training_multi_gpu():
     """Test actual ES training with multi-GPU configuration."""
     print("\n" + "=" * 70)
-    print("ES Training Multi-GPU Test (256 threads, 10 epochs)")
+    print("ES Training Multi-GPU Test (256 threads, 5 epochs)")
     print("=" * 70)
 
     from es_lobs5.training.es_trainer import ESTrainer
@@ -398,7 +400,7 @@ def validate_multi_gpu_utilization():
     print("E2: Multi-GPU Utilization Validation")
     print("=" * 70)
     print(f"Purpose: Validate that training uses all 4 GPUs effectively")
-    print(f"Configuration: n_threads=256 (64 per GPU), n_steps=100, n_epochs=10")
+    print(f"Configuration: n_threads=256 (64 per GPU), n_steps=10, n_epochs=5")
     print("=" * 70)
 
     validation_results = {
@@ -490,10 +492,12 @@ def validate_multi_gpu_utilization():
 
 def main():
     """Main entry point."""
-    print(f"\nJAX version: {jax.__version__}")
-    print(f"JAX devices: {jax.devices()}")
-    print(f"JAX backend: {jax.default_backend()}")
-    print(f"Number of devices: {len(jax.devices())}")
+    import sys
+    print(f"\nJAX version: {jax.__version__}", flush=True)
+    print(f"JAX devices: {jax.devices()}", flush=True)
+    print(f"JAX backend: {jax.default_backend()}", flush=True)
+    print(f"Number of devices: {len(jax.devices())}", flush=True)
+    sys.stdout.flush()
 
     try:
         passed, results = validate_multi_gpu_utilization()
