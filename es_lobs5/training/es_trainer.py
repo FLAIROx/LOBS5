@@ -1193,13 +1193,32 @@ class ESTrainer:
         thread_ids = jnp.arange(n_threads)
 
         # ========================================================================
-        # G1: Use pre-compiled eval_batch function
+        # G1 + H1: Use pre-compiled eval_batch function
         # The function was compiled in __init__ and is reused here.
         # Arguments: (noiser_params, params, keys, thread_ids, epoch, sim_state, msg_history)
+        #
+        # H2: For multi-GPU with shard_map, replicate params to all devices
         # ========================================================================
+        n_devices = getattr(self, '_n_devices', 1)
+
+        if n_devices > 1 and hasattr(self, '_mesh'):
+            # Replicate params and noiser_params to all devices
+            noiser_params_rep = jax.device_put(
+                self.noiser_params,
+                NamedSharding(self._mesh, P())
+            )
+            params_rep = jax.device_put(
+                self.lobs5_init.params,
+                NamedSharding(self._mesh, P())
+            )
+        else:
+            # Single GPU: use params as-is
+            noiser_params_rep = self.noiser_params
+            params_rep = self.lobs5_init.params
+
         fitnesses, infos = self._compiled_eval_batch(
-            self.noiser_params,
-            self.lobs5_init.params,
+            noiser_params_rep,
+            params_rep,
             keys,
             thread_ids,
             jnp.int32(epoch),
