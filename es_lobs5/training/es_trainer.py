@@ -320,8 +320,8 @@ def transform_L2_state_wrapper(
         _transform = transform_L2_state_gpu
 
     # Extract L2 from JaxLOB
-    # Note: get_L2_state signature is (asks, bids, n_levels)
-    l2_state = _get_L2(sim_state.asks, sim_state.bids, 10)
+    # Note: get_L2_state signature is (asks, bids, n_levels, cfg)
+    l2_state = _get_L2(sim_state.asks, sim_state.bids, 10, cfg)
     l2_state = jnp.asarray(l2_state, dtype=jnp.int32)
 
     # Construct (43,) input
@@ -1212,7 +1212,9 @@ class ESTrainer:
         # The function was compiled in __init__ and is reused here.
         # Arguments: (noiser_params, params, keys, thread_ids, epoch, sim_state, msg_history)
         #
-        # H2: For multi-GPU with shard_map, replicate params to all devices
+        # H2: For multi-GPU with shard_map, shard inputs correctly across devices
+        # - params/noiser_params: P() replicated to all devices
+        # - keys/thread_ids: P('data') sharded across devices for parallel eval
         # ========================================================================
         n_devices = getattr(self, '_n_devices', 1)
 
@@ -1225,6 +1227,16 @@ class ESTrainer:
             params_rep = jax.device_put(
                 self.lobs5_init.params,
                 NamedSharding(self._mesh, P())
+            )
+            # Shard keys and thread_ids across devices for parallel evaluation
+            # Each device gets (n_threads/n_devices) threads to evaluate
+            keys = jax.device_put(
+                keys,
+                NamedSharding(self._mesh, P('data'))
+            )
+            thread_ids = jax.device_put(
+                thread_ids,
+                NamedSharding(self._mesh, P('data'))
             )
         else:
             # Single GPU: use params as-is
@@ -1247,20 +1259,39 @@ class ESTrainer:
             thread_ids
         )
 
+        # ========================================================================
+        # H2: Use replicated params for gradient updates in multi-GPU mode
+        # The fitnesses returned from shard_map are sharded, so params must
+        # also be replicated to avoid device mismatch in do_updates
+        # ========================================================================
         normalized_fitnesses = self.noiser_cls.convert_fitnesses(
-            self.frozen_noiser_params, self.noiser_params, fitnesses
+            self.frozen_noiser_params, noiser_params_rep, fitnesses
         )
 
-        self.noiser_params, updated_params = self.noiser_cls.do_updates(
+        noiser_params_updated, updated_params = self.noiser_cls.do_updates(
             self.frozen_noiser_params,
-            self.noiser_params,
-            self.lobs5_init.params,
+            noiser_params_rep,
+            params_rep,
             self.es_tree_key,
             normalized_fitnesses,
             iterinfos,
             self.lobs5_init.es_map,
         )
-        self.lobs5_init.params = updated_params
+
+        # Extract updated params back to single device for storage
+        if n_devices > 1 and hasattr(self, '_mesh'):
+            # Get first shard from replicated params
+            self.noiser_params = jax.tree.map(
+                lambda x: jax.device_put(x, jax.devices()[0]),
+                noiser_params_updated
+            )
+            self.lobs5_init.params = jax.tree.map(
+                lambda x: jax.device_put(x, jax.devices()[0]),
+                updated_params
+            )
+        else:
+            self.noiser_params = noiser_params_updated
+            self.lobs5_init.params = updated_params
 
         aggregated_info = {k: jnp.mean(v) for k, v in infos.items()}
 
