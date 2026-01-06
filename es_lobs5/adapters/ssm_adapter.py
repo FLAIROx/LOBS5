@@ -413,11 +413,24 @@ class S5SSMParams(Model):
         input_dtype = x.dtype
         x_fp32 = x.astype(jnp.float32)
 
+        # Squeeze hidden from (batch, 1, P) to (1, P) for apply_ssm_rnn
+        # apply_ssm_rnn expects 2D hidden state
+        if hidden.ndim == 3:
+            hidden_2d = hidden.squeeze(axis=0)  # (1, P)
+        else:
+            hidden_2d = hidden
+
         # Apply SSM RNN mode
-        hidden_out, ys = apply_ssm_rnn(
-            Lambda_bar, B_bar, C_tilde, hidden, x_fp32, resets,
+        hidden_out_2d, ys = apply_ssm_rnn(
+            Lambda_bar, B_bar, C_tilde, hidden_2d, x_fp32, resets,
             fp['conj_sym'], fp['bidirectional']
         )
+
+        # Unsqueeze hidden back to (batch, 1, P) for consistency
+        if hidden.ndim == 3:
+            hidden_out = hidden_out_2d[None, :, :]  # (1, 1, P)
+        else:
+            hidden_out = hidden_out_2d
 
         # Add feedthrough
         Du = D * x_fp32

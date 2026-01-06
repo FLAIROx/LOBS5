@@ -266,6 +266,7 @@ def get_sim_msg_es(
 
 
 def transform_L2_state_wrapper(
+    cfg: 'Configuration',
     sim_state: 'LobState',
     price_levels: int = 500,
     tick_size: int = 100,
@@ -274,6 +275,7 @@ def transform_L2_state_wrapper(
     Convert JaxLOB sim_state to model book input.
 
     Args:
+        cfg: JaxLOB Configuration (required for get_L2_state)
         sim_state: JaxLOB LobState
         price_levels: Volume image size (default 500)
         tick_size: Tick size in cents
@@ -283,19 +285,20 @@ def transform_L2_state_wrapper(
     """
     _lazy_import_jaxlob()
     from gymnax_exchange.jaxob.JaxOrderBookArrays import get_L2_state
-    from preproc import transform_L2_state
+    from preproc import transform_L2_state_gpu
 
     # Extract L2 from JaxLOB
-    l2_state = get_L2_state(sim_state.asks, sim_state.bids, 10)
+    # Note: get_L2_state signature is (asks, bids, n_levels, cfg)
+    l2_state = get_L2_state(sim_state.asks, sim_state.bids, 10, cfg)
     l2_state = jnp.asarray(l2_state, dtype=jnp.int32)
 
     # Construct (43,) input
     metadata = jnp.array([0, 34200, 0], dtype=jnp.int32)
     book_input = jnp.concatenate([metadata, l2_state])
 
-    # Apply training transform
+    # Apply training transform (use GPU version for device consistency)
     book_input_batched = book_input[None, :]
-    book_feat_batched = transform_L2_state(book_input_batched, price_levels, tick_size)
+    book_feat_batched = transform_L2_state_gpu(book_input_batched, price_levels, tick_size)
     return book_feat_batched[0]
 
 
@@ -400,6 +403,7 @@ class ESTrainer:
 
         # Create configuration with custom capacity
         jaxlob_cfg = replace(Configuration(), nOrders=n_orders, nTrades=n_trades)
+        self.jaxlob_cfg = jaxlob_cfg  # Store for use in get_mid_price
         self.sim = OrderBook(cfg=jaxlob_cfg)
 
         # Create encoder from Vocab
@@ -549,6 +553,7 @@ class ESTrainer:
         """
         config = self.config
         fp = self.lobs5_init.frozen_params
+        jaxlob_cfg = self.jaxlob_cfg  # Capture for use in nested functions
 
         # Get ES model class
         ES_PaddedLobPredModel = _get_es_model()
@@ -585,11 +590,12 @@ class ESTrainer:
         WORLD_ORDER_ID_START = 2000000
 
         # Clear trades from historical replay
+        # Note: JaxLOB trades have 8 columns, not 6!
         sim_state = sim_state._replace(
-            trades=(jnp.ones((sim_state.trades.shape[0], 6)) * -1).astype(jnp.int32)
+            trades=(jnp.ones((sim_state.trades.shape[0], 8)) * -1).astype(jnp.int32)
         )
 
-        init_mid_price = get_mid_price(sim_state, config.tick_size)
+        init_mid_price = get_mid_price(jaxlob_cfg, sim_state, config.tick_size)
 
         # Initialize message history
         if initial_msg_history is not None:
@@ -598,7 +604,7 @@ class ESTrainer:
             msg_history = jnp.zeros((context_len,), dtype=jnp.int32)
 
         book_depth = fp.get('book_depth', 500)
-        book_feat = transform_L2_state_wrapper(sim_state, price_levels=book_depth, tick_size=config.tick_size)
+        book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size)
 
         task_size = jnp.int32(config.task_size)
 
@@ -623,7 +629,7 @@ class ESTrainer:
                 sim_msg = sim_msg.at[5].set(-2000)
 
                 sim_st = self.sim.process_order_array(sim_st, sim_msg)
-                book_f = transform_L2_state_wrapper(sim_st, price_levels=book_depth, tick_size=config.tick_size)
+                book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], replayed_msg_tokens])
 
                 new_replay_ptr = replay_ptr + 1
@@ -663,7 +669,7 @@ class ESTrainer:
                 )
 
                 # Convert to JaxLOB format
-                mid_price = get_mid_price(sim_st, config.tick_size)
+                mid_price = get_mid_price(jaxlob_cfg, sim_st, config.tick_size)
                 world_order_id = WORLD_ORDER_ID_START + oid_offset
                 sim_msg, _ = get_sim_msg_es(
                     world_msg, self.sim, sim_st, mid_price, world_order_id, config.tick_size, self.encoder,
@@ -671,7 +677,7 @@ class ESTrainer:
                 )
 
                 sim_st = self.sim.process_order_array(sim_st, sim_msg)
-                book_f = transform_L2_state_wrapper(sim_st, price_levels=book_depth, tick_size=config.tick_size)
+                book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], world_msg])
                 oid_offset = oid_offset + 1
 
@@ -720,7 +726,7 @@ class ESTrainer:
             )
 
             # Convert to JaxLOB format
-            mid_price = get_mid_price(sim_state, config.tick_size)
+            mid_price = get_mid_price(jaxlob_cfg, sim_state, config.tick_size)
             policy_order_id = POLICY_ORDER_ID_START + step_idx
             sim_msg, msg_decoded = get_sim_msg_es(
                 policy_msg, self.sim, sim_state, mid_price, policy_order_id, config.tick_size, self.encoder,
@@ -755,7 +761,7 @@ class ESTrainer:
             quant_executed = quant_executed + step_executed
 
             # Update state
-            book_feat = transform_L2_state_wrapper(sim_state, price_levels=book_depth, tick_size=config.tick_size)
+            book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
 
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
