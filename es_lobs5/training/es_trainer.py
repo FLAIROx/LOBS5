@@ -118,6 +118,17 @@ def _lazy_import_jaxlob():
 
 
 # ============================================================================
+# Import shared utilities from lob/inference for code reuse
+# ============================================================================
+from lob.validation_helpers import syntax_validation_matrix
+from lob.encoding import Vocab
+from lob.inference_no_errcorr import (
+    msg_to_jnp,              # Replaces decoded_msg_to_jaxlob_format
+    msgs_to_jnp,             # Replaces vmap version
+    construct_sim_msg,       # Replaces inline construction in get_sim_msg_es
+)
+
+# ============================================================================
 # Field-Aware Token Masking for Constrained Decoding (24-token mode)
 # ============================================================================
 # Direct implementation for 24-token vocabulary structure:
@@ -366,40 +377,9 @@ def log_data_format(info: dict, prefix: str = "[DATA]") -> None:
     print(f"{prefix}   Shape: ({info['n_rows']}, {info['n_cols']}), dtype: {info['dtype']}")
 
 
-# Helper function to convert decoded messages to JaxLOB format
-@jax.jit
-def decoded_msg_to_jaxlob_format(msg_decoded: jax.Array) -> jax.Array:
-    """
-    Convert 14-column decoded message to 8-column JaxLOB format.
-
-    Args:
-        msg_decoded: (14,) decoded message
-
-    Returns:
-        (8,) JaxLOB message [type, side, qty, price, trade_id, order_id, time_s, time_ns]
-    """
-    ORDER_ID_i = 0
-    EVENT_TYPE_i = 1
-    DIRECTION_i = 2
-    PRICE_ABS_i = 3
-    SIZE_i = 5
-    TIMEs_i = 8
-    TIMEns_i = 9
-
-    return jnp.array([
-        msg_decoded[EVENT_TYPE_i],
-        (msg_decoded[DIRECTION_i] * 2) - 1,  # 0/1 -> -1/1
-        msg_decoded[SIZE_i],
-        msg_decoded[PRICE_ABS_i],
-        0,  # trade_id
-        msg_decoded[ORDER_ID_i],
-        msg_decoded[TIMEs_i],
-        msg_decoded[TIMEns_i],
-    ], dtype=jnp.int32)
-
-
-# Vectorized version for batch conversion
-msgs_to_jnp = jax.jit(jax.vmap(decoded_msg_to_jaxlob_format))
+# REMOVED: decoded_msg_to_jaxlob_format and msgs_to_jnp are now imported
+# from lob.inference_no_errcorr (see imports at top of file).
+# This eliminates ~30 lines of duplicated code.
 
 
 def get_sim_msg_es(
@@ -460,17 +440,17 @@ def get_sim_msg_es(
     p_abs = mid_price + safe_rel_price * tick_size
     p_abs = jnp.maximum(p_abs, tick_size)
 
-    # Construct JaxLOB message
-    sim_msg = jnp.array([
+    # Construct JaxLOB message using shared function from lob.inference_no_errcorr
+    sim_msg = construct_sim_msg(
         safe_event_type,
-        (safe_side * 2) - 1,
+        safe_side,
         safe_quantity,
         p_abs,
         order_id,
-        trader_id,
         time_s,
         time_ns,
-    ], dtype=jnp.int32)
+        trader_id=trader_id,
+    )
 
     return sim_msg, msg_decoded
 

@@ -353,16 +353,20 @@ def construct_sim_msg(
         order_id: int,
         time_s: int,
         time_ns: int,
+        trader_id: int = -88,  # Optional trader_id for multi-agent scenarios
     ):
-    """ NOTE: trader ID is set to 0
+    """ Construct JaxLOB simulator message.
+
+    Args:
+        trader_id: Trader ID for tracking (default -88 for single agent)
     """
     return jnp.array([
         event_type,
         (side * 2) - 1,
         quantity,
         price,
-        order_id, # order_id
-        -88, 
+        order_id,
+        trader_id,  # Now parameterized
         time_s,
         time_ns,
     ], dtype=jnp.int32)
