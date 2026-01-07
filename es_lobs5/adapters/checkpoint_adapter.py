@@ -65,7 +65,8 @@ def load_flax_checkpoint(checkpoint_path: str) -> Tuple[Dict, Dict]:
     train_size = 1000  # Dummy, not used for loading
 
     print(f"Creating dummy TrainState for restore...")
-    state, _ = init_train_state(
+    # init_train_state returns (state, model_cls, total_params)
+    state, _, _ = init_train_state(
         args=args,
         n_classes=n_classes,
         seq_len=seq_len,

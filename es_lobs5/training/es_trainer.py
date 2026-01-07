@@ -21,6 +21,8 @@ Key Features:
 - Policy can observe market changes before making decisions
 - Fitness = PnL (profit/loss based on execution quality)
 - Supports two background modes: world_model (autoregressive) and historical_replay (data)
+
+gymanx_exchange env path: https://github.com/KangOxford/JaxMARL-HFT
 """
 
 import os
