@@ -161,6 +161,7 @@ if __name__ == "__main__":
         seq_len=eval_seq_len,
         book_dim=book_dim,
         book_seq_len=eval_book_seq_len,
+        train_size=1,  # dummy value for inference (only used for lr schedule)
     )
 
 
