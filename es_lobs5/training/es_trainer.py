@@ -130,6 +130,9 @@ def _lazy_import_jaxlob():
 #   direction: 2110-2111 (2 values: 0=sell, 1=buy)
 # ============================================================================
 
+# DEPRECATED: This is replaced by syntax_validation_matrix from lob/validation_helpers.py
+# which now correctly supports token_mode=24 with the get_encoder_key() fix.
+# Kept for backward compatibility only.
 # Position -> (field_name, token_min, token_max) for 24-token messages
 POSITION_TOKEN_RANGES_24 = {
     0: ("event_type", 1004, 1007),
@@ -160,6 +163,9 @@ POSITION_TOKEN_RANGES_24 = {
 
 _FIELD_MASKS_24 = None
 
+# DEPRECATED: Use get_field_masks_from_validation_matrix() instead.
+# This hardcoded implementation is kept for backward compatibility only.
+# The new approach uses lob/validation_helpers.syntax_validation_matrix for consistent constraint logic.
 def get_field_masks_24(vocab_size: int = 2112):
     """Get field masks for constrained decoding (additive mask format).
 
@@ -183,6 +189,31 @@ def get_field_masks_24(vocab_size: int = 2112):
             masks.append(mask)
         _FIELD_MASKS_24 = jnp.stack(masks)
     return _FIELD_MASKS_24
+
+
+def get_field_masks_from_validation_matrix(token_mode: int, vocab_size: int):
+    """Create field masks by converting syntax_validation_matrix to additive format.
+
+    This function uses the unified validation logic from lob/validation_helpers.py,
+    ensuring that constraint fixes automatically propagate from LOB inference to ES training.
+
+    Args:
+        token_mode: 22 or 24
+        vocab_size: Vocabulary size (12012 for token_mode=22, 2112 for token_mode=24)
+
+    Returns:
+        Additive masks of shape (MSG_LEN, vocab_size): 0.0=valid, -1e9=invalid
+    """
+    from lob.validation_helpers import syntax_validation_matrix
+    from lob.encoding import Vocab
+
+    v = Vocab(token_mode=token_mode)
+    bool_mask = syntax_validation_matrix(v)  # (MSG_LEN, vocab_size), True=valid
+
+    # Convert: True → 0.0 (valid), False → -1e9 (invalid)
+    additive_mask = jnp.where(bool_mask, 0.0, -1e9)
+
+    return additive_mask
 
 
 def create_es_config():
@@ -1230,7 +1261,10 @@ class ESTrainer:
         # Pre-compute field masks OUTSIDE step_fn to avoid JAX tracer leak
         # These masks constrain each token position to valid vocabulary ranges
         vocab_size = fp.get('d_output', 2112)  # Default 2112 for 24-token mode
-        field_masks = get_field_masks_24(vocab_size=vocab_size)
+        field_masks = get_field_masks_from_validation_matrix(
+            token_mode=config.token_mode,
+            vocab_size=vocab_size
+        )
 
         def step_fn(carry, step_idx):
             """Single step: Background messages -> Policy action."""
