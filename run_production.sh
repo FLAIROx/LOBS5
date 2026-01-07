@@ -7,7 +7,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/production_%j.out
 #SBATCH --error=logs/production_%j.err
-#SBATCH --partition=gh200
+#SBATCH --partition=workq
 
 # ==============================================================================
 # ES-LOBS5 Production Training SLURM Script

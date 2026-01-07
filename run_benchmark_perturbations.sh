@@ -7,7 +7,7 @@
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/benchmark_perturbations_%j.out
 #SBATCH --error=logs/benchmark_perturbations_%j.err
-#SBATCH --partition=gh200
+#SBATCH --partition=workq
 
 # ==============================================================================
 # Benchmark: Find Maximum n_perturbations for Different n_steps
