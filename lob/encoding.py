@@ -369,8 +369,8 @@ def decode_time(time_toks, encoding):
         time_ns = combine_field(time[6:], 3)
 
         return delta_t_s, delta_t_ns, time_s, time_ns
-    # only time given
-    elif time.shape[0] == 5:
+    # only time given (5 tokens or any other non-9 case)
+    else:  # Changed from 'elif time.shape[0] == 5' to handle all other cases
         # convert time_s to seconds after midnight
         time_s = combine_field(time[:2], 3) #+ 34200
         time_ns = combine_field(time[2:], 3)
