@@ -98,20 +98,38 @@ def plot_price_distribution(
     hist_data: Dict[str, np.ndarray],
     policy_data: Dict[str, np.ndarray],
     bins: int = 50,
-    price_range: tuple = (-20, 20)
+    price_range: tuple = None  # None = auto range
 ):
     """Plot price distribution histograms."""
     hist_prices = hist_data['price']
     policy_prices = policy_data['price']
 
-    # Filter valid prices
-    hist_prices = hist_prices[(hist_prices > -9000) & (hist_prices >= price_range[0]) & (hist_prices <= price_range[1])]
-    policy_prices = policy_prices[(policy_prices > -9000) & (policy_prices >= price_range[0]) & (policy_prices <= price_range[1])]
+    # Filter only invalid prices (< -9000 means missing/invalid)
+    hist_prices = hist_prices[hist_prices > -9000]
+    policy_prices = policy_prices[policy_prices > -9000]
 
-    ax.hist(hist_prices, bins=bins, alpha=0.6, label=f'Historical (n={len(hist_prices)})',
+    # Auto-detect range if not specified
+    if price_range is None:
+        all_prices = np.concatenate([hist_prices, policy_prices]) if len(policy_prices) > 0 else hist_prices
+        if len(all_prices) > 0:
+            p5, p95 = np.percentile(all_prices, [5, 95])
+            # Expand range slightly and round to nice numbers
+            range_width = max(abs(p5), abs(p95), 20)
+            price_range = (-range_width * 1.2, range_width * 1.2)
+        else:
+            price_range = (-100, 100)
+
+    # Apply range filter for display
+    hist_display = hist_prices[(hist_prices >= price_range[0]) & (hist_prices <= price_range[1])]
+    policy_display = policy_prices[(policy_prices >= price_range[0]) & (policy_prices <= price_range[1])]
+
+    ax.hist(hist_display, bins=bins, alpha=0.6, label=f'Historical (n={len(hist_prices)}, shown={len(hist_display)})',
             color='steelblue', density=True)
-    ax.hist(policy_prices, bins=bins, alpha=0.6, label=f'Policy (n={len(policy_prices)})',
-            color='coral', density=True)
+    if len(policy_display) > 0:
+        ax.hist(policy_display, bins=bins, alpha=0.6, label=f'Policy (n={len(policy_prices)}, shown={len(policy_display)})',
+                color='coral', density=True)
+    else:
+        ax.plot([], [], label=f'Policy (n={len(policy_prices)}, shown=0)', color='coral')
 
     ax.axvline(x=0, color='black', linestyle='--', linewidth=1, label='Mid Price')
     ax.axvline(x=-1, color='gray', linestyle=':', linewidth=0.8)
@@ -120,7 +138,7 @@ def plot_price_distribution(
     ax.set_xlabel('Price (ticks relative to mid)')
     ax.set_ylabel('Density')
     ax.set_title('Price Distribution')
-    ax.legend(loc='upper right')
+    ax.legend(loc='upper right', fontsize=8)
     ax.set_xlim(price_range)
 
 
