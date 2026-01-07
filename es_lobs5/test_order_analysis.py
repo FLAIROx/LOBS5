@@ -1,5 +1,5 @@
 """
-Order Quality Analysis Script - Real ES Training Version
+Order Quality Analysis Script
 
 Extracts real policy-generated orders from ES training (info['policy_msgs'])
 and compares with historical orders from replay data.
@@ -9,8 +9,7 @@ Usage: sbatch test_order_analysis.sh
 
 import os
 import sys
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 # Setup paths
 LOBS5_ROOT = '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5'
@@ -23,7 +22,6 @@ import numpy as np
 from datetime import datetime
 import argparse
 
-# Local imports
 from lob.encoding import decode_msgs, Vocab
 from es_lobs5.analysis import (
     compute_order_stats,
@@ -35,301 +33,148 @@ from es_lobs5.analysis.visualize import plot_comparison, plot_detailed_analysis
 
 @dataclass
 class ESConfig:
-    """Minimal config for ES Trainer order analysis."""
-    # Checkpoint
+    """Config for ES Trainer order analysis."""
     lobs5_checkpoint: str = '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/'
-
-    # ES configuration (minimal - just for episode collection)
     noiser: str = 'eggroll'
     sigma: float = 0.01
     lr: float = 0.001
     lora_rank: int = 4
-    group_size: int = 0  # No baseline subtraction for testing
-
-    # Training configuration (minimal)
-    n_perturbations: int = 4  # Small for testing
+    group_size: int = 0
+    n_perturbations: int = 8
     n_epochs: int = 1
-    n_steps: int = 50  # Steps per episode
+    n_steps: int = 50
     background_msgs_per_step: int = 10
-
-    # Token mode
     token_mode: int = 24
-
-    # Background mode - use historical replay for realistic testing
     background_mode: str = 'historical_replay'
     replay_data_path: str = '/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021'
-
-    # Task
     task: str = 'sell'
     task_size: int = 500
     tick_size: int = 100
-
-    # Training stability
     grad_clip: float = 1.0
-
-    # Other
     seed: int = 42
     n_warmup_msgs: int = 500
 
 
-def collect_policy_orders_from_es(config: ESConfig, n_episodes: int = 5) -> np.ndarray:
+def collect_policy_orders(config: ESConfig, n_episodes: int = 5) -> dict:
     """
-    Run ES episodes and collect real policy-generated orders.
+    Run ES episodes and collect policy-generated orders.
 
-    Args:
-        config: ESConfig with trainer settings
-        n_episodes: Number of episodes to run
-
-    Returns:
-        Array of shape (n_episodes * n_steps, msg_len) containing policy tokens
+    Returns dict with 'baseline' and 'noised' order arrays.
     """
     from es_lobs5.training.es_trainer import ESTrainer
 
-    print(f"[*] Initializing ESTrainer for order collection...")
+    print(f"[*] Initializing ESTrainer...")
     trainer = ESTrainer(config)
 
-    # Get initial state (this uses warmup from replay data)
-    print(f"[*] Creating initial simulation state...")
+    print(f"[*] Creating initial state...")
     initial_state, initial_msg_history = trainer._create_initial_sim_state()
 
-    all_policy_msgs = []
-    all_fitnesses = []
+    baseline_msgs, noised_msgs = [], []
+    baseline_fit, noised_fit = [], []
 
     for ep in range(n_episodes):
         key = jax.random.PRNGKey(config.seed + ep * 100)
 
-        # Run episode with thread_id=0 (baseline, no noise perturbation)
-        # This gives us the policy's "mean" behavior
-        print(f"[*] Running episode {ep}...")
-        fitness, info = trainer.eval_single_thread(
-            key,
-            thread_id=0,  # Baseline thread
-            epoch=0,
-            initial_sim_state=initial_state,
-            initial_msg_history=initial_msg_history,
-        )
-
-        # Extract policy messages
+        # Baseline (thread_id=0, no noise)
+        fit, info = trainer.eval_single_thread(key, 0, 0, initial_state, initial_msg_history)
         if 'policy_msgs' in info:
-            policy_msgs = np.array(info['policy_msgs'])
-            all_policy_msgs.append(policy_msgs)
-            all_fitnesses.append(float(fitness))
-            print(f"[*] Episode {ep}: collected {len(policy_msgs)} msgs, "
-                  f"fitness={float(fitness):.4f}, pnl_raw={float(info.get('pnl_raw', 0)):.2f}")
-        else:
-            print(f"[!] Episode {ep}: no policy_msgs in info dict")
-            print(f"[!] info keys: {list(info.keys())}")
+            baseline_msgs.append(np.array(info['policy_msgs']))
+            baseline_fit.append(float(fit))
+            print(f"  Ep{ep} baseline: {len(info['policy_msgs'])} msgs, fit={float(fit):.4f}")
 
-    if all_policy_msgs:
-        print(f"\n[*] Mean fitness across {len(all_fitnesses)} episodes: {np.mean(all_fitnesses):.4f}")
-        return np.concatenate(all_policy_msgs, axis=0)
-    else:
-        raise ValueError("No policy messages collected from ES training")
+        # Noised (thread_id=2,3,4,5)
+        for tid in [2, 3, 4, 5]:
+            k = jax.random.fold_in(key, tid)
+            fit, info = trainer.eval_single_thread(k, tid, 0, initial_state, initial_msg_history)
+            if 'policy_msgs' in info:
+                noised_msgs.append(np.array(info['policy_msgs']))
+                noised_fit.append(float(fit))
+
+    return {
+        'baseline': np.concatenate(baseline_msgs) if baseline_msgs else np.array([]),
+        'noised': np.concatenate(noised_msgs) if noised_msgs else np.array([]),
+        'baseline_fitness': baseline_fit,
+        'noised_fitness': noised_fit,
+    }
 
 
-def get_historical_orders_from_replay(data_path: str, n_samples: int = 1000, token_mode: int = 24) -> np.ndarray:
-    """
-    Load historical orders from encoded replay data.
-
-    Args:
-        data_path: Path to encoded data directory
-        n_samples: Number of orders to extract
-        token_mode: 22 or 24 token format
-
-    Returns:
-        Array of shape (n_samples, msg_len) containing historical tokens
-    """
+def get_historical_orders(data_path: str, n_samples: int = 1000) -> np.ndarray:
+    """Load historical orders from encoded data."""
     import glob
-
-    data_files = sorted(glob.glob(os.path.join(data_path, '*.npy')))
-    if not data_files:
-        raise FileNotFoundError(f"No .npy files found in {data_path}")
-
-    # Load first file
-    print(f"[*] Loading historical data from: {data_files[0]}")
-    encoded_data = np.load(data_files[0])
-    print(f"[*] Encoded data shape: {encoded_data.shape}")
-
-    # Extract samples
-    if encoded_data.ndim == 2:
-        historical_tokens = encoded_data[:n_samples, :]
-    else:
-        historical_tokens = encoded_data.reshape(-1, encoded_data.shape[-1])[:n_samples, :]
-
-    return historical_tokens
+    files = sorted(glob.glob(os.path.join(data_path, '*.npy')))
+    if not files:
+        raise FileNotFoundError(f"No .npy files in {data_path}")
+    data = np.load(files[0])
+    return data[:n_samples] if data.ndim == 2 else data.reshape(-1, data.shape[-1])[:n_samples]
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Order Quality Analysis with Real ES Training')
+    parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', type=str,
-                       default='/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/',
-                       help='Path to LOBS5 checkpoint')
+                       default='/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/')
     parser.add_argument('--data_dir', type=str,
-                       default='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021',
-                       help='Path to encoded data directory')
-    parser.add_argument('--n_historical', type=int, default=2000,
-                       help='Number of historical orders to analyze')
-    parser.add_argument('--n_episodes', type=int, default=5,
-                       help='Number of ES episodes to collect policy orders')
-    parser.add_argument('--n_steps', type=int, default=50,
-                       help='Steps per episode')
-    parser.add_argument('--output_dir', type=str, default='./analysis_output',
-                       help='Output directory for reports and charts')
-    parser.add_argument('--token_mode', type=int, default=24,
-                       help='Token mode (22 or 24)')
-    parser.add_argument('--use_synthetic', action='store_true',
-                       help='Use synthetic data instead of real ES training (for quick testing)')
+                       default='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021')
+    parser.add_argument('--n_historical', type=int, default=2000)
+    parser.add_argument('--n_episodes', type=int, default=5)
+    parser.add_argument('--n_steps', type=int, default=50)
+    parser.add_argument('--output_dir', type=str, default='./analysis_output')
+    parser.add_argument('--token_mode', type=int, default=24)
     args = parser.parse_args()
 
-    # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-    print("=" * 60)
-    print(" Order Quality Analysis - Real ES Training")
-    print("=" * 60)
-    print(f"Checkpoint: {args.checkpoint}")
-    print(f"Data dir: {args.data_dir}")
-    print(f"Token mode: {args.token_mode}")
-    print(f"Episodes: {args.n_episodes}")
-    print(f"Steps/episode: {args.n_steps}")
-    print(f"Output dir: {args.output_dir}")
-    print(f"Mode: {'Synthetic' if args.use_synthetic else 'Real ES Training'}")
-    print("=" * 60)
-
-    # Initialize vocab for decoding
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     v = Vocab(token_mode=args.token_mode)
 
-    # ========================================
-    # Step 1: Load historical orders
-    # ========================================
-    print("\n[Step 1] Loading historical orders...")
-    historical_tokens = get_historical_orders_from_replay(
-        args.data_dir,
-        n_samples=args.n_historical,
-        token_mode=args.token_mode
+    print("=" * 60)
+    print(" Order Quality Analysis")
+    print("=" * 60)
+
+    # Step 1: Historical orders
+    print("\n[1] Loading historical orders...")
+    hist_tokens = get_historical_orders(args.data_dir, args.n_historical)
+    hist_decoded = np.array(decode_msgs(hist_tokens, v.ENCODING, token_mode=args.token_mode))
+    hist_stats = compute_order_stats(hist_decoded)
+    print(f"    {hist_stats['n_orders']} orders loaded")
+
+    # Step 2: Policy orders from ES
+    print("\n[2] Collecting policy orders from ES training...")
+    config = ESConfig(
+        lobs5_checkpoint=args.checkpoint,
+        replay_data_path=args.data_dir,
+        token_mode=args.token_mode,
+        n_steps=args.n_steps,
     )
-    print(f"[*] Historical tokens shape: {historical_tokens.shape}")
+    result = collect_policy_orders(config, args.n_episodes)
 
-    # Decode historical orders
-    print("[*] Decoding historical orders...")
-    historical_decoded = np.array(decode_msgs(historical_tokens, v.ENCODING, token_mode=args.token_mode))
-    print(f"[*] Historical decoded shape: {historical_decoded.shape}")
+    baseline_decoded = np.array(decode_msgs(result['baseline'], v.ENCODING, token_mode=args.token_mode))
+    noised_decoded = np.array(decode_msgs(result['noised'], v.ENCODING, token_mode=args.token_mode))
+    baseline_stats = compute_order_stats(baseline_decoded)
+    noised_stats = compute_order_stats(noised_decoded)
 
-    # Compute historical statistics
-    hist_stats = compute_order_stats(historical_decoded)
-    print(f"[*] Historical orders analyzed: {hist_stats['n_orders']}")
-
-    # ========================================
-    # Step 2: Collect policy orders from ES training
-    # ========================================
-    if args.use_synthetic:
-        print("\n[Step 2] Generating synthetic policy orders (--use_synthetic flag)...")
-        # Synthetic mode for quick testing
-        np.random.seed(42)
-        n_policy = min(args.n_historical, args.n_episodes * args.n_steps)
-        policy_tokens = historical_tokens[:n_policy].copy()
-
-        for i in range(len(policy_tokens)):
-            if np.random.random() < 0.8:
-                policy_tokens[i, 1] = 1  # event_type = new
-            if np.random.random() < 0.3:
-                policy_tokens[i, 5] = max(1, policy_tokens[i, 5] // 2)
-    else:
-        print("\n[Step 2] Running ES training to collect real policy orders...")
-
-        # Create ES config
-        config = ESConfig(
-            lobs5_checkpoint=args.checkpoint,
-            replay_data_path=args.data_dir,
-            token_mode=args.token_mode,
-            n_steps=args.n_steps,
-            n_perturbations=4,  # Minimal for order collection
-        )
-
-        # Collect real policy orders
-        policy_tokens = collect_policy_orders_from_es(config, n_episodes=args.n_episodes)
-
-    print(f"[*] Policy tokens shape: {policy_tokens.shape}")
-
-    # Decode policy orders
-    print("[*] Decoding policy orders...")
-    policy_decoded = np.array(decode_msgs(policy_tokens, v.ENCODING, token_mode=args.token_mode))
-    print(f"[*] Policy decoded shape: {policy_decoded.shape}")
-
-    # Compute policy statistics
-    policy_stats = compute_order_stats(policy_decoded)
-    print(f"[*] Policy orders analyzed: {policy_stats['n_orders']}")
-
-    # ========================================
-    # Step 3: Generate comparison report
-    # ========================================
-    print("\n[Step 3] Generating comparison report...")
-
-    report_path = os.path.join(args.output_dir, f'order_analysis_report_{timestamp}.txt')
-    mode_str = "Synthetic" if args.use_synthetic else "Real ES"
-    report = print_stats_comparison(hist_stats, policy_stats, title=f"Historical vs Policy Orders ({mode_str})")
-
-    # Save report to file
+    # Step 3: Report
+    print("\n[3] Generating report...")
+    report_path = os.path.join(args.output_dir, f'report_{ts}.txt')
+    report = print_stats_comparison(hist_stats, baseline_stats, title="Historical vs Baseline Policy")
     with open(report_path, 'w') as f:
         f.write(report)
-    print(f"[*] Report saved to: {report_path}")
 
-    # ========================================
-    # Step 4: Generate visualization
-    # ========================================
-    print("\n[Step 4] Generating visualizations...")
+    # Step 4: Charts
+    print("\n[4] Generating charts...")
+    hist_raw = get_raw_order_data(hist_decoded)
+    baseline_raw = get_raw_order_data(baseline_decoded)
 
-    # Get raw data for visualization
-    hist_raw = get_raw_order_data(historical_decoded)
-    policy_raw = get_raw_order_data(policy_decoded)
+    chart_path = os.path.join(args.output_dir, f'comparison_{ts}.png')
+    plot_comparison(hist_raw, baseline_raw, hist_stats, baseline_stats, save_path=chart_path)
 
-    # Basic comparison chart
-    chart_path = os.path.join(args.output_dir, f'order_comparison_{timestamp}.png')
-    plot_comparison(
-        hist_raw, policy_raw,
-        hist_stats, policy_stats,
-        save_path=chart_path,
-        title=f'Historical vs Policy Orders ({mode_str})'
-    )
+    detailed_path = os.path.join(args.output_dir, f'detailed_{ts}.png')
+    plot_detailed_analysis(hist_raw, baseline_raw, hist_stats, baseline_stats, save_path=detailed_path)
 
-    # Detailed analysis chart
-    detailed_path = os.path.join(args.output_dir, f'order_detailed_{timestamp}.png')
-    plot_detailed_analysis(
-        hist_raw, policy_raw,
-        hist_stats, policy_stats,
-        save_path=detailed_path
-    )
-
-    # ========================================
     # Summary
-    # ========================================
     print("\n" + "=" * 60)
-    print(" Analysis Complete!")
-    print("=" * 60)
-    print(f"Mode: {mode_str}")
     print(f"Report: {report_path}")
-    print(f"Comparison chart: {chart_path}")
-    print(f"Detailed chart: {detailed_path}")
+    print(f"Charts: {chart_path}")
+    print(f"Validity: Hist {hist_stats['validity']['valid_ratio']:.1%} | Baseline {baseline_stats['validity']['valid_ratio']:.1%}")
     print("=" * 60)
-
-    # Print key metrics summary
-    print("\n[Key Metrics Summary]")
-    print(f"  Historical orders: {hist_stats['n_orders']}")
-    print(f"  Policy orders: {policy_stats['n_orders']}")
-    print(f"  Historical validity: {hist_stats['validity']['valid_ratio']:.2%}")
-    print(f"  Policy validity: {policy_stats['validity']['valid_ratio']:.2%}")
-
-    if 'price' in hist_stats and 'price' in policy_stats:
-        print(f"  Historical aggressive ratio: {hist_stats['price'].get('aggressive_ratio', 0):.2%}")
-        print(f"  Policy aggressive ratio: {policy_stats['price'].get('aggressive_ratio', 0):.2%}")
-
-    # Print event type comparison
-    print("\n[Event Type Comparison]")
-    for et in ['new', 'cancel', 'delete', 'execute']:
-        h_val = hist_stats.get('event_type', {}).get(et, 0) * 100
-        p_val = policy_stats.get('event_type', {}).get(et, 0) * 100
-        print(f"  {et:10s}: Historical {h_val:5.1f}% | Policy {p_val:5.1f}%")
 
 
 if __name__ == '__main__':
