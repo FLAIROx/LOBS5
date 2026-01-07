@@ -184,6 +184,76 @@ def create_es_config():
     return parser
 
 
+# =============================================================================
+# Data Format Detection and Logging Utilities
+# =============================================================================
+def detect_data_format(file_path: str, data: 'np.ndarray', token_mode: int = 24) -> dict:
+    """
+    Detect and log the data format of a loaded file.
+
+    Args:
+        file_path: Path to the loaded file
+        data: Loaded numpy array
+        token_mode: Expected token mode (22 or 24)
+
+    Returns:
+        dict with format info:
+            - file_type: 'npy' or 'csv'
+            - format_type: 'preproc', 'encoded', or 'unknown'
+            - n_cols: number of columns
+            - n_rows: number of rows
+            - dtype: data type
+    """
+    import os
+
+    # Detect file type
+    file_ext = os.path.splitext(file_path)[1].lower()
+    file_type = 'npy' if file_ext == '.npy' else ('csv' if file_ext == '.csv' else file_ext)
+
+    # Detect data format
+    n_cols = data.shape[1] if len(data.shape) > 1 else 1
+    n_rows = data.shape[0]
+    dtype = str(data.dtype)
+
+    if n_cols == 14:
+        format_type = 'preproc'
+        format_desc = 'PREPROC (14 cols, raw decoded)'
+    elif n_cols == token_mode:
+        format_type = 'encoded'
+        format_desc = f'ENCODED ({n_cols} cols, tokenized)'
+    elif n_cols in [22, 24]:
+        format_type = 'encoded'
+        format_desc = f'ENCODED ({n_cols} cols, tokenized, token_mode mismatch)'
+    else:
+        format_type = 'unknown'
+        format_desc = f'UNKNOWN ({n_cols} cols)'
+
+    return {
+        'file_type': file_type,
+        'format_type': format_type,
+        'format_desc': format_desc,
+        'n_cols': n_cols,
+        'n_rows': n_rows,
+        'dtype': dtype,
+        'file_path': file_path,
+    }
+
+
+def log_data_format(info: dict, prefix: str = "[DATA]") -> None:
+    """
+    Log data format information.
+
+    Args:
+        info: dict from detect_data_format()
+        prefix: Log prefix string
+    """
+    import os
+    print(f"{prefix} File: {os.path.basename(info['file_path'])}")
+    print(f"{prefix}   Type: {info['file_type'].upper()}")
+    print(f"{prefix}   Format: {info['format_desc']}")
+    print(f"{prefix}   Shape: ({info['n_rows']}, {info['n_cols']}), dtype: {info['dtype']}")
+
+
 # Helper function to convert decoded messages to JaxLOB format
 @jax.jit
 def decoded_msg_to_jaxlob_format(msg_decoded: jax.Array) -> jax.Array:
@@ -539,24 +609,25 @@ class ESTrainer:
         self.replay_data_dir = data_path
 
         msg_data = np.load(selected_file)
-        print(f"[INIT] Loaded {msg_data.shape[0]} messages from {os.path.basename(selected_file)}")
-        print(f"[INIT] Data shape: {msg_data.shape}, dtype: {msg_data.dtype}")
+
+        # Log data format using standard utilities
+        format_info = detect_data_format(selected_file, msg_data, self.config.token_mode)
+        log_data_format(format_info, prefix="[INIT-REPLAY]")
 
         # Auto-detect data format: preproc (N, 14) vs encoded (N, 24)
-        n_cols = msg_data.shape[1] if len(msg_data.shape) > 1 else 1
-        if n_cols == 14:
+        if format_info['format_type'] == 'preproc':
             # Preproc format: need to encode to tokens
-            print(f"[INIT] Detected PREPROC format (14 columns), encoding to tokens...")
+            print(f"[INIT-REPLAY] Action: encoding to {self.config.token_mode}-token format...")
             self.replay_tokens = encode_msgs(msg_data, self.encoder, token_mode=self.config.token_mode)
             self.replay_data_raw = jnp.array(msg_data)
-        elif n_cols == self.config.token_mode:
+        elif format_info['format_type'] == 'encoded':
             # Encoded format: already tokenized, use directly
-            print(f"[INIT] Detected ENCODED format ({n_cols} columns), using directly...")
+            print(f"[INIT-REPLAY] Action: using tokens directly (already encoded)")
             self.replay_tokens = jnp.array(msg_data)
             # For raw data, we need to decode back (or leave as None)
             self.replay_data_raw = None  # Not available in encoded format
         else:
-            raise ValueError(f"Unknown data format: expected 14 (preproc) or {self.config.token_mode} (encoded), got {n_cols} columns")
+            raise ValueError(f"Unknown data format: expected 14 (preproc) or {self.config.token_mode} (encoded), got {format_info['n_cols']} columns")
 
     def _shard_to_mesh(self, x):
         """Shard array across devices along 'data' axis.
@@ -611,32 +682,31 @@ class ESTrainer:
         else:
             file_idx = np.random.randint(0, len(orderbook_files))
 
-        print(f"Loading data from {orderbook_files[file_idx]}")
-
         # Load data
         ob = np.load(orderbook_files[file_idx])
         msg = np.load(message_files[file_idx])
-        print(f"  Message data shape: {msg.shape}, dtype: {msg.dtype}")
+
+        # Log data format using standard utilities
+        ob_format_info = detect_data_format(orderbook_files[file_idx], ob, self.config.token_mode)
+        msg_format_info = detect_data_format(message_files[file_idx], msg, self.config.token_mode)
+        log_data_format(ob_format_info, prefix="[INIT-STATE] Orderbook")
+        log_data_format(msg_format_info, prefix="[INIT-STATE] Message")
 
         # Auto-detect data format: preproc (N, 14) vs encoded (N, 24)
-        n_cols = msg.shape[1] if len(msg.shape) > 1 else 1
-        is_preproc_format = (n_cols == 14)
-        is_encoded_format = (n_cols == self.config.token_mode)
+        if msg_format_info['format_type'] == 'unknown':
+            raise ValueError(f"Unknown data format: expected 14 (preproc) or {self.config.token_mode} (encoded), got {msg_format_info['n_cols']} columns")
 
-        if not is_preproc_format and not is_encoded_format:
-            raise ValueError(f"Unknown data format: expected 14 (preproc) or {self.config.token_mode} (encoded), got {n_cols} columns")
-
-        if is_encoded_format:
+        if msg_format_info['format_type'] == 'encoded':
             # Need to decode for JaxLOB warmup
             from lob.encoding import decode_msgs, Vocab
             v = Vocab(token_mode=self.config.token_mode)
-            print(f"  Detected ENCODED format ({n_cols} columns), decoding for JaxLOB warmup...")
+            print(f"[INIT-STATE] Action: decoding {msg_format_info['n_cols']}-token format for JaxLOB warmup...")
             msg_decoded = np.array(decode_msgs(msg, v.ENCODING, token_mode=self.config.token_mode))
             msg_raw = msg_decoded
             msg_tokens = msg  # Already tokenized
         else:
             # Preproc format
-            print(f"  Detected PREPROC format (14 columns)")
+            print(f"[INIT-STATE] Action: using raw data, will encode to {self.config.token_mode}-token format")
             msg_raw = msg
             msg_tokens = None  # Will encode below
 
@@ -1021,6 +1091,43 @@ class ESTrainer:
 
         book_depth = fp.get('book_depth', 500)
         book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
+
+        # ========================================================================
+        # Hidden State Warmup Phase
+        # S5/RNN models need to process the initial context to build meaningful
+        # hidden states. Without this, hiddens are zeros and outputs are random.
+        # ========================================================================
+        if initial_msg_history is not None and len(initial_msg_history) >= msg_len:
+            n_warmup_msgs = len(initial_msg_history) // msg_len
+
+            def warmup_step(carry, msg_idx):
+                """Process one message through the model to update hidden state."""
+                hiddens_w, hiddens_p = carry
+                start_idx = msg_idx * msg_len
+                msg_tokens = initial_msg_history[start_idx:start_idx + msg_len]
+
+                # Update world model hiddens
+                hiddens_w, _ = ES_PaddedLobPredModel._forward_step(
+                    world_common_params, hiddens_w, msg_tokens, book_feat[None, :]
+                )
+                # Update policy model hiddens
+                hiddens_p, _ = ES_PaddedLobPredModel._forward_step(
+                    policy_common_params, hiddens_p, msg_tokens, book_feat[None, :]
+                )
+                return (hiddens_w, hiddens_p), None
+
+            # H2: Apply pvary to initial carry values when inside shard_map
+            warmup_init = (
+                maybe_pvary_tree(hiddens_world),
+                maybe_pvary_tree(hiddens_policy),
+            )
+            (hiddens_world, hiddens_policy), _ = jax.lax.scan(
+                warmup_step,
+                warmup_init,
+                jnp.arange(n_warmup_msgs),
+                length=n_warmup_msgs,
+            )
+        # ========================================================================
 
         task_size = jnp.int32(config.task_size)
 
