@@ -58,6 +58,7 @@ class ESConfig:
     grad_clip: float = 1.0
     seed: int = 42
     n_warmup_msgs: int = 500
+    temperature: float = 1.0  # Sampling temperature: T=0.1 tested but amplified wrong preferences
 
 
 def collect_policy_orders(config: ESConfig, n_episodes: int = 5) -> dict:

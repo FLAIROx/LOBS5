@@ -1343,9 +1343,13 @@ class ESTrainer:
 
             # Policy generates action with field-aware constrained decoding
             # field_masks is pre-computed OUTSIDE step_fn to avoid tracer leak
+            # Temperature controls sampling sharpness: T<1 sharpens, T>1 flattens
+            # NOTE: T=0.1 tested but made distribution worse (amplified wrong peak preferences)
+            # Using T=1.0 (standard sampling) as default
+            temperature = getattr(config, 'temperature', 1.0)
 
             def sample_policy_token(token_carry, token_pos):
-                """Sample next token with field-aware masking.
+                """Sample next token with field-aware masking and temperature.
 
                 Args:
                     token_carry: (key, msg_history, hiddens)
@@ -1356,6 +1360,10 @@ class ESTrainer:
                 - pos 1 (direction): tokens 2110-2111
                 - pos 2 (price_sign): tokens 2108-2109
                 - etc.
+
+                Temperature < 1.0 sharpens the distribution (more deterministic)
+                Temperature = 1.0 is standard sampling
+                Temperature > 1.0 flattens the distribution (more random)
                 """
                 key_p, msg_hist_p, hidden_p = token_carry
                 key_p, sample_key_p = jax.random.split(key_p)
@@ -1371,7 +1379,12 @@ class ESTrainer:
                 field_mask = field_masks[token_pos]
                 masked_log_probs = log_probs_p[-1] + field_mask
 
-                next_token_p = jax.random.categorical(sample_key_p, masked_log_probs)
+                # Apply temperature scaling to sharpen/flatten the distribution
+                # Temperature < 1 makes high-prob tokens more likely (sharper)
+                # Temperature > 1 makes distribution more uniform (flatter)
+                scaled_log_probs = masked_log_probs / temperature
+
+                next_token_p = jax.random.categorical(sample_key_p, scaled_log_probs)
 
                 msg_hist_p = jnp.concatenate([msg_hist_p[1:], jnp.array([next_token_p])])
 

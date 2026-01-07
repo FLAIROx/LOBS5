@@ -470,3 +470,79 @@ Start with **Option 1 (pmap)** as it requires minimal changes and is proven to w
 - 或等待 JAX 改进 shard_map + nested JIT 支持
 
 ---
+
+## 2026-01-07
+
+### Constrained Decoding 与 Token Distribution 问题
+
+**Date**: 2026-01-07
+
+#### 问题背景
+
+ES-LOBS5 中 policy 生成的订单出现严重分布偏差：
+- 历史订单: size mean=94, median=41
+- Policy 订单: size mean=5786, median=6239 (60x 偏差!)
+- 时间间隔也异常: 历史 0.0009s vs policy 534s
+
+#### 根本原因分析
+
+1. **Constrained Decoding 正确工作**: Token 100% 在有效范围内 (e.g., size_digit 1008-1107)
+
+2. **模型输出近似均匀分布**:
+   - 在 100 个有效 size token 中，模型输出的 log_probs 几乎均匀
+   - 随机采样给出期望值 = (0+99)/2 = 50
+   - 解码后 size = 50×100 + 50 = 5050 (接近观察到的 5786)
+
+3. **Temperature T=0.1 测试失败**:
+   - 本意: 让 T<1 锐化分布，增加高概率 token 权重
+   - 结果: 让结果更糟糕!
+     - Size: 7868 (更大!)
+     - Event Type: 77.6% cancel (历史只有 0.25%)
+     - Direction: 95.6% buy (历史 48.5%)
+   - 原因: Temperature 放大了模型的**错误峰值偏好**
+
+#### 关键洞察
+
+**语言模型不理解 LOB 订单语义**:
+- 模型把 token 当作"语言"而非"结构化金融数据"
+- 即使使用正确的 vocabulary 约束，模型内部不理解:
+  - size=100 vs size=10000 的经济含义差异
+  - event_type=cancel 的市场影响
+  - 合理的订单时间间隔
+
+**数据问题排除**:
+- 训练数据 (2022): size mean=11.4, 95% < 100
+- 测试数据 (JAN2023): size mean=85.6, 51% < 100
+- 都远小于 policy 输出的 5786
+
+#### 解决方向
+
+1. **Fine-tune on Task-Specific Data**:
+   - 在 ES 任务数据上微调模型，让它学习正确的分布
+
+2. **Constrain Output Distribution**:
+   - 不只约束 token 范围，还约束 token 分布
+   - 可以用历史分布作为先验
+
+3. **Hybrid Approach**:
+   - 对 event_type, direction 等类别字段: 使用规则
+   - 对 price, size 等连续字段: 使用模型
+
+4. **调整训练目标**:
+   - 当前模型可能训练于 next-token prediction
+   - 需要加入订单语义相关的损失函数
+
+#### 代码修改
+
+```python
+# es_trainer.py: 添加 temperature 参数支持
+temperature = getattr(config, 'temperature', 1.0)  # 默认 1.0
+
+# Apply temperature scaling
+scaled_log_probs = masked_log_probs / temperature
+next_token = jax.random.categorical(sample_key, scaled_log_probs)
+```
+
+**注意**: T=0.1 测试证明单纯调整 temperature 无法解决问题。需要从模型训练或分布约束层面解决。
+
+---
