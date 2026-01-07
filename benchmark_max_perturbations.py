@@ -66,7 +66,7 @@ class BenchmarkConfig:
     n_threads: int = 64
     n_steps: int = 100
     n_epochs: int = 1  # Only 1 epoch for benchmark
-    world_msgs_per_step: int = 5
+    background_msgs_per_step: int = 5
 
     # Fixed params
     token_mode: int = 24

@@ -74,7 +74,7 @@ PRESETS = {
         "n_threads": 32,
         "n_epochs": 5,
         "n_steps": 50,
-        "world_msgs_per_step": 5,
+        "background_msgs_per_step": 5,
         "checkpoint_every": 2,
     },
     "debug": {
@@ -82,7 +82,7 @@ PRESETS = {
         "n_threads": 64,
         "n_epochs": 20,
         "n_steps": 50,
-        "world_msgs_per_step": 5,
+        "background_msgs_per_step": 5,
         "checkpoint_every": 5,
     },
     "medium": {
@@ -90,7 +90,7 @@ PRESETS = {
         "n_threads": 128,
         "n_epochs": 100,
         "n_steps": 100,
-        "world_msgs_per_step": 5,
+        "background_msgs_per_step": 5,
         "checkpoint_every": 20,
     },
     "production": {
@@ -98,7 +98,7 @@ PRESETS = {
         "n_threads": 256,
         "n_epochs": 1000,
         "n_steps": 100,
-        "world_msgs_per_step": 10,
+        "background_msgs_per_step": 10,
         "checkpoint_every": 50,
     },
     "large_scale": {
@@ -106,7 +106,7 @@ PRESETS = {
         "n_threads": 512,
         "n_epochs": 2000,
         "n_steps": 100,
-        "world_msgs_per_step": 10,
+        "background_msgs_per_step": 10,
         "checkpoint_every": 100,
     },
 }
@@ -145,7 +145,7 @@ class ProductionConfig:
     n_threads: int = 128             # Population size (must be divisible by n_devices for multi-GPU)
     n_epochs: int = 100              # Training epochs
     n_steps: int = 100               # Steps per episode
-    world_msgs_per_step: int = 5     # Background messages per step
+    background_msgs_per_step: int = 5     # Background messages per step
 
     # Token mode (must match checkpoint)
     token_mode: int = 24             # 22 or 24
@@ -588,7 +588,7 @@ Examples:
     parser.add_argument('--n_threads', type=int, default=128)
     parser.add_argument('--n_epochs', type=int, default=100)
     parser.add_argument('--n_steps', type=int, default=100)
-    parser.add_argument('--world_msgs_per_step', type=int, default=5)
+    parser.add_argument('--background_msgs_per_step', type=int, default=5)
 
     # Token mode
     parser.add_argument('--token_mode', type=int, default=24, choices=[22, 24])
@@ -635,7 +635,7 @@ def main():
         n_threads=args.n_threads,
         n_epochs=args.n_epochs,
         n_steps=args.n_steps,
-        world_msgs_per_step=args.world_msgs_per_step,
+        background_msgs_per_step=args.background_msgs_per_step,
         token_mode=args.token_mode,
         task=args.task,
         task_size=args.task_size,

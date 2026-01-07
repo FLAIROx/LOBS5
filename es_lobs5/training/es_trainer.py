@@ -136,8 +136,11 @@ def create_es_config():
     parser.add_argument('--n_threads', type=int, default=128, help='Population size')
     parser.add_argument('--n_epochs', type=int, default=1000, help='Training epochs')
     parser.add_argument('--n_steps', type=int, default=100, help='Steps per episode')
-    parser.add_argument('--world_msgs_per_step', type=int, default=10,
-                        help='Background messages per step')
+    parser.add_argument('--background_msgs_per_step', type=int, default=10,
+                        help='Background messages per step (applies to both world_model and historical_replay)')
+    # Backward compatibility alias
+    parser.add_argument('--world_msgs_per_step', type=int, default=None,
+                        help='[DEPRECATED] Use --background_msgs_per_step instead')
 
     # Execution task
     parser.add_argument('--task', type=str, default='sell',
@@ -376,6 +379,16 @@ class ESTrainer:
         print("[INIT] Starting ESTrainer initialization")
 
         self.config = config
+
+        # Backward compatibility: world_msgs_per_step -> background_msgs_per_step
+        if hasattr(config, 'world_msgs_per_step') and getattr(config, 'world_msgs_per_step', None) is not None:
+            if not hasattr(config, 'background_msgs_per_step') or getattr(config, 'background_msgs_per_step', 10) == 10:
+                print("[WARN] --world_msgs_per_step is deprecated, use --background_msgs_per_step instead")
+                config.background_msgs_per_step = config.world_msgs_per_step
+        # Ensure background_msgs_per_step exists
+        if not hasattr(config, 'background_msgs_per_step'):
+            config.background_msgs_per_step = getattr(config, 'world_msgs_per_step', 10)
+
         _lazy_import_jaxlob()
 
         # Load LOBS5 checkpoint
@@ -450,7 +463,7 @@ class ESTrainer:
         from dataclasses import replace
 
         # Calculate required capacity
-        expected_orders = 500 + self.config.n_steps * (self.config.world_msgs_per_step + 1)
+        expected_orders = 500 + self.config.n_steps * (self.config.background_msgs_per_step + 1)
         n_orders = max(1000, int(expected_orders * 1.5))
         n_trades = max(500, self.config.n_steps * 2)
 
@@ -1001,7 +1014,7 @@ class ESTrainer:
             # Select background generation function
             if config.background_mode == 'historical_replay':
                 step_fn_background = historical_replay_step
-                replay_ptr_init = jnp.int32(500 + step_idx * config.world_msgs_per_step)
+                replay_ptr_init = jnp.int32(500 + step_idx * config.background_msgs_per_step)
             else:
                 step_fn_background = world_model_step
                 replay_ptr_init = jnp.int32(0)
@@ -1021,8 +1034,8 @@ class ESTrainer:
              world_oid_offset, _), _ = jax.lax.scan(
                 step_fn_background,
                 background_scan_init,
-                jnp.arange(config.world_msgs_per_step),
-                length=config.world_msgs_per_step,
+                jnp.arange(config.background_msgs_per_step),
+                length=config.background_msgs_per_step,
             )
 
             # Policy generates action

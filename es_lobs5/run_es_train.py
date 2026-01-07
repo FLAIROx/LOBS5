@@ -39,7 +39,11 @@ def create_parser():
     parser.add_argument('--n_threads', type=int, default=128)
     parser.add_argument('--n_epochs', type=int, default=1000)
     parser.add_argument('--n_steps', type=int, default=100)
-    parser.add_argument('--world_msgs_per_step', type=int, default=10)
+    parser.add_argument('--background_msgs_per_step', type=int, default=10,
+                        help='Background messages per step (applies to both modes)')
+    # Backward compatibility
+    parser.add_argument('--world_msgs_per_step', type=int, default=None,
+                        help='[DEPRECATED] Use --background_msgs_per_step')
 
     # Token mode
     parser.add_argument('--token_mode', type=int, default=22, choices=[22, 24])
