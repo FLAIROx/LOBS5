@@ -1100,20 +1100,35 @@ class ESTrainer:
         if initial_msg_history is not None and len(initial_msg_history) >= msg_len:
             n_warmup_msgs = len(initial_msg_history) // msg_len
 
+            def fix_ema_shape(hiddens):
+                """Keep only last token's EMA state to maintain shape for scan."""
+                msg_h, book_h, fused_h, ema_state = hiddens
+                ema_val, ema_count = ema_state
+                # Take last position to maintain shape: (batch, seq, d) -> (batch, 1, d)
+                ema_val = ema_val[:, -1:, :]
+                return (msg_h, book_h, fused_h, (ema_val, ema_count))
+
             def warmup_step(carry, msg_idx):
                 """Process one message through the model to update hidden state."""
                 hiddens_w, hiddens_p = carry
+                # Use jax.lax.dynamic_slice for JAX-traceable dynamic indexing
                 start_idx = msg_idx * msg_len
-                msg_tokens = initial_msg_history[start_idx:start_idx + msg_len]
+                msg_tokens = jax.lax.dynamic_slice(
+                    initial_msg_history, (start_idx,), (msg_len,)
+                )
 
                 # Update world model hiddens
                 hiddens_w, _ = ES_PaddedLobPredModel._forward_step(
                     world_common_params, hiddens_w, msg_tokens, book_feat[None, :]
                 )
+                hiddens_w = fix_ema_shape(hiddens_w)
+
                 # Update policy model hiddens
                 hiddens_p, _ = ES_PaddedLobPredModel._forward_step(
                     policy_common_params, hiddens_p, msg_tokens, book_feat[None, :]
                 )
+                hiddens_p = fix_ema_shape(hiddens_p)
+
                 return (hiddens_w, hiddens_p), None
 
             # H2: Apply pvary to initial carry values when inside shard_map
