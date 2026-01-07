@@ -24,6 +24,9 @@ def load_flax_checkpoint(checkpoint_path: str) -> Tuple[Dict, Dict]:
     """
     Load a gradient-trained LOBS5 checkpoint using Orbax.
 
+    This uses LOBS5's existing checkpoint loading mechanism which properly
+    handles OCDBT format checkpoints with StandardRestore.
+
     Args:
         checkpoint_path: Path to the checkpoint directory
             (e.g., 'checkpoints/lobs5_d3072_xxx/')
@@ -33,43 +36,62 @@ def load_flax_checkpoint(checkpoint_path: str) -> Tuple[Dict, Dict]:
             - params: Flax parameter dictionary
             - config: Training configuration dictionary
     """
-    import orbax.checkpoint as ocp
+    import sys
 
-    # Open checkpoint manager
-    mgr = ocp.CheckpointManager(
-        os.path.abspath(checkpoint_path),
-        item_names=('state', 'metadata')
+    # Add LOBS5 root to path for imports
+    lobs5_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if lobs5_root not in sys.path:
+        sys.path.insert(0, lobs5_root)
+
+    from lob.init_train import load_metadata, init_train_state, load_checkpoint
+
+    # Step 1: Load metadata to get config
+    print(f"Loading metadata from {checkpoint_path}")
+    args = load_metadata(checkpoint_path)
+
+    # Convert Namespace to dict for config
+    config = vars(args)
+
+    print(f"  d_model: {config.get('d_model', 'N/A')}")
+    print(f"  n_layers: {config.get('n_layers', 'N/A')}")
+    print(f"  token_mode: {config.get('token_mode', 'N/A')}")
+
+    # Step 2: Create TrainState with proper structure
+    # These are defaults that match typical LOBS5 training configs
+    n_classes = config.get('d_output', 2112 if config.get('token_mode', 24) == 24 else 12012)
+    seq_len = config.get('msg_seq_len', 500)
+    book_dim = 3 + config.get('book_depth', 500)  # delta_mid + time + volume image
+    book_seq_len = 1  # Book encoder uses single book state
+    train_size = 1000  # Dummy, not used for loading
+
+    print(f"Creating dummy TrainState for restore...")
+    state, _ = init_train_state(
+        args=args,
+        n_classes=n_classes,
+        seq_len=seq_len,
+        book_dim=book_dim,
+        book_seq_len=book_seq_len,
+        train_size=train_size,
+        print_shapes=False
     )
 
-    # Get latest step
-    latest = mgr.latest_step()
-    if latest is None:
-        raise ValueError(f"No checkpoint found in {checkpoint_path}")
-
-    print(f"Loading checkpoint from step {latest}")
-
-    # Restore checkpoint
-    restored = mgr.restore(
-        latest,
-        args=ocp.args.Composite(
-            state=ocp.args.PyTreeRestore(),
-            metadata=ocp.args.JsonRestore(),
-        )
+    # Step 3: Load checkpoint using LOBS5's mechanism (handles OCDBT properly)
+    print(f"Loading checkpoint state...")
+    ckpt = load_checkpoint(
+        state=state,
+        path=checkpoint_path,
+        step=None,  # Load latest
+        train=False  # Don't replicate to devices
     )
 
-    # Extract params from TrainState
-    # Handle both direct params and TrainState objects
-    state = restored['state']
-    if hasattr(state, 'params'):
-        params = state.params
-    elif isinstance(state, dict) and 'params' in state:
-        params = state['params']
+    # Extract params from loaded TrainState
+    loaded_state = ckpt['model']
+    if hasattr(loaded_state, 'params'):
+        params = loaded_state.params
+    elif isinstance(loaded_state, dict) and 'params' in loaded_state:
+        params = loaded_state['params']
     else:
-        params = state
-
-    # Extract config
-    metadata = restored.get('metadata', {})
-    config = metadata.get('config', metadata)
+        params = loaded_state
 
     return params, config
 
