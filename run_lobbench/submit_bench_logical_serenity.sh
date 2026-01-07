@@ -54,15 +54,15 @@ for metric in "${METRICS[@]}"; do
         --error="logs_lobs5/bench_logical_serenity_${metric}_%j.err" \
         --nodes=1 \
         --ntasks-per-node=1 \
-        --cpus-per-task=256 \
-        --mem=512G \
+        --cpus-per-task=128 \
+        --mem=256G \
         --time=00:30:00 \
         --wrap="
 source ~/miniforge3/etc/profile.d/conda.sh
 conda activate lob
-export OMP_NUM_THREADS=256
-export MKL_NUM_THREADS=256
-export OPENBLAS_NUM_THREADS=256
+export OMP_NUM_THREADS=128
+export MKL_NUM_THREADS=128
+export OPENBLAS_NUM_THREADS=128
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/lob_bench
 python run_bench.py \
     --data_dir='$DATA_DIR' \
