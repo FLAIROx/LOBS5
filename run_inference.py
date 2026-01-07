@@ -78,6 +78,7 @@ if __name__ == "__main__":
     parser.add_argument('--test_split', type=float, default=0.1, help='Which test split to use')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for inference')
     parser.add_argument('--n_sequences', type=int, default=1024, help='Number of sequences to generate')
+    parser.add_argument('--n_cond_msgs', type=int, default=500, help='Number of conditional messages (0 for unconditional)')
     # Add custom paths for Isambard/custom runs
     parser.add_argument('--data_dir', type=str, default=None, help='Custom data directory')
     parser.add_argument('--ckpt_path', type=str, default=None, help='Custom checkpoint path')
@@ -122,7 +123,7 @@ if __name__ == "__main__":
     ##################################################
 
     n_gen_msgs = 500  #500 # how many messages to generate into the future
-    n_messages_conditional = 500  # conditional generation: use 500 messages as context
+    n_messages_conditional = run_args.n_cond_msgs  # conditional generation: use n_cond_msgs messages as context
     n_eval_messages = n_gen_msgs  # how many to load from dataset 
     eval_seq_len = (n_eval_messages-1) * Message_Tokenizer.MSG_LEN
     cond_seq_len = (n_messages_conditional) * Message_Tokenizer.MSG_LEN
@@ -248,7 +249,7 @@ if __name__ == "__main__":
         save_folder=save_dir,
         sample_top_n=sample_top_n,
         args=args,
-        conditional=True,  # conditional generation
+        conditional=True if n_messages_conditional > 0 else False,  # conditional generation
         overfit_debug=overfit_debug,
     )
     print(f"Generation time for {n_samples} sequences across {batch_size} batch size: {time()-start}")

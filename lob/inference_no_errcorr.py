@@ -950,7 +950,7 @@ def generate(
 
         print(m_seq_cond[:-1], b_seq_cond[:-1])
         # Split arrays into N chunks along the leading axis
-        N = 100
+        N = 5
         chex.assert_is_divisible(m_seq_cond[:-1].shape[0], N)
         chex.assert_is_divisible(b_seq_cond[:-1].shape[0], N)
         m_seq_cond_split = m_seq_cond[:-1].reshape((N, -1))
@@ -1276,11 +1276,11 @@ def sample_new(
         
         # Reset print options to default
         b_seq_inp = b_seq[: , : n_cond_msgs+1]
-        b_seq_eval = b_seq[:, (seq_len_cond+1): ] 
+        b_seq_eval = b_seq[:, (n_cond_msgs+1):]
         # true L2 data: remove price change column
         # shape: [batch, messages, levels]
         b_seq_pv_inp = onp.array(b_seq_pv[:, : n_cond_msgs+1, 3:])
-        b_seq_pv_eval = onp.array(b_seq_pv[:, (seq_len_cond+1):, 3:]) #Drop the midprice and times for logging purposes in lobster.
+        b_seq_pv_eval = onp.array(b_seq_pv[:, (n_cond_msgs+1):, 3:]) #Drop the midprice and times for logging purposes in lobster.
 
         # raw LOBSTER data
         m_seq_raw_inp = msg_seq_raw[:, : n_cond_msgs]
