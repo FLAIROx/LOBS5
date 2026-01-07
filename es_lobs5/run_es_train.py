@@ -36,7 +36,11 @@ def create_parser():
     parser.add_argument('--lora_rank', type=int, default=4)
 
     # Training configuration
-    parser.add_argument('--n_threads', type=int, default=128)
+    parser.add_argument('--n_perturbations', type=int, default=128,
+                        help='Population size (ES perturbations)')
+    # Backward compatibility
+    parser.add_argument('--n_threads', type=int, default=None,
+                        help='[DEPRECATED] Use --n_perturbations')
     parser.add_argument('--n_epochs', type=int, default=1000)
     parser.add_argument('--n_steps', type=int, default=100)
     parser.add_argument('--background_msgs_per_step', type=int, default=10,
@@ -85,6 +89,10 @@ def main():
     parser = create_parser()
     args = parser.parse_args()
 
+    # Backward compatibility: n_threads -> n_perturbations
+    if args.n_threads is not None and args.n_perturbations == 128:
+        args.n_perturbations = args.n_threads
+
     print("=" * 60)
     print("LOBS5 ES Training")
     print("=" * 60)
@@ -92,7 +100,7 @@ def main():
     print(f"Noiser: {args.noiser}")
     print(f"Token mode: {args.token_mode}")
     print(f"Background mode: {args.background_mode}")
-    print(f"Threads: {args.n_threads}")
+    print(f"Perturbations: {args.n_perturbations}")
     print(f"Epochs: {args.n_epochs}")
     print(f"Grad clip: {args.grad_clip}")
     print(f"Checkpoint dir: {args.checkpoint_dir}")

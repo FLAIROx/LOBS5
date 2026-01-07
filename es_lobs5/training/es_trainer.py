@@ -133,7 +133,11 @@ def create_es_config():
     parser.add_argument('--lora_rank', type=int, default=4, help='LORA rank')
 
     # Training configuration
-    parser.add_argument('--n_threads', type=int, default=128, help='Population size')
+    parser.add_argument('--n_perturbations', type=int, default=128,
+                        help='Population size (number of ES perturbations, must be divisible by n_devices)')
+    # Backward compatibility alias
+    parser.add_argument('--n_threads', type=int, default=None,
+                        help='[DEPRECATED] Use --n_perturbations instead')
     parser.add_argument('--n_epochs', type=int, default=1000, help='Training epochs')
     parser.add_argument('--n_steps', type=int, default=100, help='Steps per episode')
     parser.add_argument('--background_msgs_per_step', type=int, default=10,
@@ -380,6 +384,15 @@ class ESTrainer:
 
         self.config = config
 
+        # Backward compatibility: n_threads -> n_perturbations
+        if hasattr(config, 'n_threads') and getattr(config, 'n_threads', None) is not None:
+            if not hasattr(config, 'n_perturbations') or getattr(config, 'n_perturbations', 128) == 128:
+                print("[WARN] --n_threads is deprecated, use --n_perturbations instead")
+                config.n_perturbations = config.n_threads
+        # Ensure n_perturbations exists
+        if not hasattr(config, 'n_perturbations'):
+            config.n_perturbations = getattr(config, 'n_threads', 128)
+
         # Backward compatibility: world_msgs_per_step -> background_msgs_per_step
         if hasattr(config, 'world_msgs_per_step') and getattr(config, 'world_msgs_per_step', None) is not None:
             if not hasattr(config, 'background_msgs_per_step') or getattr(config, 'background_msgs_per_step', 10) == 10:
@@ -406,7 +419,7 @@ class ESTrainer:
         self._init_historical_replay_data()
 
         print("[INIT] ESTrainer initialization complete")
-        print(f"[INIT]   n_threads: {config.n_threads}")
+        print(f"[INIT]   n_perturbations: {config.n_perturbations}")
         print(f"[INIT]   n_steps: {config.n_steps}")
         print(f"[INIT]   background_mode: {config.background_mode}")
 
@@ -519,7 +532,7 @@ class ESTrainer:
         Reference: HyperscaleES/llm_experiments/general_do_evolution_multi_gpu.py
 
         Args:
-            x: Array to shard (typically population data with leading dimension = n_threads)
+            x: Array to shard (typically population data with leading dimension = n_perturbations)
 
         Returns:
             Sharded array distributed across devices
@@ -712,7 +725,7 @@ class ESTrainer:
         3. JIT compile with proper in_axes
 
         H1: When multi-GPU is available, uses shard_map to distribute threads
-        across devices. Each device runs n_threads/n_devices threads in parallel.
+        across devices. Each device runs n_perturbations/n_devices threads in parallel.
 
         H2: When using shard_map, passes in_shard_map=True to _build_eval_thread
         so that pvary is applied to scan carry values.
@@ -739,7 +752,7 @@ class ESTrainer:
             # Strategy:
             # - shard_map distributes data across devices (outer layer)
             # - vmap handles threads per device (inner layer)
-            # - Each device gets n_threads/n_devices threads
+            # - Each device gets n_perturbations/n_devices threads
             #
             # H2: in_shard_map=True enables pvary for scan carry values
             # ====================================================================
@@ -747,7 +760,7 @@ class ESTrainer:
             print(f"[H2] pvary enabled for scan carry values")
 
             # Inner vmap: vectorize over keys and thread_ids within each device
-            # After sharding, each device sees (n_threads/n_devices,) shaped arrays
+            # After sharding, each device sees (n_perturbations/n_devices,) shaped arrays
             vmapped_eval = jax.vmap(
                 _eval_thread,
                 in_axes=(None, None, 0, 0, None, None, None)
@@ -1205,22 +1218,22 @@ class ESTrainer:
         initial_msg_history: Optional[jnp.ndarray] = None,
     ) -> Tuple[float, jnp.ndarray, Dict]:
         """Run one training epoch."""
-        n_threads = self.config.n_threads
+        n_perturbations = self.config.n_perturbations
         n_devices = getattr(self, '_n_devices', 1)
 
         # ========================================================================
-        # H1: Validate n_threads divisibility for shard_map
-        # When using multi-GPU, n_threads must be evenly divisible by n_devices
-        # so each device gets the same number of threads to evaluate.
+        # H1: Validate n_perturbations divisibility for shard_map
+        # When using multi-GPU, n_perturbations must be evenly divisible by n_devices
+        # so each device gets the same number of perturbations to evaluate.
         # ========================================================================
         if n_devices > 1:
-            assert n_threads % n_devices == 0, \
-                f"[H1 ERROR] n_threads ({n_threads}) must be divisible by n_devices ({n_devices}). " \
-                f"Consider using n_threads={n_devices * (n_threads // n_devices)} or n_threads={n_devices * ((n_threads // n_devices) + 1)}"
+            assert n_perturbations % n_devices == 0, \
+                f"[H1 ERROR] n_perturbations ({n_perturbations}) must be divisible by n_devices ({n_devices}). " \
+                f"Consider using n_perturbations={n_devices * (n_perturbations // n_devices)} or n_perturbations={n_devices * ((n_perturbations // n_devices) + 1)}"
 
-        # Generate keys for all threads
-        keys = jax.random.split(key, n_threads)
-        thread_ids = jnp.arange(n_threads)
+        # Generate keys for all perturbations
+        keys = jax.random.split(key, n_perturbations)
+        thread_ids = jnp.arange(n_perturbations)
 
         # ========================================================================
         # G1 + H1: Use pre-compiled eval_batch function
@@ -1244,7 +1257,7 @@ class ESTrainer:
                 NamedSharding(self._mesh, P())
             )
             # Shard keys and thread_ids across devices for parallel evaluation
-            # Each device gets (n_threads/n_devices) threads to evaluate
+            # Each device gets (n_perturbations/n_devices) threads to evaluate
             keys = jax.device_put(
                 keys,
                 NamedSharding(self._mesh, P('data'))
@@ -1270,7 +1283,7 @@ class ESTrainer:
 
         # ES gradient update
         iterinfos = (
-            jnp.full(n_threads, epoch, dtype=jnp.int32),
+            jnp.full(n_perturbations, epoch, dtype=jnp.int32),
             thread_ids
         )
 
@@ -1360,9 +1373,9 @@ class ESTrainer:
             wandb_run = wandb.init(
                 project=self.config.wandb_project,
                 entity=self.config.wandb_entity,
-                name=f"es_jaxlob_n{self.config.n_threads}_s{self.config.seed}",
+                name=f"es_jaxlob_n{self.config.n_perturbations}_s{self.config.seed}",
                 config={
-                    'n_threads': self.config.n_threads,
+                    'n_perturbations': self.config.n_perturbations,
                     'n_steps': self.config.n_steps,
                     'noiser': self.config.noiser,
                     'sigma': self.config.sigma,

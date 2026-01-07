@@ -19,7 +19,7 @@ Usage:
     python production_train.py --preset production
 
     # Custom configuration
-    python production_train.py --n_threads 256 --n_epochs 500 --n_steps 100
+    python production_train.py --n_perturbations 256 --n_epochs 500 --n_steps 100
 
     # Resume from checkpoint
     python production_train.py --preset production --resume_from /path/to/checkpoint
@@ -71,7 +71,7 @@ except ImportError:
 PRESETS = {
     "quick_test": {
         "description": "Quick test - single GPU, minimal epochs",
-        "n_threads": 32,
+        "n_perturbations": 32,
         "n_epochs": 5,
         "n_steps": 50,
         "background_msgs_per_step": 5,
@@ -79,7 +79,7 @@ PRESETS = {
     },
     "debug": {
         "description": "Debug - fast iteration, small scale",
-        "n_threads": 64,
+        "n_perturbations": 64,
         "n_epochs": 20,
         "n_steps": 50,
         "background_msgs_per_step": 5,
@@ -87,7 +87,7 @@ PRESETS = {
     },
     "medium": {
         "description": "Medium - balanced training",
-        "n_threads": 128,
+        "n_perturbations": 128,
         "n_epochs": 100,
         "n_steps": 100,
         "background_msgs_per_step": 5,
@@ -95,7 +95,7 @@ PRESETS = {
     },
     "production": {
         "description": "Production - full scale training",
-        "n_threads": 256,
+        "n_perturbations": 256,
         "n_epochs": 1000,
         "n_steps": 100,
         "background_msgs_per_step": 10,
@@ -103,7 +103,7 @@ PRESETS = {
     },
     "large_scale": {
         "description": "Large scale - maximum throughput (4 GPU)",
-        "n_threads": 512,
+        "n_perturbations": 512,
         "n_epochs": 2000,
         "n_steps": 100,
         "background_msgs_per_step": 10,
@@ -142,7 +142,7 @@ class ProductionConfig:
     grad_clip: float = 1.0           # Gradient clipping norm
 
     # Training scale
-    n_threads: int = 128             # Population size (must be divisible by n_devices for multi-GPU)
+    n_perturbations: int = 128             # Population size (must be divisible by n_devices for multi-GPU)
     n_epochs: int = 100              # Training epochs
     n_steps: int = 100               # Steps per episode
     background_msgs_per_step: int = 5     # Background messages per step
@@ -177,13 +177,13 @@ class ProductionConfig:
         if self.checkpoint_dir == DEFAULT_OUTPUT_DIR:
             self.checkpoint_dir = os.path.join(DEFAULT_OUTPUT_DIR, datetime.now().strftime("run_%Y%m%d_%H%M%S"))
 
-        # Validate n_threads for multi-GPU
+        # Validate n_perturbations for multi-GPU
         n_devices = len(jax.devices())
         if n_devices > 1:
-            if self.n_threads % n_devices != 0:
-                old_threads = self.n_threads
-                self.n_threads = (self.n_threads // n_devices) * n_devices
-                print(f"[WARN] Adjusted n_threads from {old_threads} to {self.n_threads} for {n_devices}-GPU divisibility")
+            if self.n_perturbations % n_devices != 0:
+                old_threads = self.n_perturbations
+                self.n_perturbations = (self.n_perturbations // n_devices) * n_devices
+                print(f"[WARN] Adjusted n_perturbations from {old_threads} to {self.n_perturbations} for {n_devices}-GPU divisibility")
 
     def apply_preset(self, preset_name: str):
         """Apply a preset configuration."""
@@ -350,7 +350,7 @@ def run_production_training(config: ProductionConfig, resume_from: Optional[str]
     print(f"Compilation cache: {_jax_cache_dir}")
     print("-" * 80)
     print(f"Configuration:")
-    print(f"  n_threads:     {config.n_threads}")
+    print(f"  n_perturbations:     {config.n_perturbations}")
     print(f"  n_epochs:      {config.n_epochs}")
     print(f"  n_steps:       {config.n_steps}")
     print(f"  noiser:        {config.noiser}")
@@ -376,7 +376,7 @@ def run_production_training(config: ProductionConfig, resume_from: Optional[str]
     wandb_run = None
     if WANDB_AVAILABLE and config.wandb_project:
         try:
-            run_name = config.wandb_name or f"es_n{config.n_threads}_s{config.seed}"
+            run_name = config.wandb_name or f"es_n{config.n_perturbations}_s{config.seed}"
             wandb_run = wandb.init(
                 project=config.wandb_project,
                 entity=config.wandb_entity,
@@ -585,7 +585,7 @@ Examples:
     parser.add_argument('--grad_clip', type=float, default=1.0)
 
     # Training scale
-    parser.add_argument('--n_threads', type=int, default=128)
+    parser.add_argument('--n_perturbations', type=int, default=128)
     parser.add_argument('--n_epochs', type=int, default=100)
     parser.add_argument('--n_steps', type=int, default=100)
     parser.add_argument('--background_msgs_per_step', type=int, default=5)
@@ -632,7 +632,7 @@ def main():
         lr=args.lr,
         lora_rank=args.lora_rank,
         grad_clip=args.grad_clip,
-        n_threads=args.n_threads,
+        n_perturbations=args.n_perturbations,
         n_epochs=args.n_epochs,
         n_steps=args.n_steps,
         background_msgs_per_step=args.background_msgs_per_step,

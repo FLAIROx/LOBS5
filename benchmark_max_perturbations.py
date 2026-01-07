@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Benchmark: Find Maximum n_perturbations (n_threads) for Different n_steps
+Benchmark: Find Maximum n_perturbations (n_perturbations) for Different n_steps
 
-Tests increasing n_threads until OOM to find the sweet spot for your hardware.
+Tests increasing n_perturbations until OOM to find the sweet spot for your hardware.
 
 Usage:
     # Test both n_steps=10 and n_steps=100
@@ -12,7 +12,7 @@ Usage:
     python benchmark_max_perturbations.py --n_steps 10
 
     # Custom thread range
-    python benchmark_max_perturbations.py --min_threads 64 --max_threads 4096
+    python benchmark_max_perturbations.py --min_perturbations 64 --max_threads 4096
 
 Results saved to: benchmark_max_perturbations_results.json
 """
@@ -63,7 +63,7 @@ class BenchmarkConfig:
     grad_clip: float = 1.0
 
     # Variable params
-    n_threads: int = 64
+    n_perturbations: int = 64
     n_steps: int = 100
     n_epochs: int = 1  # Only 1 epoch for benchmark
     background_msgs_per_step: int = 5
@@ -112,9 +112,9 @@ def clear_memory():
     gc.collect()
 
 
-def run_single_benchmark(n_threads: int, n_steps: int) -> Dict[str, Any]:
+def run_single_benchmark(n_perturbations: int, n_steps: int) -> Dict[str, Any]:
     """
-    Run a single benchmark with given n_threads and n_steps.
+    Run a single benchmark with given n_perturbations and n_steps.
 
     Returns:
         Dict with success, time, memory stats, or error info
@@ -122,7 +122,7 @@ def run_single_benchmark(n_threads: int, n_steps: int) -> Dict[str, Any]:
     from es_lobs5.training.es_trainer import ESTrainer
 
     result = {
-        'n_threads': n_threads,
+        'n_perturbations': n_perturbations,
         'n_steps': n_steps,
         'success': False,
         'error': None,
@@ -135,14 +135,14 @@ def run_single_benchmark(n_threads: int, n_steps: int) -> Dict[str, Any]:
         'fitness': None,
     }
 
-    # Adjust n_threads for multi-GPU divisibility
+    # Adjust n_perturbations for multi-GPU divisibility
     n_devices = len(jax.devices())
-    if n_threads % n_devices != 0:
-        n_threads = (n_threads // n_devices + 1) * n_devices
-        result['n_threads'] = n_threads
+    if n_perturbations % n_devices != 0:
+        n_perturbations = (n_perturbations // n_devices + 1) * n_devices
+        result['n_perturbations'] = n_perturbations
 
     print(f"\n{'='*60}")
-    print(f"Testing: n_threads={n_threads}, n_steps={n_steps}")
+    print(f"Testing: n_perturbations={n_perturbations}, n_steps={n_steps}")
     print(f"{'='*60}")
 
     try:
@@ -151,7 +151,7 @@ def run_single_benchmark(n_threads: int, n_steps: int) -> Dict[str, Any]:
 
         # Create config
         config = BenchmarkConfig(
-            n_threads=n_threads,
+            n_perturbations=n_perturbations,
             n_steps=n_steps,
         )
 
@@ -218,14 +218,14 @@ def run_single_benchmark(n_threads: int, n_steps: int) -> Dict[str, Any]:
     return result
 
 
-def find_max_perturbations(n_steps: int, min_threads: int, max_threads: int,
+def find_max_perturbations(n_steps: int, min_perturbations: int, max_threads: int,
                            step_multiplier: float = 2.0) -> List[Dict[str, Any]]:
     """
-    Binary search-like approach to find max n_threads before OOM.
+    Binary search-like approach to find max n_perturbations before OOM.
 
     Args:
         n_steps: Number of steps per episode
-        min_threads: Minimum threads to test
+        min_perturbations: Minimum threads to test
         max_threads: Maximum threads to test
         step_multiplier: Multiply threads by this each step (default 2x)
 
@@ -233,12 +233,12 @@ def find_max_perturbations(n_steps: int, min_threads: int, max_threads: int,
         List of benchmark results
     """
     results = []
-    current_threads = min_threads
+    current_threads = min_perturbations
     last_success_threads = 0
 
     print(f"\n{'#'*60}")
     print(f"# Finding Max Perturbations for n_steps={n_steps}")
-    print(f"# Range: {min_threads} - {max_threads}")
+    print(f"# Range: {min_perturbations} - {max_threads}")
     print(f"{'#'*60}")
 
     while current_threads <= max_threads:
@@ -246,7 +246,7 @@ def find_max_perturbations(n_steps: int, min_threads: int, max_threads: int,
         results.append(result)
 
         if result['success']:
-            last_success_threads = result['n_threads']
+            last_success_threads = result['n_perturbations']
             current_threads = int(current_threads * step_multiplier)
         else:
             # Hit OOM, stop testing this n_steps
@@ -260,10 +260,10 @@ def main():
     parser = argparse.ArgumentParser(description='Benchmark max perturbations')
     parser.add_argument('--n_steps', type=int, nargs='+', default=[10, 100],
                         help='n_steps values to test (default: 10 100)')
-    parser.add_argument('--min_threads', type=int, default=64,
-                        help='Minimum n_threads to test (default: 64)')
+    parser.add_argument('--min_perturbations', type=int, default=64,
+                        help='Minimum n_perturbations to test (default: 64)')
     parser.add_argument('--max_threads', type=int, default=8192,
-                        help='Maximum n_threads to test (default: 8192)')
+                        help='Maximum n_perturbations to test (default: 8192)')
     parser.add_argument('--step_multiplier', type=float, default=2.0,
                         help='Multiply threads by this each step (default: 2.0)')
     parser.add_argument('--output', type=str, default='benchmark_max_perturbations_results.json',
@@ -276,7 +276,7 @@ def main():
     print("=" * 60)
     print(f"JAX devices: {jax.devices()}")
     print(f"n_steps to test: {args.n_steps}")
-    print(f"Thread range: {args.min_threads} - {args.max_threads}")
+    print(f"Thread range: {args.min_perturbations} - {args.max_threads}")
     print("=" * 60)
 
     all_results = {
@@ -294,7 +294,7 @@ def main():
 
         results = find_max_perturbations(
             n_steps=n_steps,
-            min_threads=args.min_threads,
+            min_perturbations=args.min_perturbations,
             max_threads=args.max_threads,
             step_multiplier=args.step_multiplier,
         )
@@ -304,9 +304,9 @@ def main():
         # Find max successful
         successful = [r for r in results if r['success']]
         if successful:
-            max_result = max(successful, key=lambda x: x['n_threads'])
+            max_result = max(successful, key=lambda x: x['n_perturbations'])
             all_results['summary'][f'n_steps_{n_steps}'] = {
-                'max_threads': max_result['n_threads'],
+                'max_threads': max_result['n_perturbations'],
                 'epoch_time': max_result['epoch_time'],
                 'peak_memory_gb': max_result['peak_memory_gb'],
             }
