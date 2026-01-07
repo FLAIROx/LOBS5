@@ -44,7 +44,7 @@ conda activate lobs5
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
 
 # XLA flags
-export XLA_FLAGS="--xla_gpu_enable_triton_softmax_fusion=true --xla_gpu_triton_gemm_any=True"
+# XLA_FLAGS removed - triton flags incompatible with current JAX
 export JAX_TRACEBACK_FILTERING=off
 
 # Show GPU info
