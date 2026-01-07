@@ -118,57 +118,71 @@ def _lazy_import_jaxlob():
 
 
 # ============================================================================
-# Field-Aware Token Masking for Constrained Decoding
+# Field-Aware Token Masking for Constrained Decoding (24-token mode)
 # ============================================================================
-# Uses validation_helpers.syntax_validation_matrix() which creates a proper
-# mask matrix of shape (MSG_LEN, VOCAB_SIZE) where True = valid token.
-#
-# This is the same masking used in inference_no_errcorr.py for generation.
+# Direct implementation for 24-token vocabulary structure:
+#   Special: 0-3 (MASK, HIDDEN, NA, START)
+#   time: 4-1003 (1000 values)
+#   event_type: 1004-1007 (4 values: 1=new, 2=cancel, 3=delete, 4=execute)
+#   size_digit: 1008-1107 (100 values: 0-99 for base-100)
+#   price: 1108-2107 (1000 values: 0-999)
+#   sign: 2108-2109 (2 values: -1, 1)
+#   direction: 2110-2111 (2 values: 0=sell, 1=buy)
 # ============================================================================
 
-_SYNTAX_VALIDATION_MASK = None
+# Position -> (field_name, token_min, token_max) for 24-token messages
+POSITION_TOKEN_RANGES_24 = {
+    0: ("event_type", 1004, 1007),
+    1: ("direction", 2110, 2111),
+    2: ("price_sign", 2108, 2109),
+    3: ("price", 1108, 2107),
+    4: ("size_high", 1008, 1107),
+    5: ("size_low", 1008, 1107),
+    6: ("delta_t_s", 4, 1003),
+    7: ("delta_t_ns_0", 4, 1003),
+    8: ("delta_t_ns_1", 4, 1003),
+    9: ("delta_t_ns_2", 4, 1003),
+    10: ("time_s_0", 4, 1003),
+    11: ("time_s_1", 4, 1003),
+    12: ("time_ns_0", 4, 1003),
+    13: ("time_ns_1", 4, 1003),
+    14: ("time_ns_2", 4, 1003),
+    15: ("price_ref_sign", 2108, 2109),
+    16: ("price_ref", 1108, 2107),
+    17: ("size_ref_high", 1008, 1107),
+    18: ("size_ref_low", 1008, 1107),
+    19: ("time_s_ref_0", 4, 1003),
+    20: ("time_s_ref_1", 4, 1003),
+    21: ("time_ns_ref_0", 4, 1003),
+    22: ("time_ns_ref_1", 4, 1003),
+    23: ("time_ns_ref_2", 4, 1003),
+}
 
-def get_syntax_validation_mask(token_mode: int = 24):
-    """Get the syntax validation mask matrix from validation_helpers.
-
-    This mask ensures each position only outputs tokens valid for that field:
-    - pos 0 (event_type): tokens 1004-1007
-    - pos 1 (direction): tokens 2110-2111
-    - pos 2 (price_sign): tokens 2108-2109
-    - etc.
-
-    Returns:
-        jnp.array of shape (msg_len, vocab_size) where True = valid token
-    """
-    global _SYNTAX_VALIDATION_MASK
-    if _SYNTAX_VALIDATION_MASK is None:
-        import lob.validation_helpers as valh
-        from lob.encoding import Vocab, Message_Tokenizer
-        # Set token mode before generating mask
-        Message_Tokenizer.set_token_mode(token_mode)
-        v = Vocab(token_mode=token_mode)
-        # syntax_validation_matrix returns boolean mask (True = valid)
-        mask_bool = valh.syntax_validation_matrix(v)
-        _SYNTAX_VALIDATION_MASK = jnp.array(mask_bool)
-    return _SYNTAX_VALIDATION_MASK
-
+_FIELD_MASKS_24 = None
 
 def get_field_masks_24(vocab_size: int = 2112):
     """Get field masks for constrained decoding (additive mask format).
 
-    Converts boolean syntax_validation_mask to additive format:
-    - 0.0 for valid tokens
-    - -1e9 for invalid tokens
-
-    This can be added to log_probs before sampling.
+    Creates masks directly from POSITION_TOKEN_RANGES_24, avoiding
+    syntax_validation_matrix which has compatibility issues with 24-token mode.
 
     Returns:
-        jnp.array of shape (24, vocab_size)
+        jnp.array of shape (24, vocab_size) where:
+        - 0.0 for valid tokens
+        - -1e9 for invalid tokens
     """
-    syntax_mask = get_syntax_validation_mask(token_mode=24)
-    # Convert boolean (True=valid) to additive mask (0=valid, -1e9=invalid)
-    additive_mask = jnp.where(syntax_mask, 0.0, -1e9)
-    return additive_mask
+    global _FIELD_MASKS_24
+    if _FIELD_MASKS_24 is None:
+        masks = []
+        for pos in range(24):
+            _, tok_min, tok_max = POSITION_TOKEN_RANGES_24[pos]
+            # Start with -1e9 (invalid) for all tokens
+            mask = jnp.full(vocab_size, -1e9)
+            # Set valid range to 0.0
+            mask = mask.at[tok_min:tok_max+1].set(0.0)
+            masks.append(mask)
+        _FIELD_MASKS_24 = jnp.stack(masks)
+    return _FIELD_MASKS_24
 
 
 def create_es_config():
@@ -1311,7 +1325,9 @@ class ESTrainer:
 
             # Policy generates action with field-aware constrained decoding
             # Get precomputed field masks for 24-token messages
-            field_masks = get_field_masks_24(vocab_size=config.d_output)
+            # Note: d_output comes from checkpoint frozen_params, not config
+            vocab_size = fp.get('d_output', 2112)  # Default 2112 for 24-token mode
+            field_masks = get_field_masks_24(vocab_size=vocab_size)
 
             def sample_policy_token(token_carry, token_pos):
                 """Sample next token with field-aware masking.
