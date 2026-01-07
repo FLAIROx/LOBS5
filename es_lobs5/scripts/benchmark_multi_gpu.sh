@@ -110,12 +110,22 @@ echo "test_name,n_threads,n_steps,lora_rank,n_gpus,status,duration_sec" > logs_b
 # Note: All n_threads values must be divisible by 4
 case ${TEST_MODE} in
     n_threads)
-        echo "Testing n_threads scaling (4 GPUs)..."
-        # Values divisible by 4: 32, 64, 128, 256, 512, 1024, 2048
-        for N in 32 64 128 256 512 1024 2048; do
-            run_test ${N} ${N_STEPS_DEFAULT} ${LORA_RANK_DEFAULT} "n_threads_${N}"
+        echo "Testing n_threads scaling with 100 steps (4 GPUs)..."
+        # Values divisible by 4: 32, 64, 128, 256, 512, 1024, 2048, 4096
+        for N in 32 64 128 256 512 1024 2048 4096; do
+            run_test ${N} 100 ${LORA_RANK_DEFAULT} "n_threads_${N}_steps100"
             if [ $? -ne 0 ]; then
-                echo "Stopping at n_threads=${N} due to failure"
+                echo "Stopping at n_threads=${N} (100 steps) due to failure"
+                break
+            fi
+        done
+
+        echo ""
+        echo "Testing n_threads scaling with 10 steps (4 GPUs)..."
+        for N in 32 64 128 256 512 1024 2048 4096 8192 16384; do
+            run_test ${N} 10 ${LORA_RANK_DEFAULT} "n_threads_${N}_steps10"
+            if [ $? -ne 0 ]; then
+                echo "Stopping at n_threads=${N} (10 steps) due to failure"
                 break
             fi
         done
@@ -143,9 +153,20 @@ case ${TEST_MODE} in
         done
         ;;
 
+    scaling)
+        # Scaling efficiency test - compare with 1 GPU baseline
+        echo "Running scaling efficiency test (4 GPUs)..."
+        echo "Compare these results with 1 GPU benchmark"
+        for N in 32 64 128 256 512; do
+            for S in 10 100; do
+                run_test ${N} ${S} ${LORA_RANK_DEFAULT} "scaling_${N}t_${S}s_4gpu"
+            done
+        done
+        ;;
+
     *)
         echo "Unknown TEST_MODE: ${TEST_MODE}"
-        echo "Valid modes: n_threads, n_steps, lora_rank"
+        echo "Valid modes: n_threads, n_steps, lora_rank, scaling"
         exit 1
         ;;
 esac

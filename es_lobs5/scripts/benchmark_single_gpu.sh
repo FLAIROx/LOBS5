@@ -105,11 +105,21 @@ echo "test_name,n_threads,n_steps,lora_rank,status,duration_sec" > logs_benchmar
 # Run tests based on mode
 case ${TEST_MODE} in
     n_threads)
-        echo "Testing n_threads scaling..."
-        for N in 8 16 32 64 128 256 512; do
-            run_test ${N} ${N_STEPS_DEFAULT} ${LORA_RANK_DEFAULT} "n_threads_${N}"
+        echo "Testing n_threads scaling with 100 steps..."
+        for N in 8 16 32 64 128 256 512 1024; do
+            run_test ${N} 100 ${LORA_RANK_DEFAULT} "n_threads_${N}_steps100"
             if [ $? -ne 0 ]; then
-                echo "Stopping at n_threads=${N} due to failure"
+                echo "Stopping at n_threads=${N} (100 steps) due to failure"
+                break
+            fi
+        done
+
+        echo ""
+        echo "Testing n_threads scaling with 10 steps..."
+        for N in 8 16 32 64 128 256 512 1024 2048 4096; do
+            run_test ${N} 10 ${LORA_RANK_DEFAULT} "n_threads_${N}_steps10"
+            if [ $? -ne 0 ]; then
+                echo "Stopping at n_threads=${N} (10 steps) due to failure"
                 break
             fi
         done
@@ -137,9 +147,21 @@ case ${TEST_MODE} in
         done
         ;;
 
+    scaling)
+        # Scaling efficiency test - compare same configs for 1 GPU vs 4 GPU comparison
+        echo "Running scaling efficiency test (1 GPU baseline)..."
+        echo "Compare these results with 4 GPU benchmark"
+        # Test configs that will also run on 4 GPU (must be divisible by 4)
+        for N in 32 64 128 256 512; do
+            for S in 10 100; do
+                run_test ${N} ${S} ${LORA_RANK_DEFAULT} "scaling_${N}t_${S}s_1gpu"
+            done
+        done
+        ;;
+
     *)
         echo "Unknown TEST_MODE: ${TEST_MODE}"
-        echo "Valid modes: n_threads, n_steps, lora_rank"
+        echo "Valid modes: n_threads, n_steps, lora_rank, scaling"
         exit 1
         ;;
 esac
