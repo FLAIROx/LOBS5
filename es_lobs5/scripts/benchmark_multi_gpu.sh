@@ -16,7 +16,8 @@
 
 # Configuration (override via environment)
 TOKEN_MODE=${TOKEN_MODE:-24}
-CHECKPOINT_PATH=${CHECKPOINT_PATH:-/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/amber-music-24_09502dqc}
+# logical-serenity-19: d_model=2048, n_layers=24, ~360M params (same as E3 tests)
+CHECKPOINT_PATH=${CHECKPOINT_PATH:-/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me}
 WANDB_PROJECT=${WANDB_PROJECT:-es_lobs5_benchmark_4gpu}
 WANDB_ENTITY=${WANDB_ENTITY:-}
 REPLAY_DATA_PATH=${REPLAY_DATA_PATH:-/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022}
