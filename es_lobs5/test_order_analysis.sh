@@ -30,6 +30,8 @@ conda activate lobs5
 # Set environment variables
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/JaxMARL-HFT:$PYTHONPATH"
+export PYTHONUNBUFFERED=1
 
 # Create output directory
 OUTPUT_DIR="./analysis_output"
