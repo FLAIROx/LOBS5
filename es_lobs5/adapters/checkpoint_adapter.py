@@ -22,10 +22,10 @@ from typing import Dict, Any, Tuple, Optional
 
 def load_flax_checkpoint(checkpoint_path: str) -> Tuple[Dict, Dict]:
     """
-    Load a gradient-trained LOBS5 checkpoint using Orbax.
+    Load a gradient-trained LOBS5 checkpoint using LOBS5's native loader.
 
-    This function loads OCDBT format checkpoints saved by LOBS5 training.
-    It uses StandardCheckpointer for robust OCDBT format handling.
+    This function uses LOBS5's init_train.load_checkpoint which properly
+    handles OCDBT format with StandardRestore.
 
     Args:
         checkpoint_path: Path to the checkpoint directory
@@ -37,115 +37,53 @@ def load_flax_checkpoint(checkpoint_path: str) -> Tuple[Dict, Dict]:
             - config: Training configuration dictionary
     """
     import sys
-    import json
-    import orbax.checkpoint as ocp
 
     # Add LOBS5 root to path for imports
     lobs5_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if lobs5_root not in sys.path:
         sys.path.insert(0, lobs5_root)
 
-    # Step 1: Load metadata to get config
-    # The metadata is stored at checkpoint_path/metadata/_ROOT_METADATA
-    print(f"Loading metadata from {checkpoint_path}")
-    metadata_path = os.path.join(checkpoint_path, 'metadata', '_ROOT_METADATA')
-    with open(metadata_path, 'r') as f:
-        metadata = json.load(f)
+    # Use LOBS5's native checkpoint loading (handles OCDBT + StandardRestore correctly)
+    from lob.init_train import load_metadata, init_train_state, load_checkpoint
 
-    # Extract config from metadata (handle nested 'custom' structure)
-    if 'custom' in metadata:
-        config = metadata['custom']
-    else:
-        config = metadata
+    # Step 1: Load metadata to get config (returns Namespace)
+    print(f"Loading metadata from {checkpoint_path}")
+    args = load_metadata(checkpoint_path)
+    config = vars(args)  # Convert Namespace to dict
 
     print(f"  d_model: {config.get('d_model', 'N/A')}")
     print(f"  n_layers: {config.get('n_layers', 'N/A')}")
     print(f"  token_mode: {config.get('token_mode', 'N/A')}")
 
-    # Step 2: Find the latest step in the checkpoint directory
-    # Orbax CheckpointManager stores checkpoints as step directories (e.g., 89410/)
-    step_dirs = []
-    for name in os.listdir(checkpoint_path):
-        full_path = os.path.join(checkpoint_path, name)
-        if os.path.isdir(full_path) and name.isdigit():
-            step_dirs.append(int(name))
+    # Step 2: Create dummy TrainState for StandardRestore (needs target structure)
+    n_classes = config.get('d_output', 2112 if config.get('token_mode', 24) == 24 else 12012)
+    seq_len = config.get('msg_seq_len', 500)
+    book_dim = 3 + config.get('book_depth', 500)
+    book_seq_len = 1
 
-    if not step_dirs:
-        raise FileNotFoundError(f"No step directories found in {checkpoint_path}")
+    print(f"  Creating TrainState structure for restore...")
+    state, _, _ = init_train_state(
+        args=args,
+        n_classes=n_classes,
+        seq_len=seq_len,
+        book_dim=book_dim,
+        book_seq_len=book_seq_len,
+        train_size=1000,  # Dummy value, not used for loading
+        print_shapes=False
+    )
 
-    latest_step = max(step_dirs)
-    step_path = os.path.join(checkpoint_path, str(latest_step))
-    state_path = os.path.join(step_path, 'state')
-    print(f"  Loading from step {latest_step}")
-
-    # Step 3: Load checkpoint using StandardCheckpointer
-    # This properly handles OCDBT format without needing a target structure
-    print(f"Loading checkpoint state from {state_path}...")
-
-    # Use StandardCheckpointer which handles OCDBT format correctly
-    checkpointer = ocp.StandardCheckpointer()
-
-    # Restore without a target - this returns the raw checkpoint data
-    # For OCDBT format, we need to provide an abstract structure or None
-    try:
-        # First, try restoring with automatic structure detection
-        loaded_state = checkpointer.restore(state_path)
-    except Exception as e:
-        print(f"  Direct restore failed: {e}")
-        print(f"  Trying alternative approach with PyTreeCheckpointer...")
-
-        # Alternative: Use PyTreeCheckpointer which has better OCDBT support
-        try:
-            from flax.training import checkpoints
-            orbax_checkpointer = ocp.PyTreeCheckpointer()
-
-            # Try using Flax's restore_checkpoint which wraps Orbax
-            loaded_state = checkpoints.restore_checkpoint(
-                checkpoint_path,
-                target=None,  # No target means restore raw structure
-                step=latest_step,
-                orbax_checkpointer=orbax_checkpointer,
-            )
-
-            # Handle nested structure from Flax checkpoint restore
-            if isinstance(loaded_state, dict) and 'model' in loaded_state:
-                loaded_state = loaded_state['model']
-        except Exception as e2:
-            print(f"  Alternative approach also failed: {e2}")
-            print(f"  Falling back to LOBS5 init_train.load_checkpoint...")
-
-            # Final fallback: Use the original approach but handle device issues
-            from lob.init_train import load_metadata as lob_load_metadata, init_train_state, load_checkpoint
-            from argparse import Namespace
-
-            args = Namespace(**config)
-
-            n_classes = config.get('d_output', 2112 if config.get('token_mode', 24) == 24 else 12012)
-            seq_len = config.get('msg_seq_len', 500)
-            book_dim = 3 + config.get('book_depth', 500)
-            book_seq_len = 1
-
-            print(f"  Creating dummy TrainState for restore...")
-            state, _, _ = init_train_state(
-                args=args,
-                n_classes=n_classes,
-                seq_len=seq_len,
-                book_dim=book_dim,
-                book_seq_len=book_seq_len,
-                train_size=1000,
-                print_shapes=False
-            )
-
-            ckpt = load_checkpoint(
-                state=state,
-                path=checkpoint_path,
-                step=None,
-                train=False
-            )
-
-            loaded_state = ckpt['model']
+    # Step 3: Load checkpoint using LOBS5's native loader
+    # This uses StandardRestore with deduplicate_trainstate, which handles OCDBT correctly
+    print(f"  Loading checkpoint state...")
+    ckpt = load_checkpoint(
+        state=state,
+        path=checkpoint_path,
+        step=None,  # Load latest
+        train=False  # Don't replicate to all devices
+    )
 
     # Extract params from loaded TrainState
+    loaded_state = ckpt['model']
     if hasattr(loaded_state, 'params'):
         params = loaded_state.params
     elif isinstance(loaded_state, dict) and 'params' in loaded_state:
@@ -153,7 +91,7 @@ def load_flax_checkpoint(checkpoint_path: str) -> Tuple[Dict, Dict]:
     else:
         params = loaded_state
 
-    # Ensure params are on CPU/first available device for ES processing
+    # Ensure params are on first available device for ES processing
     params = jax.tree_util.tree_map(lambda x: jnp.asarray(x), params)
 
     return params, config
