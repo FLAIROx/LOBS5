@@ -1,0 +1,129 @@
+#!/bin/bash
+#SBATCH --job-name=es-prod-24h
+#SBATCH --output=logs/es_prod_%j.out
+#SBATCH --error=logs/es_prod_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --mem=0
+#SBATCH --time=23:59:59
+#SBATCH --partition=workq
+
+# ==============================================================================
+# ES-LOBS5 Production Training (24h)
+# ==============================================================================
+#
+# Usage:
+#   # Use model preset
+#   MODEL_PRESET=L1 sbatch train_es_production.batch
+#   MODEL_PRESET=D5 sbatch train_es_production.batch
+#   MODEL_PRESET=K3 sbatch train_es_production.batch
+#
+#   # Override preset parameters
+#   MODEL_PRESET=L1 TASK_SIZE=20 sbatch train_es_production.batch
+#
+#   # Custom configuration (no preset)
+#   N_STEPS=50 TASK_SIZE=100 sbatch train_es_production.batch
+#
+# Available Presets:
+#   D5/G5  - n_steps=10, bg_msgs=100, task_size=500, eggroll
+#   H5     - n_steps=100, bg_msgs=10, task_size=500, eggroll
+#   I5     - n_steps=100, bg_msgs=10, task_size=100, eggroll
+#   J1-J4  - n_steps=10, bg_msgs=10, task_size=500, eggroll (data diversity)
+#   K1-K4  - n_steps=10, bg_msgs=10, task_size=100, eggroll (data diversity)
+#   L1-L4  - n_steps=10, bg_msgs=10, task_size=10, eggrollbs (data diversity)
+#
+# ==============================================================================
+
+echo "============================================"
+echo "ES-LOBS5 Production Training"
+echo "============================================"
+echo "Job ID:         $SLURM_JOB_ID"
+echo "Node:           $SLURMD_NODENAME"
+echo "Start time:     $(date)"
+echo "Model Preset:   ${MODEL_PRESET:-custom}"
+echo "============================================"
+
+# ============================================================================
+# Model Preset Configuration
+# ============================================================================
+# Similar to train_full_autoreg.batch MODEL_PRESET usage
+MODEL_PRESET=${MODEL_PRESET:-}
+echo "[*] Model preset: ${MODEL_PRESET:-none (using individual parameters)}"
+export MODEL_PRESET
+
+# Optional parameter overrides via environment variables
+if [ -n "$TASK_SIZE" ]; then
+    echo "[*] Task size override: $TASK_SIZE"
+    export TASK_SIZE
+fi
+
+if [ -n "$N_STEPS" ]; then
+    echo "[*] N steps override: $N_STEPS"
+    export N_STEPS
+fi
+
+if [ -n "$FILE_IDX" ]; then
+    echo "[*] File index override: $FILE_IDX"
+    export FILE_IDX
+fi
+
+# ============================================================================
+# Environment Setup
+# ============================================================================
+
+# Create logs directory
+mkdir -p logs
+
+# Change to working directory
+cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+
+# Source conda
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate lobs5
+
+# Add JaxMARL-HFT to PYTHONPATH (required for gymnax_exchange)
+export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/JaxMARL-HFT:$PYTHONPATH"
+
+# JAX environment configuration
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+export JAX_PLATFORMS="cuda"
+export PYTHONUNBUFFERED=1
+
+# Show GPU info
+echo ""
+echo "GPU Information:"
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+echo ""
+
+# ============================================================================
+# Default Data Paths
+# ============================================================================
+DATA_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021"
+
+# ============================================================================
+# Run Training
+# ============================================================================
+# Similar to train_full_autoreg.batch, we use python -u -B for unbuffered output
+# and bytecode suppression
+
+echo "[*] Starting ES training..."
+echo ""
+
+python -u -B run_es_train.py \
+    --USE_WANDB=True \
+    --wandb_entity=kang-oxford \
+    --data_dir="$DATA_DIR" \
+    --n_perturbations=1024 \
+    --n_epochs=1000 \
+    --seed=42 \
+    --max_training_hours=23.5
+
+# Note: Model preset and parameter overrides are handled via environment variables
+# (MODEL_PRESET, TASK_SIZE, N_STEPS, FILE_IDX) which run_es_train.py reads directly
+
+echo ""
+echo "============================================"
+echo "Training completed at: $(date)"
+echo "============================================"
