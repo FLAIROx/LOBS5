@@ -887,7 +887,7 @@ def _make_generate_msg_scannable(
         return (m_seq, b_seq, n_msg_todo, p_mid, sim_state, rng,hidden, time), (msg_decoded, book_l2, msg_token)
     return _generate_msg_scannable
 
-@partial(jax.jit, static_argnums=(0, 2, 3, 5, 6, 9,13,15),backend='gpu')
+@partial(jax.jit, static_argnums=(0, 2, 3, 5, 6, 9, 13, 15, 17),backend='gpu')  # Added 17 for token_mode
 def generate(
         sim: OrderBook,  # static
         train_state: TrainState,
@@ -905,10 +905,11 @@ def generate(
         conditional : bool, # static
         init_time : jax.Array,
         debug_book: bool=False,
-        b_seq_real: Optional[jax.Array]=None, #Must be very careful, these should only be used for debugging. 
+        b_seq_real: Optional[jax.Array]=None, #Must be very careful, these should only be used for debugging.
+        token_mode: int = 24,  # static - vocab token mode (22 or 24)
         # if eval_msgs given, also returns loss of predictions
         # e.g. to calculate perplexity
-        # m_seq_eval: Optional[jax.Array] = None,  
+        # m_seq_eval: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array, jax.Array]:
 
     # id_gen = OrderIdGenerator()
@@ -924,7 +925,8 @@ def generate(
     # b_seq_cond=b_seq_cond.copy()
 
     with jax.ensure_compile_time_eval():
-        valid_mask_array = valh.syntax_validation_matrix()
+        v = Vocab(token_mode=token_mode)
+        valid_mask_array = valh.syntax_validation_matrix(v)
 
     # valid_mask_array=None
     # jax.debug.print("Note: Valid mask turned off in generate_token")
@@ -1006,10 +1008,10 @@ generate_batched = jax.jit(
             None, None, None, None, None,
             None, None,    0,    0, None,
             0,       0,    0, None,    0,
-            None,    0,
+            None,    0, None,  # Added None for token_mode (static)
         )
     ),
-    static_argnums=(0, 2, 3, 5, 6, 9,13,15),backend='gpu'
+    static_argnums=(0, 2, 3, 5, 6, 9, 13, 15, 17),backend='gpu'  # Added 17 for token_mode
 )
 
 @partial(jax.jit, static_argnums=(3, 4, 5, 6))
@@ -1184,9 +1186,13 @@ def sample_new(
         init_hidden: Optional[Tuple] = None,
         args: Optional[Any] = None,
         conditional: bool = True,
-        v: Vocab = Vocab(),
+        v: Vocab = None,  # Changed from Vocab() to None
         overfit_debug: bool = False,
     ):
+    """Get token_mode from Vocab if provided"""
+    if v is None:
+        v = Vocab(token_mode=24)  # Default to 24
+    token_mode = v.token_mode
     """
     """
     assert n_samples % batch_size == 0, 'n_samples must be divisible by batch_size'
@@ -1342,6 +1348,7 @@ def sample_new(
                 init_time_batched,
                 debug_book,  # static
                 real_book,
+                token_mode,  # static - added for vocab size
             )
             # print("trace complete")
             # print(generate_traced.jaxpr)
@@ -1363,6 +1370,7 @@ def sample_new(
             init_hidden_batched,
             init_time_batched,
             real_book,
+            token_mode,  # static - added for vocab size
         )
         end_time = time.time()
         print(f"Generation time for batch of size {batch_size}: {(end_time - start_time):.2f} seconds")
