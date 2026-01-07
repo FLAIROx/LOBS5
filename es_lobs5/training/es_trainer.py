@@ -538,12 +538,25 @@ class ESTrainer:
         self.replay_data_date = os.path.basename(selected_file).split('_')[1]
         self.replay_data_dir = data_path
 
-        msg_raw = np.load(selected_file)
-        print(f"[INIT] Loaded {msg_raw.shape[0]} messages from {os.path.basename(selected_file)}")
+        msg_data = np.load(selected_file)
+        print(f"[INIT] Loaded {msg_data.shape[0]} messages from {os.path.basename(selected_file)}")
+        print(f"[INIT] Data shape: {msg_data.shape}, dtype: {msg_data.dtype}")
 
-        # Pre-encode all messages
-        self.replay_tokens = encode_msgs(msg_raw, self.encoder, token_mode=self.config.token_mode)
-        self.replay_data_raw = jnp.array(msg_raw)
+        # Auto-detect data format: preproc (N, 14) vs encoded (N, 24)
+        n_cols = msg_data.shape[1] if len(msg_data.shape) > 1 else 1
+        if n_cols == 14:
+            # Preproc format: need to encode to tokens
+            print(f"[INIT] Detected PREPROC format (14 columns), encoding to tokens...")
+            self.replay_tokens = encode_msgs(msg_data, self.encoder, token_mode=self.config.token_mode)
+            self.replay_data_raw = jnp.array(msg_data)
+        elif n_cols == self.config.token_mode:
+            # Encoded format: already tokenized, use directly
+            print(f"[INIT] Detected ENCODED format ({n_cols} columns), using directly...")
+            self.replay_tokens = jnp.array(msg_data)
+            # For raw data, we need to decode back (or leave as None)
+            self.replay_data_raw = None  # Not available in encoded format
+        else:
+            raise ValueError(f"Unknown data format: expected 14 (preproc) or {self.config.token_mode} (encoded), got {n_cols} columns")
 
     def _shard_to_mesh(self, x):
         """Shard array across devices along 'data' axis.
@@ -603,6 +616,29 @@ class ESTrainer:
         # Load data
         ob = np.load(orderbook_files[file_idx])
         msg = np.load(message_files[file_idx])
+        print(f"  Message data shape: {msg.shape}, dtype: {msg.dtype}")
+
+        # Auto-detect data format: preproc (N, 14) vs encoded (N, 24)
+        n_cols = msg.shape[1] if len(msg.shape) > 1 else 1
+        is_preproc_format = (n_cols == 14)
+        is_encoded_format = (n_cols == self.config.token_mode)
+
+        if not is_preproc_format and not is_encoded_format:
+            raise ValueError(f"Unknown data format: expected 14 (preproc) or {self.config.token_mode} (encoded), got {n_cols} columns")
+
+        if is_encoded_format:
+            # Need to decode for JaxLOB warmup
+            from lob.encoding import decode_msgs, Vocab
+            v = Vocab(token_mode=self.config.token_mode)
+            print(f"  Detected ENCODED format ({n_cols} columns), decoding for JaxLOB warmup...")
+            msg_decoded = np.array(decode_msgs(msg, v.ENCODING, token_mode=self.config.token_mode))
+            msg_raw = msg_decoded
+            msg_tokens = msg  # Already tokenized
+        else:
+            # Preproc format
+            print(f"  Detected PREPROC format (14 columns)")
+            msg_raw = msg
+            msg_tokens = None  # Will encode below
 
         # Initialize L2 book
         init_l2_book = jnp.array(ob[0, 3:43], dtype=jnp.int32)
@@ -610,8 +646,8 @@ class ESTrainer:
 
         # Replay warmup messages to initialize order book state
         n_init_background_msgs = getattr(self.config, 'n_warmup_msgs', 500)
-        n_replay = min(n_init_background_msgs, len(msg))
-        replay_msgs_raw = msg[:n_replay]
+        n_replay = min(n_init_background_msgs, len(msg_raw))
+        replay_msgs_raw = msg_raw[:n_replay]
         replay_jaxlob = msgs_to_jnp(replay_msgs_raw)
         sim_state = self.sim.process_orders_array(sim_state, replay_jaxlob)
 
@@ -621,7 +657,12 @@ class ESTrainer:
         expected_context_len = msg_seq_len * self.config.token_mode
 
         if n_replay > 0:
-            tokens = encode_msgs(replay_msgs_raw, self.encoder, token_mode=self.config.token_mode)
+            if msg_tokens is not None:
+                # Already have tokens from encoded format
+                tokens = msg_tokens[:n_replay]
+            else:
+                # Need to encode from preproc format
+                tokens = encode_msgs(replay_msgs_raw, self.encoder, token_mode=self.config.token_mode)
             msg_history = tokens.flatten()
             # Pad or truncate to expected size
             if len(msg_history) < expected_context_len:

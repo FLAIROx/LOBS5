@@ -46,9 +46,13 @@ echo "[*] Running order analysis with REAL ES training..."
 echo "[*] This will initialize the ESTrainer and run episodes to collect policy orders"
 echo ""
 
+# Default paths - using PREPROC data format (N, 14)
+CHECKPOINT="${CHECKPOINT:-/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/}"
+DATA_DIR="${DATA_DIR:-/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc}"
+
 python es_lobs5/test_order_analysis.py \
-    --checkpoint "/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/" \
-    --data_dir "/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021" \
+    --checkpoint "${CHECKPOINT}" \
+    --data_dir "${DATA_DIR}" \
     --n_historical 2000 \
     --n_episodes 5 \
     --n_steps 50 \
