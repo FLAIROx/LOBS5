@@ -140,6 +140,8 @@ def create_es_config():
                         help='[DEPRECATED] Use --n_perturbations instead')
     parser.add_argument('--n_epochs', type=int, default=1000, help='Training epochs')
     parser.add_argument('--n_steps', type=int, default=100, help='Steps per episode')
+    parser.add_argument('--n_warmup_msgs', type=int, default=500,
+                        help='Number of warmup messages to replay before episode starts (0 = no warmup)')
     parser.add_argument('--background_msgs_per_step', type=int, default=10,
                         help='Background messages per step (applies to both world_model and historical_replay)')
     # Legacy alias alias
@@ -476,7 +478,8 @@ class ESTrainer:
         from dataclasses import replace
 
         # Calculate required capacity
-        expected_orders = 500 + self.config.n_steps * (self.config.background_msgs_per_step + 1)
+        n_warmup = getattr(self.config, 'n_warmup_msgs', 500)
+        expected_orders = n_warmup + self.config.n_steps * (self.config.background_msgs_per_step + 1)
         n_orders = max(1000, int(expected_orders * 1.5))
         n_trades = max(500, self.config.n_steps * 2)
 
@@ -488,7 +491,7 @@ class ESTrainer:
         print(f"[INIT] JaxLOB OrderBook initialized:")
         print(f"  nOrders: {n_orders} (capacity for order book)")
         print(f"  nTrades: {n_trades} (capacity for trade history)")
-        print(f"  expected_orders: {expected_orders} (500 warmup + {self.config.n_steps} steps × {self.config.background_msgs_per_step + 1} msgs)")
+        print(f"  expected_orders: {expected_orders} ({n_warmup} warmup + {self.config.n_steps} steps × {self.config.background_msgs_per_step + 1} msgs)")
 
         # Create encoder from Vocab
         from lob.encoding import Vocab
@@ -594,7 +597,7 @@ class ESTrainer:
         sim_state = self.sim.reset(init_l2_book)
 
         # Replay warmup messages to initialize order book state
-        n_init_background_msgs = 500  # Hardcoded warmup message count
+        n_init_background_msgs = getattr(self.config, 'n_warmup_msgs', 500)
         n_replay = min(n_init_background_msgs, len(msg))
         replay_msgs_raw = msg[:n_replay]
         replay_jaxlob = msgs_to_jnp(replay_msgs_raw)
