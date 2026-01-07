@@ -450,12 +450,19 @@ class ESTrainer:
         Note: solver=None uses default optax.sgd. The init_noiser API expects
         a callable (like optax.sgd), not a pre-built optimizer chain.
         See learned_lessons.md Lesson 4 for details.
+
+        For EggRollBS (baseline subtraction), group_size must be > 0.
+        Threads 0,1 in each group are baselines (no noise).
         """
         config = self.config
         all_noisers = _get_all_noisers()
         NOISER = all_noisers[config.noiser]
 
         self.noiser_cls = NOISER
+
+        # Get group_size from config (required for EggRollBS, default 0 for EggRoll)
+        group_size = getattr(config, 'group_size', 0)
+
         self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
             self.lobs5_init.params,
             sigma=config.sigma,
@@ -463,6 +470,7 @@ class ESTrainer:
             rank=config.lora_rank,
             freeze_nonlora=False,
             noise_reuse=0,
+            group_size=group_size,
             solver=None,  # Uses default optax.sgd
         )
 
