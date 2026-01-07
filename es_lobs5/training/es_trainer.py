@@ -604,11 +604,29 @@ class ESTrainer:
         sim_state = self.sim.process_orders_array(sim_state, replay_jaxlob)
 
         # Encode messages as context
-        tokens = encode_msgs(replay_msgs_raw, self.encoder, token_mode=self.config.token_mode)
-        msg_history = tokens.flatten()
+        # msg_seq_len from frozen_params determines expected context size
+        msg_seq_len = self.lobs5_init.frozen_params.get('msg_seq_len', 500)
+        expected_context_len = msg_seq_len * self.config.token_mode
+
+        if n_replay > 0:
+            tokens = encode_msgs(replay_msgs_raw, self.encoder, token_mode=self.config.token_mode)
+            msg_history = tokens.flatten()
+            # Pad or truncate to expected size
+            if len(msg_history) < expected_context_len:
+                # Pad with zeros at the beginning
+                msg_history = jnp.concatenate([
+                    jnp.zeros(expected_context_len - len(msg_history), dtype=msg_history.dtype),
+                    msg_history
+                ])
+            elif len(msg_history) > expected_context_len:
+                # Keep most recent tokens
+                msg_history = msg_history[-expected_context_len:]
+        else:
+            # No warmup - initialize with zeros
+            msg_history = jnp.zeros(expected_context_len, dtype=jnp.int32)
 
         print(f"  n_init_background_msgs (warmup): {n_replay}")
-        print(f"  context_size: {msg_history.shape}")
+        print(f"  context_size: {msg_history.shape} (expected: {expected_context_len})")
 
         return sim_state, msg_history
 
