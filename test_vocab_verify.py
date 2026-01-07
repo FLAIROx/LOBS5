@@ -95,6 +95,10 @@ config = Namespace(
     # Replay data path (same as data_dir for historical_replay mode)
     replay_data_path=DATA_DIR,
     file_idx=0,  # Use first file consistently
+    # Task type for ES training
+    task='sell',  # 'sell' or 'buy'
+    # World messages per step (for world model)
+    world_msgs_per_step=10,
 )
 
 print("  初始化Trainer...")
@@ -104,21 +108,24 @@ print("  创建初始状态...")
 initial_sim_state, initial_msg_history = trainer._create_initial_sim_state()
 print(f"  initial_msg_history shape: {initial_msg_history.shape}")
 
-print("  运行1个epoch...")
+print("  运行一次评估 (eval_single_thread)...")
 key = jax.random.PRNGKey(42)
-results = trainer.train_epoch(key, epoch=0, initial_sim_state=initial_sim_state, initial_msg_history=initial_msg_history)
+# Use eval_single_thread to get raw policy_msgs (train_epoch aggregates infos)
+fitness, info = trainer.eval_single_thread(
+    key,
+    thread_id=0,  # Use thread_id=0 for unnoised policy (baseline)
+    epoch=0,
+    initial_sim_state=initial_sim_state,
+    initial_msg_history=initial_msg_history
+)
+print(f"  fitness: {fitness}")
 
-# 获取policy_msgs
-policy_msgs = np.array(results['info']['policy_msgs'])
+# 获取policy_msgs - shape: (n_steps, msg_len)
+policy_msgs = np.array(info['policy_msgs'])
 print(f"  收集到 policy_msgs shape: {policy_msgs.shape}")
-# shape: (n_perturbations, n_steps, msg_len) 或 (n_steps, msg_len)
 
-# Flatten if needed
-if policy_msgs.ndim == 3:
-    n_pert, n_steps, msg_len = policy_msgs.shape
-    policy_msgs_flat = policy_msgs.reshape(-1, msg_len)
-else:
-    policy_msgs_flat = policy_msgs
+# eval_single_thread returns (n_steps, msg_len), no need to flatten
+policy_msgs_flat = policy_msgs
 
 print(f"  Flattened shape: {policy_msgs_flat.shape}")
 n_orders = policy_msgs_flat.shape[0]
