@@ -88,20 +88,19 @@ def collect_policy_orders_from_es(config: ESConfig, n_episodes: int = 5) -> np.n
     print(f"[*] Initializing ESTrainer for order collection...")
     trainer = ESTrainer(config)
 
+    # Get initial state (this uses warmup from replay data)
+    print(f"[*] Creating initial simulation state...")
+    initial_state, initial_msg_history = trainer._create_initial_sim_state()
+
     all_policy_msgs = []
     all_fitnesses = []
 
     for ep in range(n_episodes):
         key = jax.random.PRNGKey(config.seed + ep * 100)
 
-        # Get initial state from replay data
-        initial_state, initial_msg_history = trainer.get_episode_initial_state(
-            key,
-            start_idx=ep * 1000  # Different starting points in replay data
-        )
-
         # Run episode with thread_id=0 (baseline, no noise perturbation)
         # This gives us the policy's "mean" behavior
+        print(f"[*] Running episode {ep}...")
         fitness, info = trainer.eval_single_thread(
             key,
             thread_id=0,  # Baseline thread
