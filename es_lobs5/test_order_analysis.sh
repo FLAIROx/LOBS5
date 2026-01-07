@@ -2,11 +2,11 @@
 #SBATCH --job-name=order-analysis
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
+#SBATCH --mem=0
 #SBATCH --time=01:00:00
 #SBATCH --output=logs/order_analysis_%j.out
 #SBATCH --error=logs/order_analysis_%j.err
 #SBATCH --partition=workq
-#SBATCH --account=m100027
 
 # Order Quality Analysis Script
 # Compares historical vs policy-generated orders
@@ -28,7 +28,6 @@ conda activate lobs5
 
 # Set environment variables
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export XLA_FLAGS="--xla_gpu_enable_triton_softmax_fusion=true --xla_gpu_triton_gemm_any=True"
 export PYTHONDONTWRITEBYTECODE=1
 
 # Create output directory
