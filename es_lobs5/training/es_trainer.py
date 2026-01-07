@@ -520,7 +520,11 @@ class ESTrainer:
         if len(message_files) == 0:
             raise FileNotFoundError(f"No message files found in {data_path}")
 
-        file_idx = np.random.randint(0, len(message_files))
+        # Use fixed file_idx if specified, otherwise random
+        if hasattr(self.config, 'file_idx') and self.config.file_idx is not None:
+            file_idx = self.config.file_idx % len(message_files)
+        else:
+            file_idx = np.random.randint(0, len(message_files))
         selected_file = message_files[file_idx]
 
         self.replay_data_date = os.path.basename(selected_file).split('_')[1]
@@ -1195,9 +1199,10 @@ class ESTrainer:
             pnl = (init_mid_price * buy_quantity - buy_cost) / 1e6
             agent_quantity = buy_quantity
 
-        # Completion penalty
-        shortfall = jnp.maximum(config.task_size - agent_quantity, 0)
-        completion_penalty = -shortfall * init_mid_price / 1e6 * 0.1
+        # Completion penalty (disabled - penalty was too large relative to PnL signal)
+        # shortfall = jnp.maximum(config.task_size - agent_quantity, 0)
+        # completion_penalty = -shortfall * init_mid_price / 1e6 * 0.1
+        completion_penalty = jnp.float32(0.0)
 
         total_trades = jnp.sum(valid_trades_mask)
         agent_trades = jnp.sum(is_policy_trade)
