@@ -31,6 +31,9 @@ conda activate lobs5
 
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
 
+# Add JaxMARL-HFT (gymnax_exchange) to PYTHONPATH - required for ESTrainer
+export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/JaxMARL-HFT:$PYTHONPATH"
+
 # XLA flags removed - incompatible with current JAX version
 # export XLA_FLAGS="--xla_gpu_enable_triton_softmax_fusion=true --xla_gpu_triton_gemm_any=True"
 

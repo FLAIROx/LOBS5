@@ -54,6 +54,9 @@ conda activate lobs5
 # Set working directory
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
 
+# Add JaxMARL-HFT (gymnax_exchange) to PYTHONPATH - required for ESTrainer
+export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/JaxMARL-HFT:$PYTHONPATH"
+
 # JAX configuration
 # XLA_FLAGS removed - triton flags incompatible with current JAX
 export JAX_TRACEBACK_FILTERING=off

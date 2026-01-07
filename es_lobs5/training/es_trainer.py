@@ -485,11 +485,16 @@ class ESTrainer:
         self.jaxlob_cfg = jaxlob_cfg  # Store for use in get_mid_price
         self.sim = OrderBook(cfg=jaxlob_cfg)
 
+        print(f"[INIT] JaxLOB OrderBook initialized:")
+        print(f"  nOrders: {n_orders} (capacity for order book)")
+        print(f"  nTrades: {n_trades} (capacity for trade history)")
+        print(f"  expected_orders: {expected_orders} (500 warmup + {self.config.n_steps} steps × {self.config.background_msgs_per_step + 1} msgs)")
+
         # Create encoder from Vocab
         from lob.encoding import Vocab
         vocab = Vocab(token_mode=self.config.token_mode)
         self.encoder = vocab.ENCODING
-        print(f"[INIT] Using token_mode={self.config.token_mode}")
+        print(f"[INIT] token_mode: {self.config.token_mode}")
 
     def _init_historical_replay_data(self):
         """Pre-load historical data for replay mode."""
@@ -588,8 +593,9 @@ class ESTrainer:
         init_l2_book = jnp.array(ob[0, 3:43], dtype=jnp.int32)
         sim_state = self.sim.reset(init_l2_book)
 
-        # Replay first 500 messages
-        n_replay = min(500, len(msg))
+        # Replay warmup messages to initialize order book state
+        n_init_background_msgs = 500  # Hardcoded warmup message count
+        n_replay = min(n_init_background_msgs, len(msg))
         replay_msgs_raw = msg[:n_replay]
         replay_jaxlob = msgs_to_jnp(replay_msgs_raw)
         sim_state = self.sim.process_orders_array(sim_state, replay_jaxlob)
@@ -598,7 +604,8 @@ class ESTrainer:
         tokens = encode_msgs(replay_msgs_raw, self.encoder, token_mode=self.config.token_mode)
         msg_history = tokens.flatten()
 
-        print(f"  Initialized with {n_replay} messages, context size: {msg_history.shape}")
+        print(f"  n_init_background_msgs (warmup): {n_replay}")
+        print(f"  context_size: {msg_history.shape}")
 
         return sim_state, msg_history
 
