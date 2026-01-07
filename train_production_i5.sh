@@ -10,154 +10,64 @@
 #SBATCH --partition=workq
 
 set -e
-echo "============================================================"
-echo "ES-LOBS5 Production Training I5 (24h)"
-echo "============================================================"
-echo "Job ID: $SLURM_JOB_ID | Node: $SLURMD_NODENAME | Start: $(date)"
-echo "============================================================"
-echo "Config: n_perturbations=1024, n_steps=50, bg_msgs/step=100"
-echo "============================================================"
+echo "ES-LOBS5 Production Training I5 (24h) + WandB"
+echo "Config: n_steps=50, bg_msgs/step=100, task_size=500"
 
-mkdir -p logs
-mkdir -p checkpoints/es_production_i5
-
+mkdir -p logs checkpoints/es_production_i5
 source /lus/lfs1aip2/home/s5e/kangli.s5e/miniforge3/etc/profile.d/conda.sh
 conda activate lobs5
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
 export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/JaxMARL-HFT:$PYTHONPATH"
-
 nvidia-smi --query-gpu=name,memory.total --format=csv
 
 export PYTHONUNBUFFERED=1
 python -c "
-import sys
-sys.path.insert(0, '.')
-import jax
-import jax.numpy as jnp
-import numpy as np
-import time
+import sys; sys.path.insert(0, '.')
 import os
-from dataclasses import dataclass
-from datetime import datetime
+os.environ['WANDB_MODE'] = 'online'
+os.environ['WANDB_BASE_URL'] = 'https://api.wandb.ai'
+os.environ['WANDB_INSECURE_DISABLE_SSL'] = 'True'
+import wandb
+import jax, jax.numpy as jnp, numpy as np, time
+from dataclasses import dataclass, asdict
 
 @dataclass
 class Config:
     lobs5_checkpoint: str = '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/'
     replay_data_path: str = '/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021'
     data_dir: str = '/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021'
-    noiser: str = 'eggroll'
-    sigma: float = 0.01
-    lr: float = 0.001
-    lora_rank: int = 4
-    grad_clip: float = 1.0
-    n_perturbations: int = 1024
-    n_epochs: int = 1000
-    n_steps: int = 50                # I5: 50 steps
-    n_warmup_msgs: int = 500
-    background_msgs_per_step: int = 100
-    token_mode: int = 24
-    background_mode: str = 'historical_replay'
-    task: str = 'sell'
-    task_size: int = 500
-    tick_size: int = 100
+    noiser: str = 'eggroll'; sigma: float = 0.01; lr: float = 0.001; lora_rank: int = 4; grad_clip: float = 1.0
+    n_perturbations: int = 1024; n_epochs: int = 1000; n_steps: int = 50; n_warmup_msgs: int = 500
+    background_msgs_per_step: int = 100; token_mode: int = 24; background_mode: str = 'historical_replay'
+    task: str = 'sell'; task_size: int = 500; tick_size: int = 100
     checkpoint_dir: str = '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/es_production_i5'
-    checkpoint_every: int = 10
-    seed: int = 42
+    checkpoint_every: int = 10; seed: int = 42
     output_dir: str = '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/es_production_i5'
 
-print(f'JAX devices: {jax.devices()}')
-print(f'Number of devices: {len(jax.devices())}')
-
-from es_lobs5.training.es_trainer import ESTrainer
-
 config = Config()
-
-print()
-print('[1/3] Initializing trainer...')
-t0 = time.time()
+run = wandb.init(project='ES-LOBS5', name='I5_steps50_bg100_task500', config=asdict(config), tags=['I5', 'production', '24h'])
+print(f'JAX devices: {jax.devices()} | WandB: {run.name}')
+from es_lobs5.training.es_trainer import ESTrainer
 trainer = ESTrainer(config)
-init_time = time.time() - t0
-print(f'  Init time: {init_time:.1f}s')
-
-print()
-print('[2/3] Creating initial state...')
-t0 = time.time()
 initial_sim_state, initial_msg_history = trainer._create_initial_sim_state()
-state_time = time.time() - t0
-print(f'  State time: {state_time:.1f}s')
-
-print()
-print('[3/3] Starting training loop...')
-print('='*60)
-
 key = jax.random.PRNGKey(config.seed)
 training_start = time.time()
-max_training_time = 23.5 * 3600
-
 best_fitness = -float('inf')
 fitness_history = []
-
 for epoch in range(config.n_epochs):
+    if time.time() - training_start > 23.5 * 3600: break
     epoch_start = time.time()
-    elapsed = time.time() - training_start
-    if elapsed > max_training_time:
-        print(f'\nTime limit reached ({elapsed/3600:.1f}h). Stopping training.')
-        break
     key, epoch_key = jax.random.split(key)
-    mean_fitness, fitnesses, info = trainer.train_epoch(
-        epoch_key, epoch=epoch,
-        initial_sim_state=initial_sim_state,
-        initial_msg_history=initial_msg_history
-    )
-    mean_fitness_val = float(mean_fitness.block_until_ready())
-    std_fitness = float(jnp.std(fitnesses))
-    epoch_time = time.time() - epoch_start
-    total_elapsed = time.time() - training_start
-    fitness_history.append(mean_fitness_val)
-    if mean_fitness_val > best_fitness:
-        best_fitness = mean_fitness_val
-        best_marker = ' *BEST*'
-    else:
-        best_marker = ''
-    print(f'Epoch {epoch+1:4d} | Fitness: {mean_fitness_val:8.2f} +/- {std_fitness:6.2f} | '
-          f'Time: {epoch_time:5.1f}s | Total: {total_elapsed/3600:.2f}h{best_marker}')
-    if (epoch + 1) % config.checkpoint_every == 0:
-        ckpt_path = os.path.join(config.checkpoint_dir, f'epoch_{epoch+1:04d}')
-        print(f'  -> Saving checkpoint to {ckpt_path}')
-        np.save(os.path.join(config.checkpoint_dir, 'fitness_history.npy'),
-                np.array(fitness_history))
-
-total_time = time.time() - training_start
-n_epochs_completed = len(fitness_history)
-
-print()
-print('='*60)
-print('TRAINING COMPLETE (I5 Config: n_steps=50)')
-print('='*60)
-print(f'  Total epochs:     {n_epochs_completed}')
-print(f'  Total time:       {total_time/3600:.2f}h')
-print(f'  Avg epoch time:   {total_time/n_epochs_completed:.1f}s')
-print(f'  Best fitness:     {best_fitness:.4f}')
-print(f'  Final fitness:    {fitness_history[-1]:.4f}')
-print(f'  Fitness std:      {np.std(fitness_history):.4f}')
-print('='*60)
-
-np.save(os.path.join(config.checkpoint_dir, 'fitness_history.npy'),
-        np.array(fitness_history))
-
-print()
-print('GPU Memory Usage:')
-for i, device in enumerate(jax.devices()):
-    try:
-        mem = device.memory_stats()
-        if mem:
-            used_gb = mem.get('bytes_in_use', 0) / (1024**3)
-            peak_gb = mem.get('peak_bytes_in_use', 0) / (1024**3)
-            print(f'  GPU {i}: used={used_gb:.1f}GB, peak={peak_gb:.1f}GB')
-    except: pass
+    mean_fitness, fitnesses, info = trainer.train_epoch(epoch_key, epoch=epoch, initial_sim_state=initial_sim_state, initial_msg_history=initial_msg_history)
+    mf = float(mean_fitness.block_until_ready()); sf = float(jnp.std(fitnesses))
+    et = time.time() - epoch_start; te = time.time() - training_start
+    fitness_history.append(mf)
+    if mf > best_fitness: best_fitness = mf
+    wandb.log({'epoch': epoch+1, 'fitness/mean': mf, 'fitness/std': sf, 'fitness/max': float(jnp.max(fitnesses)), 'fitness/min': float(jnp.min(fitnesses)), 'fitness/best': best_fitness, 'time/epoch_seconds': et, 'time/total_hours': te/3600}, step=epoch+1)
+    print(f'Epoch {epoch+1:4d} | Fitness: {mf:8.2f} +/- {sf:6.2f} | Time: {et:5.1f}s | Total: {te/3600:.2f}h')
+    if (epoch + 1) % config.checkpoint_every == 0: np.save(os.path.join(config.checkpoint_dir, 'fitness_history.npy'), np.array(fitness_history))
+print(f'COMPLETE (I5) | Epochs: {len(fitness_history)} | Best: {best_fitness:.4f}')
+np.save(os.path.join(config.checkpoint_dir, 'fitness_history.npy'), np.array(fitness_history))
+wandb.finish()
 "
-
-echo ""
-echo "============================================================"
-echo "Production Training I5 Complete! End: $(date)"
-echo "============================================================"
+echo "I5 Complete! End: \$(date)"
