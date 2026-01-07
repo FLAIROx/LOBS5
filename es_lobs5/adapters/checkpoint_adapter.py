@@ -22,10 +22,10 @@ from typing import Dict, Any, Tuple, Optional
 
 def load_flax_checkpoint(checkpoint_path: str) -> Tuple[Dict, Dict]:
     """
-    Load a gradient-trained LOBS5 checkpoint using Orbax.
+    Load a gradient-trained LOBS5 checkpoint using Orbax directly.
 
-    This uses LOBS5's existing checkpoint loading mechanism which properly
-    handles OCDBT format checkpoints with StandardRestore.
+    This bypasses LOBS5's load_checkpoint to avoid TrainState structure
+    mismatch issues. Uses orbax's abstract restore for flexibility.
 
     Args:
         checkpoint_path: Path to the checkpoint directory
@@ -37,13 +37,15 @@ def load_flax_checkpoint(checkpoint_path: str) -> Tuple[Dict, Dict]:
             - config: Training configuration dictionary
     """
     import sys
+    import orbax.checkpoint as ocp
+    import json
 
     # Add LOBS5 root to path for imports
     lobs5_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if lobs5_root not in sys.path:
         sys.path.insert(0, lobs5_root)
 
-    from lob.init_train import load_metadata, init_train_state, load_checkpoint
+    from lob.init_train import load_metadata
 
     # Step 1: Load metadata to get config
     print(f"Loading metadata from {checkpoint_path}")
@@ -56,43 +58,75 @@ def load_flax_checkpoint(checkpoint_path: str) -> Tuple[Dict, Dict]:
     print(f"  n_layers: {config.get('n_layers', 'N/A')}")
     print(f"  token_mode: {config.get('token_mode', 'N/A')}")
 
-    # Step 2: Create TrainState with proper structure
-    # These are defaults that match typical LOBS5 training configs
-    n_classes = config.get('d_output', 2112 if config.get('token_mode', 24) == 24 else 12012)
-    seq_len = config.get('msg_seq_len', 500)
-    book_dim = 3 + config.get('book_depth', 500)  # delta_mid + time + volume image
-    book_seq_len = 1  # Book encoder uses single book state
-    train_size = 1000  # Dummy, not used for loading
-
-    print(f"Creating dummy TrainState for restore...")
-    # init_train_state returns (state, model_cls, total_params)
-    state, _, _ = init_train_state(
-        args=args,
-        n_classes=n_classes,
-        seq_len=seq_len,
-        book_dim=book_dim,
-        book_seq_len=book_seq_len,
-        train_size=train_size,
-        print_shapes=False
+    # Step 2: Find latest step
+    checkpoint_path = os.path.abspath(checkpoint_path)
+    mngr = ocp.CheckpointManager(
+        checkpoint_path,
+        item_names=('state', 'metadata'),
+        options=ocp.CheckpointManagerOptions(),
     )
+    step = mngr.latest_step()
+    print(f"  Latest step: {step}")
 
-    # Step 3: Load checkpoint using LOBS5's mechanism (handles OCDBT properly)
-    print(f"Loading checkpoint state...")
-    ckpt = load_checkpoint(
-        state=state,
-        path=checkpoint_path,
-        step=None,  # Load latest
-        train=False  # Don't replicate to devices
-    )
-
-    # Extract params from loaded TrainState
-    loaded_state = ckpt['model']
-    if hasattr(loaded_state, 'params'):
-        params = loaded_state.params
-    elif isinstance(loaded_state, dict) and 'params' in loaded_state:
-        params = loaded_state['params']
+    # Step 3: Load metadata JSON directly (contains config)
+    metadata_path = os.path.join(checkpoint_path, str(step), 'metadata', 'metadata')
+    if os.path.exists(metadata_path):
+        with open(metadata_path, 'r') as f:
+            saved_metadata = json.load(f)
+        print(f"  Loaded saved metadata")
     else:
-        params = loaded_state
+        saved_metadata = {}
+        print(f"  No saved metadata found at {metadata_path}")
+
+    # Step 4: Load state using abstract restore (no target structure needed)
+    # This allows loading without matching the exact TrainState structure
+    print(f"Loading checkpoint state (abstract restore)...")
+
+    # Use PyTreeCheckpointHandler directly for more control
+    state_path = os.path.join(checkpoint_path, str(step), 'state')
+
+    # Try to restore with abstract target
+    handler = ocp.PyTreeCheckpointHandler(use_ocdbt=True)
+
+    # Get the directory as a path
+    from etils import epath
+    state_dir = epath.Path(state_path)
+
+    # Restore without target (abstract restore)
+    try:
+        restored_state = handler.restore(state_dir)
+        print(f"  Abstract restore successful")
+    except Exception as e:
+        print(f"  Abstract restore failed: {e}")
+        print(f"  Trying with metadata-based restore...")
+
+        # Fallback: read structure from _METADATA file
+        metadata_file = os.path.join(state_path, '_METADATA')
+        if os.path.exists(metadata_file):
+            # Use StandardRestore with the metadata
+            restored_state = handler.restore(
+                state_dir,
+                args=ocp.args.PyTreeRestore()
+            )
+        else:
+            raise RuntimeError(f"Cannot restore checkpoint: no _METADATA found at {metadata_file}")
+
+    # Extract params from restored TrainState
+    # The restored_state should be a TrainState or dict with params
+    if hasattr(restored_state, 'params'):
+        params = restored_state.params
+        print(f"  Extracted params from TrainState.params")
+    elif isinstance(restored_state, dict):
+        if 'params' in restored_state:
+            params = restored_state['params']
+            print(f"  Extracted params from dict['params']")
+        else:
+            # Maybe the state itself is the params dict
+            params = restored_state
+            print(f"  Using restored dict directly as params")
+    else:
+        params = restored_state
+        print(f"  Using restored object directly")
 
     return params, config
 
