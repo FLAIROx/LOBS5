@@ -28,6 +28,7 @@ export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/JaxMARL-HFT:$PYT
 
 nvidia-smi --query-gpu=name,memory.total --format=csv
 
+export PYTHONUNBUFFERED=1
 python -c "
 import sys
 sys.path.insert(0, '.')
@@ -57,7 +58,7 @@ class Config:
 
     # Training scale (G5 config - optimal for 4x GH200)
     n_perturbations: int = 1024      # 256 per GPU
-    n_epochs: int = 500              # Run many epochs (will stop at 24h)
+    n_epochs: int = 1000              # Run many epochs (will stop at 24h)
     n_steps: int = 10                # Steps per episode
     n_warmup_msgs: int = 500         # Warmup messages
     background_msgs_per_step: int = 100  # Background messages per step
