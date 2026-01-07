@@ -1035,9 +1035,10 @@ class ESTrainer:
                 return (key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr), world_msg
 
             # Select background generation function
+            n_warmup_cfg = getattr(config, 'n_warmup_msgs', 500)
             if config.background_mode == 'historical_replay':
                 step_fn_background = historical_replay_step
-                replay_ptr_init = jnp.int32(500 + step_idx * config.background_msgs_per_step)
+                replay_ptr_init = jnp.int32(n_warmup_cfg + step_idx * config.background_msgs_per_step)
             else:
                 step_fn_background = world_model_step
                 replay_ptr_init = jnp.int32(0)
