@@ -134,8 +134,9 @@ if __name__ == "__main__":
 
     n_vol_series = 500  # how many book volume series model uses as input
 
-    v = Vocab()
-    n_classes = len(v)
+    # NOTE: Vocab creation moved after load_metadata() to use correct token_mode
+    # v = Vocab()  # OLD: defaults to token_mode=22
+    # n_classes = len(v)
     book_dim = 503 #b_enc.shape[1]
     eval_book_seq_len = eval_seq_len
 
@@ -154,8 +155,14 @@ if __name__ == "__main__":
     args.num_devices=1
     args.bsz=1
 
+    # Create Vocab with correct token_mode from checkpoint metadata
+    token_mode = getattr(args, 'token_mode', 24)  # Default to 24 if not in metadata
+    print(f"[*] Using token_mode={token_mode} from checkpoint metadata")
+    v = Vocab(token_mode=token_mode)
+    n_classes = len(v)
+    print(f"[*] Vocab size: {n_classes}")
 
-    new_train_state, model_cls = init_train_state(
+    new_train_state, model_cls, total_params = init_train_state(
         args,
         n_classes=n_classes,
         seq_len=eval_seq_len,
@@ -163,6 +170,7 @@ if __name__ == "__main__":
         book_seq_len=eval_book_seq_len,
         train_size=1,  # dummy value for inference (only used for lr schedule)
     )
+    print(f"[*] Model parameters: {total_params:,}")
 
 
     # jax.tree_util.tree_map(lambda x: x.shape,state)
