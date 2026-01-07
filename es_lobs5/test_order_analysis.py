@@ -37,7 +37,7 @@ from es_lobs5.analysis.visualize import plot_comparison, plot_detailed_analysis
 class ESConfig:
     """Minimal config for ES Trainer order analysis."""
     # Checkpoint
-    lobs5_checkpoint: str = '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/wandb/run-20241130_101652-logical-serenity-19/files/checkpoints'
+    lobs5_checkpoint: str = '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/'
 
     # ES configuration (minimal - just for episode collection)
     noiser: str = 'eggroll'
@@ -163,7 +163,7 @@ def get_historical_orders_from_replay(data_path: str, n_samples: int = 1000, tok
 def main():
     parser = argparse.ArgumentParser(description='Order Quality Analysis with Real ES Training')
     parser.add_argument('--checkpoint', type=str,
-                       default='/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/wandb/run-20241130_101652-logical-serenity-19/files/checkpoints',
+                       default='/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/',
                        help='Path to LOBS5 checkpoint')
     parser.add_argument('--data_dir', type=str,
                        default='/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021',

@@ -47,7 +47,7 @@ echo "[*] This will initialize the ESTrainer and run episodes to collect policy 
 echo ""
 
 python es_lobs5/test_order_analysis.py \
-    --checkpoint "/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/wandb/run-20241130_101652-logical-serenity-19/files/checkpoints" \
+    --checkpoint "/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/" \
     --data_dir "/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_encoded/GOOG/2021" \
     --n_historical 2000 \
     --n_episodes 5 \
