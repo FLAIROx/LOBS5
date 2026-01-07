@@ -270,11 +270,12 @@ def get_sim_msg(
         new_order_id: int,
         tick_size: int,
         encoder: Dict[str, Tuple[jax.Array, jax.Array]],
+        token_mode: int = 24,  # token mode for decode_msg
     ) -> Dict[str, Any]:
     """"""
     # decoded predicted message
     # pred_msg = tok.decode(pred_msg_enc, v).squeeze()
-    msg_decoded = encoding.decode_msg(pred_msg_enc, encoder)
+    msg_decoded = encoding.decode_msg(pred_msg_enc, encoder, token_mode=token_mode)
     # jax.debug.print('decoded predicted message: \n {}', msg_decoded)
     new_part = msg_decoded[: Message_Tokenizer.N_NEW_FIELDS]
     # ref part is not needed for the simulator logic
@@ -703,9 +704,10 @@ def _generate_msg(
         sample_top_n: int,
         tick_size: int,
         debug_book: bool,
-        
-        m_init: jax.Array, #last token from prev message, or start tok. 
-        b_init: jax.Array, #last book state after prev message, or start book. 
+        token_mode: int,  # token mode for decode_msg
+
+        m_init: jax.Array, #last token from prev message, or start tok.
+        b_init: jax.Array, #last book state after prev message, or start book.
         n_msg_todo: int,
         p_mid: jax.Array,
         sim_state: LobState,
@@ -813,6 +815,7 @@ def _generate_msg(
         new_order_id = order_id,
         tick_size = tick_size,
         encoder = encoder,
+        token_mode = token_mode,  # pass token_mode for correct decoding
     )
     # def print_cond(string_,msg,n_msg_todo):
     #     if n_msg_todo==500:
@@ -866,12 +869,13 @@ def _make_generate_msg_scannable(
         sample_top_n: int,
         tick_size: int,
         debug_book: bool,
+        token_mode: int,  # token mode for decode_msg
     ):
     """
     """
     __generate_msg = jax.jit(functools.partial(
         _generate_msg, sim, train_state, model, batchnorm,
-        encoder, valid_mask_array, sample_top_n, tick_size,debug_book
+        encoder, valid_mask_array, sample_top_n, tick_size, debug_book, token_mode
     ),device=jax.devices()[0])
 
     def _generate_msg_scannable(gen_state, input):
@@ -981,8 +985,8 @@ def generate(
     # jax.debug.print('generate - p_mid {}', p_mid)
 
     generate_msg_scannable = _make_generate_msg_scannable(
-        sim, train_state, model, batchnorm, 
-        encoder, valid_mask_array, sample_top_n, tick_size, debug_book,
+        sim, train_state, model, batchnorm,
+        encoder, valid_mask_array, sample_top_n, tick_size, debug_book, token_mode,
     )
     gen_state, (msgs_decoded, l2_book_states,msgs_tokens) = jax.lax.scan(
         generate_msg_scannable,
