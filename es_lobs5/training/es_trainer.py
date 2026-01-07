@@ -117,6 +117,60 @@ def _lazy_import_jaxlob():
         get_best_bid_and_ask = _get_best_bid_and_ask
 
 
+# ============================================================================
+# Field-Aware Token Masking for Constrained Decoding
+# ============================================================================
+# Uses validation_helpers.syntax_validation_matrix() which creates a proper
+# mask matrix of shape (MSG_LEN, VOCAB_SIZE) where True = valid token.
+#
+# This is the same masking used in inference_no_errcorr.py for generation.
+# ============================================================================
+
+_SYNTAX_VALIDATION_MASK = None
+
+def get_syntax_validation_mask(token_mode: int = 24):
+    """Get the syntax validation mask matrix from validation_helpers.
+
+    This mask ensures each position only outputs tokens valid for that field:
+    - pos 0 (event_type): tokens 1004-1007
+    - pos 1 (direction): tokens 2110-2111
+    - pos 2 (price_sign): tokens 2108-2109
+    - etc.
+
+    Returns:
+        jnp.array of shape (msg_len, vocab_size) where True = valid token
+    """
+    global _SYNTAX_VALIDATION_MASK
+    if _SYNTAX_VALIDATION_MASK is None:
+        import lob.validation_helpers as valh
+        from lob.encoding import Vocab, Message_Tokenizer
+        # Set token mode before generating mask
+        Message_Tokenizer.set_token_mode(token_mode)
+        v = Vocab(token_mode=token_mode)
+        # syntax_validation_matrix returns boolean mask (True = valid)
+        mask_bool = valh.syntax_validation_matrix(v)
+        _SYNTAX_VALIDATION_MASK = jnp.array(mask_bool)
+    return _SYNTAX_VALIDATION_MASK
+
+
+def get_field_masks_24(vocab_size: int = 2112):
+    """Get field masks for constrained decoding (additive mask format).
+
+    Converts boolean syntax_validation_mask to additive format:
+    - 0.0 for valid tokens
+    - -1e9 for invalid tokens
+
+    This can be added to log_probs before sampling.
+
+    Returns:
+        jnp.array of shape (24, vocab_size)
+    """
+    syntax_mask = get_syntax_validation_mask(token_mode=24)
+    # Convert boolean (True=valid) to additive mask (0=valid, -1e9=invalid)
+    additive_mask = jnp.where(syntax_mask, 0.0, -1e9)
+    return additive_mask
+
+
 def create_es_config():
     """Create argument parser for ES training configuration."""
     parser = argparse.ArgumentParser(description='ES JaxLOB Training for LOBS5')
@@ -1255,8 +1309,23 @@ class ESTrainer:
                 length=config.background_msgs_per_step,
             )
 
-            # Policy generates action
-            def sample_policy_token(token_carry, _):
+            # Policy generates action with field-aware constrained decoding
+            # Get precomputed field masks for 24-token messages
+            field_masks = get_field_masks_24(vocab_size=config.d_output)
+
+            def sample_policy_token(token_carry, token_pos):
+                """Sample next token with field-aware masking.
+
+                Args:
+                    token_carry: (key, msg_history, hiddens)
+                    token_pos: Current position in 24-token message (0-23)
+
+                The field mask ensures tokens are only sampled from valid ranges:
+                - pos 0 (event_type): tokens 1004-1007
+                - pos 1 (direction): tokens 2110-2111
+                - pos 2 (price_sign): tokens 2108-2109
+                - etc.
+                """
                 key_p, msg_hist_p, hidden_p = token_carry
                 key_p, sample_key_p = jax.random.split(key_p)
 
@@ -1266,7 +1335,12 @@ class ESTrainer:
                 hidden_p = jax.tree.map(lambda h: h[:, -1:, :], hidden_p)
 
                 log_probs_p = jnp.nan_to_num(log_probs_p, nan=-1e9, posinf=1e9, neginf=-1e9)
-                next_token_p = jax.random.categorical(sample_key_p, log_probs_p[-1])
+
+                # Apply field-aware mask: add -inf to invalid token positions
+                field_mask = field_masks[token_pos]
+                masked_log_probs = log_probs_p[-1] + field_mask
+
+                next_token_p = jax.random.categorical(sample_key_p, masked_log_probs)
 
                 msg_hist_p = jnp.concatenate([msg_hist_p[1:], jnp.array([next_token_p])])
 
@@ -1279,10 +1353,11 @@ class ESTrainer:
                 maybe_pvary(msg_history),
                 maybe_pvary_tree(hiddens_policy),
             )
+            # Pass token positions (0-23) as xs to enable field-aware masking
             (key_policy, msg_history, hiddens_policy), policy_msg = jax.lax.scan(
                 sample_policy_token,
                 policy_token_init,
-                None,
+                jnp.arange(msg_len, dtype=jnp.int32),
                 length=msg_len,
             )
 
