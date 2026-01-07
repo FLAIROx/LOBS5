@@ -321,8 +321,8 @@ def main():
     print(f"Scores directory: {scores_dir}")
     print(f"Output directory: {output_dir}")
 
-    # Find all score files
-    pkl_files = list(scores_dir.glob('scores_*.pkl'))
+    # Find all score files (recursively search subdirectories)
+    pkl_files = list(scores_dir.glob('*/scores/scores_*.pkl'))
     print(f"\nFound {len(pkl_files)} score files")
 
     if not pkl_files:

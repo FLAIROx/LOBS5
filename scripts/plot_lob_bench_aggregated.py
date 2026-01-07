@@ -31,25 +31,15 @@ class ModelConfig:
 # Define models to compare (add more as they become available)
 MODELS = [
     ModelConfig(
-        name='s5',
-        path=Path('/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/lob_bench/output/brisk-violet-111/results'),
+        name='logical-serenity-19',
+        path=Path('/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/lob_bench/output/logical-serenity-19/results'),
         color='#1f77b4',  # blue
     ),
     # Add more models here as they become available:
     # ModelConfig(
-    #     name='s5v2N5',
-    #     path=Path('/path/to/s5v2N5/results'),
+    #     name='brisk-violet-111',
+    #     path=Path('/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/lob_bench/output/brisk-violet-111/results'),
     #     color='#2ca02c',  # green
-    # ),
-    # ModelConfig(
-    #     name='s5v2uncond',
-    #     path=Path('/path/to/s5v2uncond/results'),
-    #     color='#d62728',  # red
-    # ),
-    # ModelConfig(
-    #     name='s5v2N100',
-    #     path=Path('/path/to/s5v2N100/results'),
-    #     color='#ff7f0e',  # orange
     # ),
 ]
 
