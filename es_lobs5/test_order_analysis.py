@@ -34,13 +34,14 @@ class ESConfig:
     """Config for ES Trainer order analysis.
 
     Uses PREPROC data format (N, 14) by default.
+    Uses EggRollBS noiser with group_size=8 so thread_id=0,1 are baselines.
     """
     lobs5_checkpoint: str = '/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/'
-    noiser: str = 'eggroll'
+    noiser: str = 'eggrollbs'  # Use baseline subtraction (thread 0,1 = no noise)
     sigma: float = 0.01
     lr: float = 0.001
     lora_rank: int = 4
-    group_size: int = 0
+    group_size: int = 8  # Required for EggRollBS: threads 0,1 per group are baselines
     n_perturbations: int = 8
     n_epochs: int = 1
     n_steps: int = 50
