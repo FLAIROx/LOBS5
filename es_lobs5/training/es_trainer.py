@@ -135,14 +135,14 @@ def create_es_config():
     # Training configuration
     parser.add_argument('--n_perturbations', type=int, default=128,
                         help='Population size (number of ES perturbations, must be divisible by n_devices)')
-    # Backward compatibility alias
+    # Legacy alias alias
     parser.add_argument('--n_threads', type=int, default=None,
                         help='[DEPRECATED] Use --n_perturbations instead')
     parser.add_argument('--n_epochs', type=int, default=1000, help='Training epochs')
     parser.add_argument('--n_steps', type=int, default=100, help='Steps per episode')
     parser.add_argument('--background_msgs_per_step', type=int, default=10,
                         help='Background messages per step (applies to both world_model and historical_replay)')
-    # Backward compatibility alias
+    # Legacy alias alias
     parser.add_argument('--world_msgs_per_step', type=int, default=None,
                         help='[DEPRECATED] Use --background_msgs_per_step instead')
 
@@ -384,7 +384,7 @@ class ESTrainer:
 
         self.config = config
 
-        # Backward compatibility: n_threads -> n_perturbations
+        # Legacy alias: n_threads -> n_perturbations
         if hasattr(config, 'n_threads') and getattr(config, 'n_threads', None) is not None:
             if not hasattr(config, 'n_perturbations') or getattr(config, 'n_perturbations', 128) == 128:
                 print("[WARN] --n_threads is deprecated, use --n_perturbations instead")
@@ -393,7 +393,7 @@ class ESTrainer:
         if not hasattr(config, 'n_perturbations'):
             config.n_perturbations = getattr(config, 'n_threads', 128)
 
-        # Backward compatibility: world_msgs_per_step -> background_msgs_per_step
+        # Legacy alias: world_msgs_per_step -> background_msgs_per_step
         if hasattr(config, 'world_msgs_per_step') and getattr(config, 'world_msgs_per_step', None) is not None:
             if not hasattr(config, 'background_msgs_per_step') or getattr(config, 'background_msgs_per_step', 10) == 10:
                 print("[WARN] --world_msgs_per_step is deprecated, use --background_msgs_per_step instead")

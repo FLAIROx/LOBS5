@@ -38,14 +38,14 @@ def create_parser():
     # Training configuration
     parser.add_argument('--n_perturbations', type=int, default=128,
                         help='Population size (ES perturbations)')
-    # Backward compatibility
+    # Legacy alias
     parser.add_argument('--n_threads', type=int, default=None,
                         help='[DEPRECATED] Use --n_perturbations')
     parser.add_argument('--n_epochs', type=int, default=1000)
     parser.add_argument('--n_steps', type=int, default=100)
     parser.add_argument('--background_msgs_per_step', type=int, default=10,
                         help='Background messages per step (applies to both modes)')
-    # Backward compatibility
+    # Legacy alias
     parser.add_argument('--world_msgs_per_step', type=int, default=None,
                         help='[DEPRECATED] Use --background_msgs_per_step')
 
@@ -89,7 +89,7 @@ def main():
     parser = create_parser()
     args = parser.parse_args()
 
-    # Backward compatibility: n_threads -> n_perturbations
+    # Legacy alias: n_threads -> n_perturbations
     if args.n_threads is not None and args.n_perturbations == 128:
         args.n_perturbations = args.n_threads
 
