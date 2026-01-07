@@ -1191,13 +1191,20 @@ class ESTrainer:
         if is_sell_task:
             sell_revenue = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
             sell_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
-            pnl = (sell_revenue - init_mid_price * sell_quantity) / 1e6
+            pnl_raw = sell_revenue - init_mid_price * sell_quantity
             agent_quantity = sell_quantity
         else:
             buy_cost = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
             buy_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
-            pnl = (init_mid_price * buy_quantity - buy_cost) / 1e6
+            pnl_raw = init_mid_price * buy_quantity - buy_cost
             agent_quantity = buy_quantity
+
+        # Normalize PnL to -1 to 1 range using tanh
+        # pnl_normalized = "number of ticks improvement for full task execution"
+        # e.g., if you execute all task_size shares 1 tick better than mid, pnl_normalized = 1.0
+        normalization_scale = config.task_size * config.tick_size
+        pnl_normalized = pnl_raw / jnp.maximum(normalization_scale, 1.0)
+        pnl = jnp.tanh(pnl_normalized)  # squash to -1 to 1, 0 = executed at mid price
 
         # Completion penalty (disabled - penalty was too large relative to PnL signal)
         # shortfall = jnp.maximum(config.task_size - agent_quantity, 0)
@@ -1217,7 +1224,9 @@ class ESTrainer:
 
         info = {
             'fitness': fitness,
-            'pnl': pnl,
+            'pnl': pnl,                        # normalized to -1 to 1 (tanh)
+            'pnl_raw': pnl_raw,                # raw value in cents
+            'pnl_normalized': pnl_normalized,  # before tanh (in "ticks")
             'agent_quantity': agent_quantity,
             'agent_trades': agent_trades,
             'total_trades': total_trades,
