@@ -292,6 +292,19 @@ def detect_data_format(file_path: str, data: 'np.ndarray', token_mode: int = 24)
     elif n_cols in [22, 24]:
         format_type = 'encoded'
         format_desc = f'ENCODED ({n_cols} cols, tokenized, token_mode mismatch)'
+    elif n_cols == 43:
+        # LOBSTER orderbook format: 10 levels × 2 sides × 2 fields (price, size) + 3 (bid_time, ask_time, seq_num)
+        # Columns: [ask_price1, ask_size1, ..., ask_price10, ask_size10, bid_price1, bid_size1, ..., bid_price10, bid_size10, bid_time, ask_time, seq_num]
+        format_type = 'orderbook'
+        format_desc = f'ORDERBOOK (43 cols: 10-level LOB × 2 sides × 2 fields + 3 meta)'
+    elif n_cols == 41:
+        # LOBSTER orderbook format without seq_num: 10 levels × 2 sides × 2 fields + 1 (timestamp)
+        format_type = 'orderbook'
+        format_desc = f'ORDERBOOK (41 cols: 10-level LOB × 2 sides × 2 fields + 1 timestamp)'
+    elif n_cols == 21:
+        # LOBSTER orderbook format: 5 levels × 2 sides × 2 fields + 1 (timestamp)
+        format_type = 'orderbook'
+        format_desc = f'ORDERBOOK (21 cols: 5-level LOB × 2 sides × 2 fields + 1 timestamp)'
     else:
         format_type = 'unknown'
         format_desc = f'UNKNOWN ({n_cols} cols)'
