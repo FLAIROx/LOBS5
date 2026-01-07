@@ -22,10 +22,10 @@ from typing import Dict, Any, Tuple, Optional
 
 def load_flax_checkpoint(checkpoint_path: str) -> Tuple[Dict, Dict]:
     """
-    Load a gradient-trained LOBS5 checkpoint using LOBS5's native loader.
+    Load a gradient-trained LOBS5 checkpoint using direct OCDBT/tensorstore reading.
 
-    This function uses LOBS5's init_train.load_checkpoint which properly
-    handles OCDBT format with StandardRestore.
+    This function reads OCDBT checkpoints by directly parsing the _METADATA file
+    and using tensorstore to load the parameter arrays.
 
     Args:
         checkpoint_path: Path to the checkpoint directory
@@ -37,14 +37,17 @@ def load_flax_checkpoint(checkpoint_path: str) -> Tuple[Dict, Dict]:
             - config: Training configuration dictionary
     """
     import sys
+    import json
+    import ast
+    import tensorstore as ts
+    from pathlib import Path
 
     # Add LOBS5 root to path for imports
     lobs5_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if lobs5_root not in sys.path:
         sys.path.insert(0, lobs5_root)
 
-    # Use LOBS5's native checkpoint loading (handles OCDBT + StandardRestore correctly)
-    from lob.init_train import load_metadata, init_train_state, load_checkpoint
+    from lob.init_train import load_metadata
 
     # Step 1: Load metadata to get config (returns Namespace)
     print(f"Loading metadata from {checkpoint_path}")
@@ -55,45 +58,90 @@ def load_flax_checkpoint(checkpoint_path: str) -> Tuple[Dict, Dict]:
     print(f"  n_layers: {config.get('n_layers', 'N/A')}")
     print(f"  token_mode: {config.get('token_mode', 'N/A')}")
 
-    # Step 2: Create dummy TrainState for StandardRestore (needs target structure)
-    n_classes = config.get('d_output', 2112 if config.get('token_mode', 24) == 24 else 12012)
-    seq_len = config.get('msg_seq_len', 500)
-    book_dim = 3 + config.get('book_depth', 500)
-    book_seq_len = 1
+    # Step 2: Find latest step
+    checkpoint_path = os.path.abspath(checkpoint_path)
+    ckpt_dir = Path(checkpoint_path)
 
-    print(f"  Creating TrainState structure for restore...")
-    state, _, _ = init_train_state(
-        args=args,
-        n_classes=n_classes,
-        seq_len=seq_len,
-        book_dim=book_dim,
-        book_seq_len=book_seq_len,
-        train_size=1000,  # Dummy value, not used for loading
-        print_shapes=False
-    )
+    # Get all step directories (numeric names)
+    step_dirs = [d for d in ckpt_dir.iterdir() if d.is_dir() and d.name.isdigit()]
+    if not step_dirs:
+        raise ValueError(f"No checkpoint steps found in {checkpoint_path}")
 
-    # Step 3: Load checkpoint using LOBS5's native loader
-    # This uses StandardRestore with deduplicate_trainstate, which handles OCDBT correctly
-    print(f"  Loading checkpoint state...")
-    ckpt = load_checkpoint(
-        state=state,
-        path=checkpoint_path,
-        step=None,  # Load latest
-        train=False  # Don't replicate to all devices
-    )
+    latest_step = max(int(d.name) for d in step_dirs)
+    state_dir = ckpt_dir / str(latest_step) / "state"
 
-    # Extract params from loaded TrainState
-    loaded_state = ckpt['model']
-    if hasattr(loaded_state, 'params'):
-        params = loaded_state.params
-    elif isinstance(loaded_state, dict) and 'params' in loaded_state:
-        params = loaded_state['params']
+    print(f"  Loading from step {latest_step}...")
+    print(f"  State directory: {state_dir}")
+
+    # Step 3: Read _METADATA to get tree structure
+    metadata_path = state_dir / "_METADATA"
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"_METADATA file not found at {metadata_path}")
+
+    with open(metadata_path, 'r') as f:
+        tree_metadata = json.load(f)
+
+    print(f"  _METADATA loaded, building parameter tree...")
+
+    # Parse tree structure from metadata and load each array
+    params = {}
+
+    # The tree_metadata has format: {"tree_metadata": {"('key1', 'key2')": {...}, ...}}
+    if "tree_metadata" in tree_metadata:
+        metadata_entries = tree_metadata["tree_metadata"]
     else:
-        params = loaded_state
+        metadata_entries = tree_metadata
 
-    # Ensure params are on first available device for ES processing
-    params = jax.tree_util.tree_map(lambda x: jnp.asarray(x), params)
+    # Load each parameter using tensorstore
+    for key_tuple_str, entry in metadata_entries.items():
+        # Skip non-param entries
+        if "'step'" in key_tuple_str:
+            continue
 
+        # Extract keys from the tuple string
+        try:
+            keys = list(ast.literal_eval(key_tuple_str))
+        except:
+            continue
+
+        if not keys or keys[0] != 'params':
+            continue
+
+        # Build the path in OCDBT (keys joined with '.')
+        param_path = '.'.join(keys)
+
+        # Create tensorstore spec for this parameter
+        try:
+            spec = {
+                "driver": "zarr",
+                "kvstore": {
+                    "driver": "ocdbt",
+                    "base": f"file://{state_dir}",
+                },
+                "path": param_path,
+            }
+
+            arr = ts.open(spec, read=True).result().read().result()
+
+            # Navigate/create nested dict structure
+            current = params
+            for k in keys[1:-1]:  # Skip 'params' prefix and last key
+                if k not in current:
+                    current[k] = {}
+                current = current[k]
+
+            # Set the leaf value
+            current[keys[-1]] = jnp.asarray(arr)
+
+        except Exception as e:
+            # Skip entries that fail (might be non-array metadata)
+            pass
+
+    if not params:
+        raise ValueError("Failed to load any parameters from checkpoint")
+
+    print(f"  Loaded {len(jax.tree_util.tree_leaves(params))} parameter arrays")
+    print(f"  Checkpoint loaded successfully!")
     return params, config
 
 
