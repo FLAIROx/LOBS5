@@ -1364,6 +1364,7 @@ def sample_new(
             # print("Cost analysis:", generate_compiled.cost_analysis())
 
         start_time = time.time()
+        # Note: token_mode is a static arg (captured at trace time), so NOT passed here
         msgs_decoded, l2_book_states, num_errors, mgs_tokens = generate_compiled(
             train_state,  # None map, static?
             encoder,  # None map, static?
@@ -1374,7 +1375,6 @@ def sample_new(
             init_hidden_batched,
             init_time_batched,
             real_book,
-            token_mode,  # static - added for vocab size
         )
         end_time = time.time()
         print(f"Generation time for batch of size {batch_size}: {(end_time - start_time):.2f} seconds")
