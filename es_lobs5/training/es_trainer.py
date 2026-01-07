@@ -1214,6 +1214,11 @@ class ESTrainer:
 
         task_size = jnp.int32(config.task_size)
 
+        # Pre-compute field masks OUTSIDE step_fn to avoid JAX tracer leak
+        # These masks constrain each token position to valid vocabulary ranges
+        vocab_size = fp.get('d_output', 2112)  # Default 2112 for 24-token mode
+        field_masks = get_field_masks_24(vocab_size=vocab_size)
+
         def step_fn(carry, step_idx):
             """Single step: Background messages -> Policy action."""
             (key, msg_history, hiddens_world, hiddens_policy,
@@ -1324,10 +1329,7 @@ class ESTrainer:
             )
 
             # Policy generates action with field-aware constrained decoding
-            # Get precomputed field masks for 24-token messages
-            # Note: d_output comes from checkpoint frozen_params, not config
-            vocab_size = fp.get('d_output', 2112)  # Default 2112 for 24-token mode
-            field_masks = get_field_masks_24(vocab_size=vocab_size)
+            # field_masks is pre-computed OUTSIDE step_fn to avoid tracer leak
 
             def sample_policy_token(token_carry, token_pos):
                 """Sample next token with field-aware masking.
