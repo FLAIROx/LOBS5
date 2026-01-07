@@ -1162,8 +1162,9 @@ class ESTrainer:
             book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
 
+            # Return policy_msg for order analysis (shape: (msg_len,))
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-                    book_feat, world_oid_offset, quant_executed), None
+                    book_feat, world_oid_offset, quant_executed), policy_msg
 
         # Run episode
         # H2: Apply pvary to initial carry values when inside shard_map
@@ -1178,7 +1179,8 @@ class ESTrainer:
             maybe_pvary(jnp.int32(0)),
             maybe_pvary(jnp.int32(0)),
         )
-        (_, _, _, _, final_state, _, _, final_quant_executed), _ = jax.lax.scan(
+        # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
+        (_, _, _, _, final_state, _, _, final_quant_executed), policy_msgs_all = jax.lax.scan(
             step_fn,
             main_scan_init,
             jnp.arange(config.n_steps),
@@ -1240,6 +1242,7 @@ class ESTrainer:
             'total_trades': total_trades,
             'completion_penalty': completion_penalty,
             'init_mid_price': init_mid_price,
+            'policy_msgs': policy_msgs_all,    # shape: (n_steps, msg_len) for order analysis
         }
 
         return fitness, info
