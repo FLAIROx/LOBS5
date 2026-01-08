@@ -654,3 +654,86 @@ def __init__(self, token_mode=24) -> None:  # Was: token_mode=22
 - `a1dd385` fix(encoding): change Vocab default token_mode from 22 to 24
 
 ---
+
+### ESTrainer Token Mode 自动检测修复
+
+**Date**: 2026-01-08
+
+#### 问题背景
+
+ESTrainer 生成的 policy 订单 size 分布严重错误：
+- 历史数据: size mean=94, median=100
+- run_inference.py: size mean=107, median=100 ✅
+- ESTrainer: size mean=5792, median=6228 ❌ (60x 偏差!)
+
+#### 根本原因
+
+**ESTrainer 默认 token_mode=22，但 checkpoint 使用 token_mode=24**
+
+```python
+# es_trainer.py (旧代码)
+parser.add_argument('--token_mode', type=int, default=22, ...)  # ← 错误默认值
+```
+
+对比 run_inference.py 的正确做法：
+```python
+# run_inference.py
+args = load_metadata(ckpt_path)
+token_mode = getattr(args, 'token_mode', 24)  # 从 checkpoint 获取
+v = Vocab(token_mode=token_mode)
+```
+
+#### 解决方案
+
+1. **从 checkpoint 自动检测 token_mode**:
+   ```python
+   # es_trainer.py (新代码)
+   ckpt_token_mode = self.lobs5_init.frozen_params.get('token_mode', None)
+   if ckpt_token_mode is not None:
+       config.token_mode = ckpt_token_mode
+   ```
+
+2. **使用 inference.get_dataset() 加载数据**:
+   - 复用 run_inference.py 的数据加载路径
+   - 确保编码/解码使用相同的 token_mode
+   - 消除重复代码
+
+3. **修改默认值**:
+   ```python
+   parser.add_argument('--token_mode', type=int, default=24, ...)  # 改为 24
+   ```
+
+#### 重构的关键修改
+
+| 函数 | 变化 |
+|------|------|
+| `__init__` | +8 行: token_mode 自动检测 |
+| `_init_historical_replay_data` | -50 行 → +40 行: 使用 inference.get_dataset() |
+| `_create_initial_sim_state` | -110 行 → +50 行: 复用已加载数据 |
+| `create_es_config` | default=22 → 24 |
+
+总计: 删除 ~130 行重复代码，添加 ~90 行清晰代码
+
+#### 关键洞察
+
+1. **配置不一致是常见错误源**:
+   - 不同模块使用不同默认值
+   - 命令行默认值与运行时环境不匹配
+   - 解决方案: 从权威源（checkpoint）获取配置
+
+2. **代码复用的重要性**:
+   - ESTrainer 有 ~170 行数据加载代码
+   - run_inference.py 有等价功能
+   - 重复实现 → 不同 bug
+   - 解决方案: 统一使用 `inference.get_dataset()`
+
+3. **Token Mode 影响**:
+   - 24-token: size 用 2 个 base-100 digits (max=9999)
+   - 22-token: size 用 1 个 base-10000 token
+   - 错误解码导致 size 值膨胀 ~60x
+
+#### Commit
+
+- `ca52653` refactor(es-trainer): auto-detect token_mode from checkpoint
+
+---

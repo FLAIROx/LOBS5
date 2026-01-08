@@ -142,6 +142,8 @@ def main():
     parser.add_argument('--n_historical', type=int, default=2000)
     parser.add_argument('--n_episodes', type=int, default=5)
     parser.add_argument('--n_steps', type=int, default=50)
+    parser.add_argument('--n_warmup_msgs', type=int, default=500)
+    parser.add_argument('--background_msgs_per_step', type=int, default=10)
     parser.add_argument('--output_dir', type=str, default='./analysis_output')
     parser.add_argument('--token_mode', type=int, default=24)
     args = parser.parse_args()
