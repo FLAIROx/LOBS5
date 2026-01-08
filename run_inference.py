@@ -199,9 +199,10 @@ if __name__ == "__main__":
     ds = inference.get_dataset(data_dir,
                                n_messages_conditional,
                                n_eval_messages,
-                               test_split= run_args.test_split,
+                               test_split=run_args.test_split,
+                               token_mode=token_mode,  # Pass token_mode to ensure correct encoding
                             #    day_indeces= [0],
-                            #    limit_seq=4 
+                            #    limit_seq=4
                                )
 
     print("Dataset length: ", len(ds))

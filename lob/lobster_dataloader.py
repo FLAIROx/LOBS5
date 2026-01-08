@@ -346,8 +346,8 @@ class LOBSTER_Dataset(Dataset):
             # already available (shifts by one)
             inference=False,
             limit_seq_per_file=math.inf,
-            # token_mode: 22 (default, base-10000 size) or 24 (base-100 size)
-            token_mode=22
+            # token_mode: 24 (default, base-100 size) or 22 (base-10000 size)
+            token_mode=24
             ) -> None:
 
 
@@ -711,7 +711,7 @@ class LOBSTER(SequenceDataset):
             "return_raw_msgs": False,
             "rand_offset": True,
             "debug_overfit": False,
-            "token_mode": 22,  # 22 (default, base-10000 size) or 24 (base-100 size)
+            "token_mode": 24,  # 24 (default, base-100 size) or 22 (base-10000 size)
         }
 
     def setup(self):

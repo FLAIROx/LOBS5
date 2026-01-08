@@ -15,7 +15,7 @@
 #SBATCH --gres=gpu:4
 
 source ~/miniforge3/etc/profile.d/conda.sh
-conda activate lob
+conda activate lobs5  # Changed from 'lob' to 'lobs5' for correct environment
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90

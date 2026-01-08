@@ -173,6 +173,7 @@ def get_dataset(
         n_messages: int,
         n_eval_messages: int,
         *,
+        token_mode: int = 24,  # Added: token mode for encoding (24 = base-100 size)
         n_cache_files: int = 500,
         seed: int = 42,
         book_depth: int = 500,
@@ -182,9 +183,9 @@ def get_dataset(
     ):
     msg_files = sorted(glob(str(data_dir) + '/*message*.npy'))
     book_files = sorted(glob(str(data_dir) + '/*book*.npy'))
-    
+
     if day_indeces is not None:
-        #restricts the data to only include certain days. 
+        #restricts the data to only include certain days.
         msg_files=[msg_files[i] for i in day_indeces]
         book_files=[book_files[i] for i in day_indeces]
     if test_split>0:
@@ -204,8 +205,9 @@ def get_dataset(
         book_transform=False,
         book_depth=book_depth,
         return_raw_msgs=True,
-        inference=True, #this flag shifts the book to exclude the very first state b4 the 1st message. 
+        inference=True, #this flag shifts the book to exclude the very first state b4 the 1st message.
         limit_seq_per_file=limit_seq,
+        token_mode=token_mode,  # Added: pass token_mode to LOBSTER_Dataset
     )
     return ds
 
