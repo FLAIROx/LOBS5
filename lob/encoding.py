@@ -394,12 +394,12 @@ class Vocab:
     NA_TOK = 2
     START_TOK= 3
 
-    def __init__(self, token_mode=22) -> None:
+    def __init__(self, token_mode=24) -> None:
         """
         Initialize vocabulary for message encoding.
 
         Args:
-            token_mode: 22 (default, base-10000 size) or 24 (base-100 size)
+            token_mode: 24 (default, base-100 size) or 22 (base-10000 size)
         """
         assert token_mode in [22, 24], f"token_mode must be 22 or 24, got {token_mode}"
         self.token_mode = token_mode

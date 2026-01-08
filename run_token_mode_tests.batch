@@ -26,6 +26,9 @@ cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
 # Set JAX to CPU-only for faster tests
 export JAX_PLATFORMS=cpu
 
+# Install pytest if not available
+pip install pytest --quiet 2>/dev/null || echo "pytest already installed"
+
 echo ""
 echo "[1] Running syntax check on encoding.py..."
 python -m py_compile lob/encoding.py && echo "✓ encoding.py syntax OK" || echo "✗ encoding.py syntax error"

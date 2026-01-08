@@ -260,5 +260,6 @@ if __name__ == "__main__":
         args=args,
         conditional=True if n_messages_conditional > 0 else False,  # conditional generation
         overfit_debug=overfit_debug,
+        v=v,  # Pass Vocab instance with correct token_mode
     )
     print(f"Generation time for {n_samples} sequences across {batch_size} batch size: {time()-start}")

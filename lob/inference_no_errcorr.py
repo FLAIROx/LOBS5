@@ -53,6 +53,10 @@ from lob.message_utils import (
     DTs_i, DTns_i, TIMEs_i, TIMEns_i, PRICE_REF_i, SIZE_REF_i, TIMEs_REF_i, TIMEns_REF_i,
 )
 
+# REF_LEN: Number of tokens for reference fields (price_ref, size_ref, time_s_ref, time_ns_ref)
+# NOTE: Computed at import time using Message_Tokenizer defaults (now 24-token mode)
+# For 24-token: MSG_LEN=24, NEW_MSG_LEN=15, REF_LEN=9
+# For 22-token: MSG_LEN=22, NEW_MSG_LEN=14, REF_LEN=8
 REF_LEN = Message_Tokenizer.MSG_LEN - Message_Tokenizer.NEW_MSG_LEN
 
 # REMOVED: Field indices now imported from lob.message_utils (line 50-55)

@@ -21,7 +21,8 @@ info = lambda *args: logger.info(' '.join((str(arg) for arg in args)))
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import repeat_book
 
-v = Vocab()
+# REMOVED: Global Vocab instance was causing token_mode issues
+# v = Vocab()  # DEPRECATED - pass Vocab explicitly to functions instead
 
 
 def get_encoder_key(field: str, token_mode: int) -> str:
@@ -114,7 +115,7 @@ def get_masked_idx(seq):
         seq = seq.reshape(-1, Message_Tokenizer.MSG_LEN)
     elif seq.ndim == 2:
         seq = seq.reshape(seq.shape[0], -1, Message_Tokenizer.MSG_LEN)
-    return np.argwhere(seq == v.MASK_TOK)
+    return np.argwhere(seq == Vocab.MASK_TOK)  # Use class constant instead of instance
 
 def get_field_from_idx(idx):
     """ Get the field of a given index (or indices) in a message
@@ -131,11 +132,17 @@ def get_masked_fields(inp_maybe_batched):
     mask_pos = get_masked_idx(inp_maybe_batched)
     return get_field_from_idx(mask_pos[..., -1])
 
-def get_valid_toks_for_field(fields):
+def get_valid_toks_for_field(fields, vocab: Vocab = None):
     """ Get the valid labels for given fields
+
+    Args:
+        fields: List of field names
+        vocab: Optional Vocab instance. If None, creates default Vocab(token_mode=24)
     """
+    if vocab is None:
+        vocab = Vocab()  # Default to 24-token mode
     return tuple(tuple(
-        v.DECODING[Message_Tokenizer.FIELD_ENC_TYPES[field]].keys())
+        vocab.DECODING[Message_Tokenizer.FIELD_ENC_TYPES[field]].keys())
           for field in fields)
 
 def get_valid_toks_for_input(inp_maybe_batched):
