@@ -737,3 +737,52 @@ v = Vocab(token_mode=token_mode)
 - `ca52653` refactor(es-trainer): auto-detect token_mode from checkpoint
 
 ---
+
+## 2026-01-08
+
+### ESTrainer Flax Model Integration for Token Generation
+
+#### Problem
+ESTrainer was generating orders with wrong size distribution (mean=5792 instead of ~100). The root cause was using the ES model wrapper for token generation instead of the original Flax model.
+
+#### Key Issues Fixed
+
+1. **Checkpoint Loading Format Mismatch**
+   - Orbax's `load_checkpoint()` expects different structure than OCDBT format
+   - Solution: Use `load_flax_checkpoint()` from `checkpoint_adapter.py` which uses tensorstore directly
+
+2. **Wrong n_fused_layers Default**
+   - `convert_flax_to_es()` used default `n_fused_layers=4`
+   - But checkpoint has `n_layers=24` (the actual fused layer count)
+   - Only 4 of 24 layers were converted → model broken
+   - Solution: Use `config.get('n_fused_layers', config.get('n_layers', 4))`
+
+3. **Wrong Input to RNN Model**
+   - Was passing 24 tokens (full message) to `apply_model()`
+   - Should pass only 1 token at a time (RNN hidden state carries context)
+   - 24 tokens → logits shape `(24, n_classes)` instead of `(1, n_classes)`
+   - Solution: `msg_hist_p[-1:]` instead of `msg_hist_p[-msg_len:]`
+
+4. **Array Shape in Concatenation**
+   - `fill_predicted_tok()` returns `(1,)` shaped array
+   - Wrapping with `jnp.array([...])` created `(1, 1)` shape
+   - Can't concatenate `(11999,)` with `(1, 1)`
+   - Solution: Use `next_token_p` directly (already `(1,)`)
+
+#### Results
+
+| Metric | Before | After | Target |
+|--------|--------|-------|--------|
+| Size mean | 5792 | 206.3 | ~167.6 |
+| Size median | 6228 | 93.0 | 100.0 |
+| Valid ratio | 54.4% | 100% | 100% |
+
+#### Key Takeaways
+
+1. **RNN Models Need Token-by-Token Input**: Hidden state carries sequence context; don't pass multiple tokens
+2. **Checkpoint Formats Vary**: OCDBT vs Orbax require different loading code
+3. **Check ES Param Count**: `Flax → ES` conversion should preserve param count (360M → 360M, not 108M)
+4. **vmap Shape Requirements**: Batched operations require consistent batch dimensions
+
+#### Commits
+- `e201b84` fix(es-trainer): use Flax model for token generation with correct token_mode
