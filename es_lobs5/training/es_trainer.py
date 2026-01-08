@@ -58,6 +58,11 @@ encoding = None
 get_best_bid_and_ask = None
 _all_noisers = None
 _ES_PaddedLobPredModel = None
+
+# Flax inference globals (lazy loaded)
+_flax_init_train_state = None
+_flax_load_checkpoint = None
+_flax_load_metadata = None
 _CommonParams = None
 _simple_es_tree_key = None
 _load_checkpoint_for_es = None
@@ -115,6 +120,17 @@ def _lazy_import_jaxlob():
         Message_Tokenizer = _Message_Tokenizer
         encoding = _encoding
         get_best_bid_and_ask = _get_best_bid_and_ask
+
+
+def _get_flax_loaders():
+    """Lazy load Flax model initialization functions (same as run_inference.py)."""
+    global _flax_init_train_state, _flax_load_checkpoint, _flax_load_metadata
+    if _flax_init_train_state is None:
+        from lob.init_train import init_train_state, load_checkpoint, load_metadata
+        _flax_init_train_state = init_train_state
+        _flax_load_checkpoint = load_checkpoint
+        _flax_load_metadata = load_metadata
+    return _flax_init_train_state, _flax_load_checkpoint, _flax_load_metadata
 
 
 # ============================================================================
@@ -593,6 +609,10 @@ class ESTrainer:
             config.token_mode = ckpt_token_mode
         print(f"[INIT] token_mode: {config.token_mode}")
 
+        # Initialize Flax model for inference (same code path as run_inference.py)
+        # This provides correct token generation - separate from ES params
+        self._init_flax_inference()
+
         # Initialize noiser for Policy
         self._init_noiser()
 
@@ -625,6 +645,66 @@ class ESTrainer:
         # ========================================================================
         print("[INIT] Building eval_batch function (compilation on first call)...")
         self._compiled_eval_batch = self._compile_eval_batch()
+
+    def _init_flax_inference(self):
+        """Initialize Flax model for inference (same code path as run_inference.py).
+
+        This loads the original Flax model and train_state, which are required for
+        using inference_no_errcorr._generate_msg() for token generation.
+
+        The ES-converted params in self.lobs5_init are ONLY used for ES gradient updates.
+        For inference/generation, we use the original Flax model.
+        """
+        config = self.config
+        init_train_state, load_checkpoint, load_metadata = _get_flax_loaders()
+
+        print(f"[INIT-FLAX] Loading Flax model from {config.lobs5_checkpoint}")
+
+        # Step 1: Load metadata (config) from checkpoint
+        args = load_metadata(config.lobs5_checkpoint)
+        token_mode = getattr(args, 'token_mode', 24)
+
+        # Step 2: Initialize vocabulary
+        from lob.encoding import Vocab
+        self.vocab = Vocab(token_mode=token_mode)
+        n_classes = len(self.vocab)
+
+        # Step 3: Get frozen params for model dimensions
+        fp = self.lobs5_init.frozen_params
+        msg_seq_len = fp.get('msg_seq_len', 500)
+        book_depth = fp.get('book_depth', 500)
+        book_dim = fp.get('d_book', 503)
+
+        # Step 4: Initialize Flax train_state and model class
+        self.flax_train_state, self.flax_model_cls, total_params = init_train_state(
+            args,
+            n_classes=n_classes,
+            seq_len=msg_seq_len,
+            book_dim=book_dim,
+            book_seq_len=book_depth,
+            train_size=1,  # dummy value for inference
+        )
+        print(f"[INIT-FLAX] Model parameters: {total_params:,}")
+
+        # Step 5: Load checkpoint into train_state
+        ckpt = load_checkpoint(
+            self.flax_train_state,
+            config.lobs5_checkpoint,
+            step=0,  # Load latest step
+            train=False,
+        )
+        self.flax_train_state = ckpt['model']
+
+        # Step 6: Instantiate model for inference
+        self.flax_model = self.flax_model_cls(training=False, step_rescale=1.0)
+        self.flax_batchnorm = getattr(args, 'batchnorm', False)
+
+        # Step 7: Pre-compute syntax validation matrix for token generation
+        from lob.validation_helpers import syntax_validation_matrix
+        self.syntax_valid_mask = syntax_validation_matrix(self.vocab)
+
+        print(f"[INIT-FLAX] Flax model loaded successfully")
+        print(f"[INIT-FLAX]   token_mode={token_mode}, batchnorm={self.flax_batchnorm}")
 
     def _init_noiser(self):
         """Initialize EGGROLL noiser for Policy.
@@ -817,25 +897,15 @@ class ESTrainer:
             print(f"[INIT-STATE] Replayed {n_replay} warmup messages")
 
         # 3. Build context tokens from replay_tokens (encoded by LOBSTER_Dataset)
-        msg_seq_len = self.lobs5_init.frozen_params.get('msg_seq_len', 500)
-        expected_context_len = msg_seq_len * config.token_mode
-
-        # replay_tokens is 2D (n_msgs, token_mode), flatten for context
+        # CRITICAL: Do NOT pad with zeros - zeros are MASK tokens which corrupt RNN hidden states!
+        # Instead, just use the actual warmup tokens and let simulate_episode() handle the warmup.
         warmup_tokens = self.replay_tokens[:n_replay]  # (n_replay, token_mode)
         msg_history = warmup_tokens.flatten()  # (n_replay * token_mode,)
 
-        # Pad or truncate to expected size
-        if len(msg_history) < expected_context_len:
-            # Pad with zeros at the beginning
-            msg_history = jnp.concatenate([
-                jnp.zeros(expected_context_len - len(msg_history), dtype=msg_history.dtype),
-                msg_history
-            ])
-        elif len(msg_history) > expected_context_len:
-            # Keep most recent tokens
-            msg_history = msg_history[-expected_context_len:]
+        # Store n_warmup_msgs for simulate_episode() to use
+        self._n_warmup_msgs = n_replay
 
-        print(f"[INIT-STATE] Context: {msg_history.shape} (warmup={n_replay}, expected={expected_context_len})")
+        print(f"[INIT-STATE] Context: {msg_history.shape} (warmup={n_replay} real messages, no zero padding)")
 
         return sim_state, msg_history
 
@@ -1106,6 +1176,16 @@ class ESTrainer:
         replay_tokens = self.replay_tokens
         replay_data_raw = self.replay_data_raw
         n_replay_msgs = replay_tokens.shape[0] if replay_tokens is not None else 0
+
+        # ========================================================================
+        # FLAX MODEL: Extract Flax model for correct token generation
+        # This uses the same code path as run_inference.py (verified correct)
+        # ========================================================================
+        flax_train_state = self.flax_train_state
+        flax_model = self.flax_model
+        flax_batchnorm = self.flax_batchnorm
+        syntax_valid_mask = self.syntax_valid_mask
+        import lob.validation_helpers as valh_module
         # ========================================================================
 
         # ========================================================================
@@ -1127,29 +1207,44 @@ class ESTrainer:
             return tree
         # ========================================================================
 
-        # Get ES model class
+        # Get ES model class (still used for world model)
         ES_PaddedLobPredModel = _get_es_model()
 
         # Initialize hidden states
+        # CRITICAL: Match parameter names from checkpoint metadata exactly!
+        # Checkpoint uses: n_layers (for fused), ssm_size_base (for SSM size)
+        ssm_size = fp.get('ssm_size_base', fp.get('ssm_size', 256))  # Try both keys
+        n_fused = fp.get('n_layers', fp.get('n_fused_layers', 4))    # Try both keys
+        conj_sym = fp.get('conj_sym', True)
+        d_model = fp.get('d_model', 256)
+        print(f"[HIDDEN-INIT] ssm_size={ssm_size}, conj_sym={conj_sym}, n_fused={n_fused}, d_model={d_model}")
+
+        # World model still uses ES hidden states (for background generation)
         hiddens_world = ES_PaddedLobPredModel.initialize_carry(
             batch_size=1,
-            ssm_size=fp.get('ssm_size', 256),
+            ssm_size=ssm_size,  # Pass full ssm_size - initialize_carry handles conj_sym
             n_message_layers=fp.get('n_message_layers', 2),
             n_book_pre_layers=fp.get('n_book_pre_layers', 1),
             n_book_post_layers=fp.get('n_book_post_layers', 1),
-            n_fused_layers=fp.get('n_fused_layers', 4),
-            d_model=fp.get('d_model', 256),
-            conj_sym=fp.get('conj_sym', True),
+            n_fused_layers=n_fused,
+            d_model=d_model,
+            conj_sym=conj_sym,
         )
-        hiddens_policy = ES_PaddedLobPredModel.initialize_carry(
-            batch_size=1,
-            ssm_size=fp.get('ssm_size', 256),
+
+        # ========================================================================
+        # FLAX MODEL: Policy uses Flax model hidden states (same as inference)
+        # NOTE: Flax model expects hidden_size = ssm_size // 2 when conj_sym=True
+        # This matches inference_no_errcorr.py line 1179-1185
+        # ========================================================================
+        hidden_size_policy = ssm_size // (2 if conj_sym else 1)
+        hiddens_policy = flax_model.initialize_carry(
+            1,  # batch_size
+            hidden_size=hidden_size_policy,
             n_message_layers=fp.get('n_message_layers', 2),
             n_book_pre_layers=fp.get('n_book_pre_layers', 1),
             n_book_post_layers=fp.get('n_book_post_layers', 1),
-            n_fused_layers=fp.get('n_fused_layers', 4),
-            d_model=fp.get('d_model', 256),
-            conj_sym=fp.get('conj_sym', True),
+            n_fused_layers=n_fused,
+            h_size_ema=ssm_size,  # Full size for EMA
         )
 
         # Message length based on token mode
@@ -1356,44 +1451,45 @@ class ESTrainer:
             # Using T=1.0 (standard sampling) as default
             temperature = getattr(config, 'temperature', 1.0)
 
-            def sample_policy_token(token_carry, token_pos):
-                """Sample next token with field-aware masking and temperature.
+            def sample_policy_token_flax(token_carry, token_pos):
+                """Sample next token using FLAX model (same as run_inference.py).
+
+                This replaces the ES model path with the verified-correct Flax path.
+                Uses valh.apply_model() and valh.fill_predicted_tok() for proper
+                token generation with syntax validation.
 
                 Args:
                     token_carry: (key, msg_history, hiddens)
                     token_pos: Current position in 24-token message (0-23)
-
-                The field mask ensures tokens are only sampled from valid ranges:
-                - pos 0 (event_type): tokens 1004-1007
-                - pos 1 (direction): tokens 2110-2111
-                - pos 2 (price_sign): tokens 2108-2109
-                - etc.
-
-                Temperature < 1.0 sharpens the distribution (more deterministic)
-                Temperature = 1.0 is standard sampling
-                Temperature > 1.0 flattens the distribution (more random)
                 """
                 key_p, msg_hist_p, hidden_p = token_carry
                 key_p, sample_key_p = jax.random.split(key_p)
 
-                hidden_p, log_probs_p = ES_PaddedLobPredModel._forward_step(
-                    policy_common_params, hidden_p, msg_hist_p[-msg_len:], book_feat[None, :]
+                # Get syntax validation mask for current token position
+                valid_mask = valh_module.get_valid_mask(syntax_valid_mask, token_pos)
+
+                # Use Flax model (same as inference_no_errcorr._generate_token)
+                hidden_p, logits = valh_module.apply_model(
+                    hidden_p,
+                    msg_hist_p[-msg_len:],  # last msg_len tokens
+                    book_feat[None, :],      # book features
+                    flax_train_state,
+                    flax_model,
+                    flax_batchnorm,
+                    False,  # shift_start
                 )
-                hidden_p = jax.tree.map(lambda h: h[:, -1:, :], hidden_p)
+                logits = logits[0]  # Remove batch dimension
 
-                log_probs_p = jnp.nan_to_num(log_probs_p, nan=-1e9, posinf=1e9, neginf=-1e9)
+                # Apply syntax validation mask (same as inference)
+                logits = valh_module.filter_valid_pred(logits, valid_mask)
 
-                # Apply field-aware mask: add -inf to invalid token positions
-                field_mask = field_masks[token_pos]
-                masked_log_probs = log_probs_p[-1] + field_mask
+                # Sample next token (same as inference)
+                # sample_top_n=-1 means sample from full distribution
+                next_token_p = valh_module.fill_predicted_tok(
+                    logits, -1, jnp.array([sample_key_p])
+                )
 
-                # Apply temperature scaling to sharpen/flatten the distribution
-                # Temperature < 1 makes high-prob tokens more likely (sharper)
-                # Temperature > 1 makes distribution more uniform (flatter)
-                scaled_log_probs = masked_log_probs / temperature
-
-                next_token_p = jax.random.categorical(sample_key_p, scaled_log_probs)
-
+                # Update message history
                 msg_hist_p = jnp.concatenate([msg_hist_p[1:], jnp.array([next_token_p])])
 
                 return (key_p, msg_hist_p, hidden_p), next_token_p
@@ -1406,8 +1502,9 @@ class ESTrainer:
                 maybe_pvary_tree(hiddens_policy),
             )
             # Pass token positions (0-23) as xs to enable field-aware masking
+            # NOTE: Using sample_policy_token_flax for correct token generation
             (key_policy, msg_history, hiddens_policy), policy_msg = jax.lax.scan(
-                sample_policy_token,
+                sample_policy_token_flax,  # FLAX model path (verified correct)
                 policy_token_init,
                 jnp.arange(msg_len, dtype=jnp.int32),
                 length=msg_len,

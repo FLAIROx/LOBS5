@@ -632,7 +632,8 @@ def _infer_ssm_size(params: Dict, config: Dict) -> int:
         # With conj_sym=True, hidden_size = P, so ssm_size = 2*P for compatibility
         return P * 2
     except (KeyError, AttributeError):
-        return config.get('ssm_size', 256)
+        # Try ssm_size_base first (from LOBS5 checkpoint), then ssm_size
+        return config.get('ssm_size_base', config.get('ssm_size', 256))
 
 
 def _build_frozen_params(config: Dict, es_params: Dict) -> Dict:
@@ -654,7 +655,8 @@ def _build_frozen_params(config: Dict, es_params: Dict) -> Dict:
     # Extract config values
     d_model = config.get('d_model', 256)
     n_message_layers = config.get('n_message_layers', config.get('n_layers', 2))
-    n_fused_layers = config.get('n_fused_layers', 4)
+    # CRITICAL: n_fused_layers may be stored as 'n_layers' in checkpoint metadata
+    n_fused_layers = config.get('n_fused_layers', config.get('n_layers', 4))
     n_book_pre_layers = config.get('n_book_pre_layers', 1)
     n_book_post_layers = config.get('n_book_post_layers', 1)
     ssm_size = _infer_ssm_size(es_params, config)
@@ -717,15 +719,18 @@ def _build_frozen_params(config: Dict, es_params: Dict) -> Dict:
         fused_encoder_fp[f'layer_{i}'] = build_layer_frozen_params()
 
     # Full nested frozen_params structure
+    # Include both new and legacy key names for compatibility
     return {
         'd_output': d_output,
         'd_model': d_model,
         'd_book': d_book,
         'n_message_layers': n_message_layers,
         'n_fused_layers': n_fused_layers,
+        'n_layers': n_fused_layers,  # Legacy alias for n_fused_layers
         'n_book_pre_layers': n_book_pre_layers,
         'n_book_post_layers': n_book_post_layers,
         'ssm_size': ssm_size,
+        'ssm_size_base': ssm_size,  # Legacy alias for ssm_size
         'conj_sym': conj_sym,
         'mode': config.get('mode', 'ema'),
         # Runtime configuration from checkpoint metadata
