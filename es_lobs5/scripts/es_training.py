@@ -36,7 +36,8 @@ def main():
     start_time = time.time()
 
     # Parse arguments using ESTrainer's config parser
-    args = create_es_config()
+    parser = create_es_config()
+    args = parser.parse_args()
 
     print("=" * 60)
     print(" ES Training - LOBS5")
