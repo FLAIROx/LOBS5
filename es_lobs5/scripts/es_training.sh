@@ -86,7 +86,7 @@ TASK="${TASK:-sell}"
 TASK_SIZE="${TASK_SIZE:-500}"
 
 # Wandb
-WANDB_PROJECT="${WANDB_PROJECT:-es-lobs5-production}"
+WANDB_PROJECT="${WANDB_PROJECT:-es-lobs5}"
 WANDB_ENTITY="${WANDB_ENTITY:-kang-oxford}"
 
 # Checkpointing

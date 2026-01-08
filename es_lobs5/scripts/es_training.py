@@ -24,6 +24,10 @@ import time
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 
+# WandB configuration (must be set before wandb import)
+os.environ["WANDB_MODE"] = "online"
+os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
+os.environ["WANDB_INSECURE_DISABLE_SSL"] = "True"
 import wandb
 from es_lobs5.training.es_trainer import ESTrainer, create_es_config
 
@@ -42,6 +46,8 @@ def main():
     print(f"Epochs: {args.n_epochs}")
     print(f"Perturbations: {args.n_perturbations}")
     print(f"Steps/Episode: {args.n_steps}")
+    print(f"Warmup msgs: {getattr(args, 'n_warmup_msgs', 500)}")
+    print(f"BG msgs/step: {getattr(args, 'background_msgs_per_step', 10)}")
     print(f"Noiser: {args.noiser}")
     print(f"Sigma: {args.sigma}, LR: {args.lr}")
     print(f"Wandb: {args.wandb_project or 'disabled'}")
