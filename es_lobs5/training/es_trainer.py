@@ -118,14 +118,17 @@ def _lazy_import_jaxlob():
 
 
 # ============================================================================
-# Import shared utilities from lob/inference for code reuse
+# Import shared utilities from lob/ for code reuse
 # ============================================================================
 from lob.validation_helpers import syntax_validation_matrix
 from lob.encoding import Vocab
-from lob.inference_no_errcorr import (
+# Import lightweight message utils (avoids heavy gymnax_exchange imports)
+from lob.message_utils import (
     msg_to_jnp,              # Replaces decoded_msg_to_jaxlob_format
     msgs_to_jnp,             # Replaces vmap version
     construct_sim_msg,       # Replaces inline construction in get_sim_msg_es
+    construct_dummy_sim_msg, # NOOP message fallback
+    ORDER_ID_i, EVENT_TYPE_i, DIRECTION_i, SIZE_i, TIMEs_i, TIMEns_i,  # Field indices
 )
 
 # ============================================================================

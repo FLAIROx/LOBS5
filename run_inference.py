@@ -78,7 +78,7 @@ if __name__ == "__main__":
     parser.add_argument('--test_split', type=float, default=0.1, help='Which test split to use')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for inference')
     parser.add_argument('--n_sequences', type=int, default=1024, help='Number of sequences to generate')
-    parser.add_argument('--n_cond_msgs', type=int, default=500, help='Number of conditional messages (0 for unconditional)')
+    parser.add_argument('--n_cond_msgs', type=int, default=0, help='Number of conditional messages (0 for unconditional)')
     # Add custom paths for Isambard/custom runs
     parser.add_argument('--data_dir', type=str, default=None, help='Custom data directory')
     parser.add_argument('--ckpt_path', type=str, default=None, help='Custom checkpoint path')

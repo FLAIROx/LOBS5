@@ -46,23 +46,16 @@ import gymnax_exchange.jaxob.jaxob_constants as cst
 import gymnax_exchange.jaxob.JaxOrderBookArrays as job
 # from gym_exchange.environment.base_env.assets.action import OrderIdGenerator
 
+# Import lightweight message utilities (to avoid circular deps)
+from lob.message_utils import (
+    msg_to_jnp, msgs_to_jnp, construct_sim_msg, construct_dummy_sim_msg,
+    ORDER_ID_i, EVENT_TYPE_i, DIRECTION_i, PRICE_ABS_i, PRICE_i, SIZE_i,
+    DTs_i, DTns_i, TIMEs_i, TIMEns_i, PRICE_REF_i, SIZE_REF_i, TIMEs_REF_i, TIMEns_REF_i,
+)
+
 REF_LEN = Message_Tokenizer.MSG_LEN - Message_Tokenizer.NEW_MSG_LEN
 
-# indices for DECODED message fields
-ORDER_ID_i = 0
-EVENT_TYPE_i = 1
-DIRECTION_i = 2
-PRICE_ABS_i = 3
-PRICE_i = 4
-SIZE_i = 5
-DTs_i = 6
-DTns_i = 7
-TIMEs_i = 8
-TIMEns_i = 9
-PRICE_REF_i = 10
-SIZE_REF_i = 11
-TIMEs_REF_i = 12
-TIMEns_REF_i = 13
+# REMOVED: Field indices now imported from lob.message_utils (line 50-55)
 
 l2_state_n = 10
 
@@ -108,27 +101,7 @@ def df_msgs_to_jnp(m_df: pd.DataFrame) -> jnp.ndarray:
     mJNP = jnp.array(m_df)
     return mJNP
 
-@jax.jit
-def msg_to_jnp(
-        m_raw: jax.Array,
-    ) -> jax.Array:
-    """ Select only the relevant columns from the raw messages
-        and rearrange for simulator.
-    """
-    m = m_raw.copy()
-    
-    return jnp.array([
-        m[EVENT_TYPE_i],
-        (m[DIRECTION_i] * 2) - 1,
-        m[SIZE_i],
-        m[PRICE_ABS_i],
-        0, # TradeID
-        m[ORDER_ID_i],
-        m[TIMEs_i],
-        m[TIMEns_i],
-    ])
-
-msgs_to_jnp = jax.jit(jax.vmap(msg_to_jnp))
+# REMOVED: msg_to_jnp and msgs_to_jnp now imported from lob.message_utils (line 50-52)
 
 # # NOTE: cannot jit due to side effects --> resolve later
 # @jax.jit
@@ -343,37 +316,7 @@ def get_sim_msg(
         sim_msg, msg_decoded
     )
 
-# event_type, side, quantity, price,order_id,trade(r)_id, time_s, time_ns
-@jax.jit
-def construct_sim_msg(
-        event_type: int,
-        side: int,
-        quantity: int,
-        price: int,
-        order_id: int,
-        time_s: int,
-        time_ns: int,
-        trader_id: int = -88,  # Optional trader_id for multi-agent scenarios
-    ):
-    """ Construct JaxLOB simulator message.
-
-    Args:
-        trader_id: Trader ID for tracking (default -88 for single agent)
-    """
-    return jnp.array([
-        event_type,
-        (side * 2) - 1,
-        quantity,
-        price,
-        order_id,
-        trader_id,  # Now parameterized
-        time_s,
-        time_ns,
-    ], dtype=jnp.int32)
-
-@jax.jit
-def construct_dummy_sim_msg(*args) -> jax.Array:
-    return jnp.ones((8,), dtype=jnp.int32) * (-1)
+# REMOVED: construct_sim_msg and construct_dummy_sim_msg now imported from lob.message_utils (line 51-52)
 
 @jax.jit
 def construct_raw_msg(

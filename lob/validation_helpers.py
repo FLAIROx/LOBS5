@@ -52,6 +52,10 @@ def syntax_validation_matrix(v = None):
         v = Vocab()
     encoder = v.ENCODING
 
+    # CRITICAL: Sync Message_Tokenizer class state with Vocab token_mode
+    # This ensures MSG_LEN and get_field_from_idx() use correct token mode
+    Message_Tokenizer.set_token_mode(v.token_mode)
+
     idx = []
     for i in range(Message_Tokenizer.MSG_LEN):
         field = Message_Tokenizer.get_field_from_idx(i)
