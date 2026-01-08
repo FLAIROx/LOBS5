@@ -494,8 +494,9 @@ class Message_Tokenizer:
     TOK_LENS_22 = np.array((1, 1, 2, 1, 1, 3, 2, 3, 2, 1, 2, 3))  # 22 tokens total
     TOK_LENS_24 = np.array((1, 1, 2, 2, 1, 3, 2, 3, 2, 2, 2, 3))  # 24 tokens total
 
-    # Default to 22-token mode (can be overridden by set_token_mode)
-    TOK_LENS = TOK_LENS_22
+    # Default to 24-token mode (can be overridden by set_token_mode or __init__)
+    # Note: Class-level state is DEPRECATED - prefer using instance-level state
+    TOK_LENS = TOK_LENS_24  # Changed default from 22 to 24
     TOK_DELIM = np.cumsum(TOK_LENS[:-1])
     MSG_LEN = np.sum(TOK_LENS)
     # encoded message length: total length - length of reference fields
@@ -505,11 +506,23 @@ class Message_Tokenizer:
     @classmethod
     def set_token_mode(cls, token_mode):
         """
-        Set the token mode for Message_Tokenizer.
+        DEPRECATED: Set the token mode for Message_Tokenizer class state.
+
+        This method modifies global class state and is DEPRECATED.
+        Prefer using instance-based approach instead:
+
+            tokenizer = Message_Tokenizer(token_mode=24)
 
         Args:
-            token_mode: 22 (default, base-10000 size) or 24 (base-100 size)
+            token_mode: 22 (base-10000 size) or 24 (base-100 size)
         """
+        import warnings
+        warnings.warn(
+            "Message_Tokenizer.set_token_mode() modifies global class state and is deprecated. "
+            "Use Message_Tokenizer(token_mode=N) to create instances instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
         assert token_mode in [22, 24], f"token_mode must be 22 or 24, got {token_mode}"
         if token_mode == 22:
             cls.TOK_LENS = cls.TOK_LENS_22
@@ -576,11 +589,50 @@ class Message_Tokenizer:
             counter += n_toks
         return col_idx_by_encoder
 
+    def _generate_col_idx_by_encoder_for_instance(self):
+        """Instance method version that uses self.tok_lens instead of class TOK_LENS."""
+        col_idx_by_encoder = {}
+        counter = 0
+        for n_toks, (col, enc_type) in zip(
+            self.tok_lens,  # Use instance tok_lens
+            self.FIELD_ENC_TYPES.items()):
+            add_vals = list(range(counter, counter + n_toks))
+            try:
+                col_idx_by_encoder[enc_type].extend(add_vals)
+            except KeyError:
+                col_idx_by_encoder[enc_type] = add_vals
+            counter += n_toks
+        return col_idx_by_encoder
+
     #col_idx_by_encoder = _generate_col_idx_by_encoder.__func__()()
 
-    def __init__(self) -> None:
-        self.col_idx_by_encoder = self._generate_col_idx_by_encoder()
-        pass
+    def __init__(self, token_mode: int = 24) -> None:
+        """Initialize Message_Tokenizer with specific token mode.
+
+        This is the PREFERRED way to use Message_Tokenizer. Creating instances
+        allows multiple token modes to coexist without global state conflicts.
+
+        Args:
+            token_mode: 22 (base-10000 size) or 24 (base-100 size, default)
+
+        Example:
+            >>> tokenizer = Message_Tokenizer(token_mode=24)
+            >>> print(tokenizer.msg_len)  # 24
+            >>> print(tokenizer.tok_lens[3])  # 2 (size field uses 2 tokens)
+        """
+        assert token_mode in [22, 24], f"token_mode must be 22 or 24, got {token_mode}"
+
+        # Instance-level state (independent of class-level state)
+        self.token_mode = token_mode
+        self.tok_lens = self.TOK_LENS_24 if token_mode == 24 else self.TOK_LENS_22
+        self.tok_delim = np.cumsum(self.tok_lens[:-1])
+        self.msg_len = int(np.sum(self.tok_lens))
+        self.new_msg_len = self.msg_len - sum(
+            self.tok_lens[i] for i, f in enumerate(self.FIELDS) if f.endswith('_ref')
+        )
+
+        # Legacy attribute
+        self.col_idx_by_encoder = self._generate_col_idx_by_encoder_for_instance()
 
     def validate(self, toks, vocab):
         """ checks if toks is syntactically AND semantically valid message
