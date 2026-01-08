@@ -132,6 +132,14 @@ from lob.message_utils import (
 )
 
 # ============================================================================
+# Import inference module for code reuse (run_inference.py code path)
+# This ensures ESTrainer uses the SAME data loading, encoding, and generation
+# code as the validated run_inference.py
+# ============================================================================
+from lob import inference_no_errcorr as inference
+from lob.lobster_dataloader import LOBSTER_Dataset
+
+# ============================================================================
 # Field-Aware Token Masking for Constrained Decoding (24-token mode)
 # ============================================================================
 # Direct implementation for 24-token vocabulary structure:
@@ -268,9 +276,9 @@ def create_es_config():
     parser.add_argument('--tick_size', type=int, default=100,
                         help='Tick size in cents')
 
-    # Token mode
-    parser.add_argument('--token_mode', type=int, default=22, choices=[22, 24],
-                        help='Token mode: 22 (single token size) or 24 (base-100 size)')
+    # Token mode (auto-detected from checkpoint if not specified)
+    parser.add_argument('--token_mode', type=int, default=24, choices=[22, 24],
+                        help='Token mode: 22 (single token size) or 24 (base-100 size). Auto-detected from checkpoint.')
 
     # Background model configuration
     parser.add_argument('--background_mode', type=str, default='world_model',
@@ -575,6 +583,16 @@ class ESTrainer:
         load_checkpoint_for_es = _get_checkpoint_loader()
         self.lobs5_init, self.es_tree_key = load_checkpoint_for_es(config.lobs5_checkpoint)
 
+        # Auto-detect token_mode from checkpoint (like run_inference.py)
+        # This overrides the command-line default to ensure correct encoding/decoding
+        ckpt_token_mode = self.lobs5_init.frozen_params.get('token_mode', None)
+        if ckpt_token_mode is not None:
+            if config.token_mode != ckpt_token_mode:
+                print(f"[INIT] WARNING: Command-line token_mode={config.token_mode} differs from checkpoint={ckpt_token_mode}")
+                print(f"[INIT] Using checkpoint token_mode={ckpt_token_mode} for consistency")
+            config.token_mode = ckpt_token_mode
+        print(f"[INIT] token_mode: {config.token_mode}")
+
         # Initialize noiser for Policy
         self._init_noiser()
 
@@ -672,56 +690,79 @@ class ESTrainer:
         print(f"[INIT] token_mode: {self.config.token_mode}")
 
     def _init_historical_replay_data(self):
-        """Pre-load historical data for replay mode."""
+        """Pre-load historical data for replay mode using LOBSTER_Dataset.
+
+        REFACTORED: Uses inference.get_dataset() for consistent data loading.
+        This ensures the same code path as run_inference.py, guaranteeing:
+        - Correct token_mode (24-token) encoding
+        - Proper raw message format for simulation
+        - Consistent book initialization
+        """
         if self.config.background_mode != 'historical_replay':
             self.replay_data_raw = None
             self.replay_tokens = None
+            self.replay_dataset = None
             return
 
         if self.config.replay_data_path is None:
             raise ValueError("--replay_data_path required when background_mode=historical_replay")
 
         import os
-        import glob
-        import numpy as np
-        from lob.encoding import encode_msgs
 
         data_path = self.config.replay_data_path
-        message_files = sorted(glob.glob(os.path.join(data_path, '*message*proc.npy')))
 
-        if len(message_files) == 0:
-            raise FileNotFoundError(f"No message files found in {data_path}")
+        # Use inference.get_dataset() - SAME code path as run_inference.py
+        # This ensures consistent token_mode handling
+        n_warmup = getattr(self.config, 'n_warmup_msgs', 500)
+        n_sim = getattr(self.config, 'n_sim_steps', 1000)
 
-        # Use fixed file_idx if specified, otherwise random
+        self.replay_dataset = inference.get_dataset(
+            data_dir=data_path,
+            n_messages=n_warmup,  # warmup messages
+            n_eval_messages=n_sim + 500,  # simulation messages + buffer
+            token_mode=self.config.token_mode,
+            test_split=0.0,  # Use all data for ES training
+        )
+
+        print(f"[INIT-REPLAY] Loaded dataset with {len(self.replay_dataset)} files")
+        print(f"[INIT-REPLAY] token_mode={self.config.token_mode}, n_messages={n_warmup + n_sim + 500}")
+
+        # Select file: fixed or random
+        import numpy as np
         if hasattr(self.config, 'file_idx') and self.config.file_idx is not None:
-            file_idx = self.config.file_idx % len(message_files)
+            file_idx = self.config.file_idx % len(self.replay_dataset)
         else:
-            file_idx = np.random.randint(0, len(message_files))
-        selected_file = message_files[file_idx]
+            file_idx = np.random.randint(0, len(self.replay_dataset))
 
-        self.replay_data_date = os.path.basename(selected_file).split('_')[1]
+        self.replay_file_idx = file_idx
+
+        # Get data from dataset (consistent with run_inference.py)
+        # Returns: (X_tokens_masked, y, book_data, X_raw, book_l2_init)
+        data_tuple = self.replay_dataset[file_idx]
+
+        # Unpack based on return format
+        # With return_raw_msgs=True and use_book_data=True:
+        # (tokens, y, book, raw_msgs, book_l2_init)
+        msg_tokens, _, book_data, msg_raw, book_l2_init = data_tuple
+
+        # Store for use in simulation
+        # Note: msg_tokens is already encoded with correct token_mode
+        self.replay_tokens = jnp.array(msg_tokens.reshape(-1))
+        self.replay_data_raw = jnp.array(msg_raw)
+        self.init_book_l2 = jnp.array(book_l2_init)
+
+        # Extract date from dataset files for logging
+        from glob import glob
+        msg_files = sorted(glob(os.path.join(data_path, '*message*.npy')))
+        if msg_files:
+            self.replay_data_date = os.path.basename(msg_files[file_idx]).split('_')[1]
+        else:
+            self.replay_data_date = 'unknown'
         self.replay_data_dir = data_path
 
-        msg_data = np.load(selected_file)
-
-        # Log data format using standard utilities
-        format_info = detect_data_format(selected_file, msg_data, self.config.token_mode)
-        log_data_format(format_info, prefix="[INIT-REPLAY]")
-
-        # Auto-detect data format: preproc (N, 14) vs encoded (N, 24)
-        if format_info['format_type'] == 'preproc':
-            # Preproc format: need to encode to tokens
-            print(f"[INIT-REPLAY] Action: encoding to {self.config.token_mode}-token format...")
-            self.replay_tokens = encode_msgs(msg_data, self.encoder, token_mode=self.config.token_mode)
-            self.replay_data_raw = jnp.array(msg_data)
-        elif format_info['format_type'] == 'encoded':
-            # Encoded format: already tokenized, use directly
-            print(f"[INIT-REPLAY] Action: using tokens directly (already encoded)")
-            self.replay_tokens = jnp.array(msg_data)
-            # For raw data, we need to decode back (or leave as None)
-            self.replay_data_raw = None  # Not available in encoded format
-        else:
-            raise ValueError(f"Unknown data format: expected 14 (preproc) or {self.config.token_mode} (encoded), got {format_info['n_cols']} columns")
+        print(f"[INIT-REPLAY] File {file_idx}: date={self.replay_data_date}")
+        print(f"[INIT-REPLAY] Raw msgs shape: {msg_raw.shape}, Tokens shape: {msg_tokens.shape}")
+        print(f"[INIT-REPLAY] Init book L2 shape: {book_l2_init.shape}")
 
     def _shard_to_mesh(self, x):
         """Shard array across devices along 'data' axis.
@@ -738,112 +779,56 @@ class ESTrainer:
         return jax.device_put(x, NamedSharding(self._mesh, P('data')))
 
     def _create_initial_sim_state(self) -> Tuple['LobState', jnp.ndarray]:
-        """
-        Load initial JaxLOB state and message history from LOBSTER data.
+        """Load initial JaxLOB state and message history.
+
+        REFACTORED: Uses data already loaded by _init_historical_replay_data().
+        This eliminates duplicate file loading and ensures consistent data handling.
 
         Returns:
-            (sim_state, msg_history)
+            (sim_state, msg_history): Initial simulation state and token context
         """
-        import numpy as np
-        import glob
-        from lob.encoding import encode_msgs
-
         config = self.config
 
-        # Determine data directory
-        if hasattr(config, 'data_dir') and config.data_dir:
-            data_dir = config.data_dir
-        elif config.background_mode == 'historical_replay' and config.replay_data_path:
-            data_dir = config.replay_data_path
-        else:
-            data_dir = "/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022"
+        # Ensure replay data is initialized
+        if not hasattr(self, 'init_book_l2') or self.init_book_l2 is None:
+            # Fallback: initialize replay data now
+            self._init_historical_replay_data()
 
-        # Find data files
-        orderbook_files = sorted(glob.glob(f"{data_dir}/*orderbook_10_proc.npy"))
-        message_files = sorted(glob.glob(f"{data_dir}/*message_10_proc.npy"))
+        # 1. Initialize JaxLOB with L2 book from dataset
+        # init_book_l2 was set by _init_historical_replay_data() using LOBSTER_Dataset
+        sim_state = self.sim.reset(self.init_book_l2)
+        print(f"[INIT-STATE] Initialized JaxLOB with L2 book shape: {self.init_book_l2.shape}")
 
-        if len(orderbook_files) == 0:
-            raise FileNotFoundError(f"No orderbook files found in {data_dir}")
-
-        # Select data file
-        if config.background_mode == 'historical_replay' and hasattr(self, 'replay_data_date'):
-            matching_files = [f for f in orderbook_files if self.replay_data_date in f]
-            if len(matching_files) == 0:
-                raise FileNotFoundError(f"No orderbook file for date {self.replay_data_date}")
-            file_idx = orderbook_files.index(matching_files[0])
-        elif hasattr(config, 'file_idx'):
-            file_idx = config.file_idx % len(orderbook_files)
-        else:
-            file_idx = np.random.randint(0, len(orderbook_files))
-
-        # Load data
-        ob = np.load(orderbook_files[file_idx])
-        msg = np.load(message_files[file_idx])
-
-        # Log data format using standard utilities
-        ob_format_info = detect_data_format(orderbook_files[file_idx], ob, self.config.token_mode)
-        msg_format_info = detect_data_format(message_files[file_idx], msg, self.config.token_mode)
-        log_data_format(ob_format_info, prefix="[INIT-STATE] Orderbook")
-        log_data_format(msg_format_info, prefix="[INIT-STATE] Message")
-
-        # Auto-detect data format: preproc (N, 14) vs encoded (N, 24)
-        if msg_format_info['format_type'] == 'unknown':
-            raise ValueError(f"Unknown data format: expected 14 (preproc) or {self.config.token_mode} (encoded), got {msg_format_info['n_cols']} columns")
-
-        if msg_format_info['format_type'] == 'encoded':
-            # Need to decode for JaxLOB warmup
-            from lob.encoding import decode_msgs, Vocab
-            v = Vocab(token_mode=self.config.token_mode)
-            print(f"[INIT-STATE] Action: decoding {msg_format_info['n_cols']}-token format for JaxLOB warmup...")
-            msg_decoded = np.array(decode_msgs(msg, v.ENCODING, token_mode=self.config.token_mode))
-            msg_raw = msg_decoded
-            msg_tokens = msg  # Already tokenized
-        else:
-            # Preproc format
-            print(f"[INIT-STATE] Action: using raw data, will encode to {self.config.token_mode}-token format")
-            msg_raw = msg
-            msg_tokens = None  # Will encode below
-
-        # Initialize L2 book
-        init_l2_book = jnp.array(ob[0, 3:43], dtype=jnp.int32)
-        sim_state = self.sim.reset(init_l2_book)
-
-        # Replay warmup messages to initialize order book state
-        n_init_background_msgs = getattr(self.config, 'n_warmup_msgs', 500)
-        n_replay = min(n_init_background_msgs, len(msg_raw))
-        replay_msgs_raw = msg_raw[:n_replay]
-        replay_jaxlob = msgs_to_jnp(replay_msgs_raw)
-        sim_state = self.sim.process_orders_array(sim_state, replay_jaxlob)
-
-        # Encode messages as context
-        # msg_seq_len from frozen_params determines expected context size
-        msg_seq_len = self.lobs5_init.frozen_params.get('msg_seq_len', 500)
-        expected_context_len = msg_seq_len * self.config.token_mode
+        # 2. Warmup: replay messages to initialize order book state
+        n_warmup = getattr(config, 'n_warmup_msgs', 500)
+        n_replay = min(n_warmup, len(self.replay_data_raw))
 
         if n_replay > 0:
-            if msg_tokens is not None:
-                # Already have tokens from encoded format
-                tokens = msg_tokens[:n_replay]
-            else:
-                # Need to encode from preproc format
-                tokens = encode_msgs(replay_msgs_raw, self.encoder, token_mode=self.config.token_mode)
-            msg_history = tokens.flatten()
-            # Pad or truncate to expected size
-            if len(msg_history) < expected_context_len:
-                # Pad with zeros at the beginning
-                msg_history = jnp.concatenate([
-                    jnp.zeros(expected_context_len - len(msg_history), dtype=msg_history.dtype),
-                    msg_history
-                ])
-            elif len(msg_history) > expected_context_len:
-                # Keep most recent tokens
-                msg_history = msg_history[-expected_context_len:]
-        else:
-            # No warmup - initialize with zeros
-            msg_history = jnp.zeros(expected_context_len, dtype=jnp.int32)
+            replay_msgs_raw = self.replay_data_raw[:n_replay]
+            replay_jaxlob = msgs_to_jnp(replay_msgs_raw)
+            sim_state = self.sim.process_orders_array(sim_state, replay_jaxlob)
+            print(f"[INIT-STATE] Replayed {n_replay} warmup messages")
 
-        print(f"  n_init_background_msgs (warmup): {n_replay}")
-        print(f"  context_size: {msg_history.shape} (expected: {expected_context_len})")
+        # 3. Build context tokens from replay_tokens (already encoded by LOBSTER_Dataset)
+        msg_seq_len = self.lobs5_init.frozen_params.get('msg_seq_len', 500)
+        expected_context_len = msg_seq_len * config.token_mode
+
+        # replay_tokens is already flattened (from _init_historical_replay_data)
+        context_tokens = n_replay * config.token_mode
+        msg_history = self.replay_tokens[:context_tokens]
+
+        # Pad or truncate to expected size
+        if len(msg_history) < expected_context_len:
+            # Pad with zeros at the beginning
+            msg_history = jnp.concatenate([
+                jnp.zeros(expected_context_len - len(msg_history), dtype=msg_history.dtype),
+                msg_history
+            ])
+        elif len(msg_history) > expected_context_len:
+            # Keep most recent tokens
+            msg_history = msg_history[-expected_context_len:]
+
+        print(f"[INIT-STATE] Context: {msg_history.shape} (warmup={n_replay}, expected={expected_context_len})")
 
         return sim_state, msg_history
 
