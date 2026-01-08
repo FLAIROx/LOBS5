@@ -445,8 +445,9 @@ def convert_flax_to_es(flax_params: Dict, config: Dict) -> Dict:
         ES-compatible full model params dict
     """
     # Extract config values with defaults
+    # Note: In LOBS5, n_layers refers to the fused S5 layers, so use it as fallback
     n_message_layers = config.get('n_message_layers', config.get('n_layers', 2))
-    n_fused_layers = config.get('n_fused_layers', 4)
+    n_fused_layers = config.get('n_fused_layers', config.get('n_layers', 4))
     n_book_pre_layers = config.get('n_book_pre_layers', 1)
     n_book_post_layers = config.get('n_book_post_layers', 1)
     activation = config.get('activation', 'half_glu1')

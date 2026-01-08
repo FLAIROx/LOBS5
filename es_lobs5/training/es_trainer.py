@@ -654,9 +654,13 @@ class ESTrainer:
 
         The ES-converted params in self.lobs5_init are ONLY used for ES gradient updates.
         For inference/generation, we use the original Flax model.
+
+        NOTE: We use load_flax_checkpoint() from checkpoint_adapter instead of
+        load_checkpoint() from lob.init_train, because the checkpoint is in OCDBT
+        format which Orbax's PyTreeCheckpointHandler doesn't recognize properly.
         """
         config = self.config
-        init_train_state, load_checkpoint, load_metadata = _get_flax_loaders()
+        init_train_state, _, load_metadata = _get_flax_loaders()
 
         print(f"[INIT-FLAX] Loading Flax model from {config.lobs5_checkpoint}")
 
@@ -675,7 +679,7 @@ class ESTrainer:
         book_depth = fp.get('book_depth', 500)
         book_dim = fp.get('d_book', 503)
 
-        # Step 4: Initialize Flax train_state and model class
+        # Step 4: Initialize Flax train_state and model class (with random params)
         self.flax_train_state, self.flax_model_cls, total_params = init_train_state(
             args,
             n_classes=n_classes,
@@ -686,20 +690,20 @@ class ESTrainer:
         )
         print(f"[INIT-FLAX] Model parameters: {total_params:,}")
 
-        # Step 5: Load checkpoint into train_state
-        ckpt = load_checkpoint(
-            self.flax_train_state,
-            config.lobs5_checkpoint,
-            step=0,  # Load latest step
-            train=False,
-        )
-        self.flax_train_state = ckpt['model']
+        # Step 5: Load checkpoint params using OCDBT-compatible loader
+        # (same loader already used successfully in checkpoint_adapter.py)
+        from es_lobs5.adapters.checkpoint_adapter import load_flax_checkpoint
+        loaded_params, _ = load_flax_checkpoint(config.lobs5_checkpoint)
+        print(f"[INIT-FLAX] Loaded {len(jax.tree_util.tree_leaves(loaded_params))} param arrays from checkpoint")
 
-        # Step 6: Instantiate model for inference
+        # Step 6: Replace random params with loaded checkpoint params
+        self.flax_train_state = self.flax_train_state.replace(params=loaded_params)
+
+        # Step 7: Instantiate model for inference
         self.flax_model = self.flax_model_cls(training=False, step_rescale=1.0)
         self.flax_batchnorm = getattr(args, 'batchnorm', False)
 
-        # Step 7: Pre-compute syntax validation matrix for token generation
+        # Step 8: Pre-compute syntax validation matrix for token generation
         from lob.validation_helpers import syntax_validation_matrix
         self.syntax_valid_mask = syntax_validation_matrix(self.vocab)
 
@@ -1469,16 +1473,20 @@ class ESTrainer:
                 valid_mask = valh_module.get_valid_mask(syntax_valid_mask, token_pos)
 
                 # Use Flax model (same as inference_no_errcorr._generate_token)
+                # CRITICAL: Pass only the LAST token, not the full sequence!
+                # The RNN hidden state carries all context information.
+                # Passing multiple tokens would produce logits for each token.
                 hidden_p, logits = valh_module.apply_model(
                     hidden_p,
-                    msg_hist_p[-msg_len:],  # last msg_len tokens
-                    book_feat[None, :],      # book features
+                    msg_hist_p[-1:],  # Only LAST token (shape (1,)), not full message!
+                    book_feat[None, :],  # book features
                     flax_train_state,
                     flax_model,
                     flax_batchnorm,
                     False,  # shift_start
                 )
-                logits = logits[0]  # Remove batch dimension
+                # logits shape: (1, 1, n_classes) -> (1, n_classes) after [0]
+                logits = logits[0]
 
                 # Apply syntax validation mask (same as inference)
                 logits = valh_module.filter_valid_pred(logits, valid_mask)
@@ -1490,9 +1498,11 @@ class ESTrainer:
                 )
 
                 # Update message history
-                msg_hist_p = jnp.concatenate([msg_hist_p[1:], jnp.array([next_token_p])])
+                # next_token_p is shape (1,) from fill_predicted_tok, so use directly
+                msg_hist_p = jnp.concatenate([msg_hist_p[1:], next_token_p])
 
-                return (key_p, msg_hist_p, hidden_p), next_token_p
+                # Return scalar token for scan output (squeeze the (1,) array)
+                return (key_p, msg_hist_p, hidden_p), next_token_p[0]
 
             key_policy, sample_key = jax.random.split(key_policy)
             # H2: Apply pvary to initial carry values when inside shard_map
