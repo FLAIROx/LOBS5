@@ -546,3 +546,111 @@ next_token = jax.random.categorical(sample_key, scaled_log_probs)
 **注意**: T=0.1 测试证明单纯调整 temperature 无法解决问题。需要从模型训练或分布约束层面解决。
 
 ---
+
+---
+
+## 2026-01-08
+
+### 22-Token vs 24-Token Mode 系统性修复
+
+**Date**: 2026-01-08
+
+#### 问题背景
+
+Checkpoint 使用 24-token mode，但 inference 代码按 22-token 写的。连续修复了 12+ 个 bug，说明这是**系统性架构问题**，需要项目化处理。
+
+**Token Mode 差异**:
+
+| 属性 | 22-token | 24-token |
+|------|----------|----------|
+| MSG_LEN | 22 | 24 |
+| size 编码 | 1 token (base-10000) | 2 tokens (base-100) |
+| Vocab Size | 12,012 | 2,112 |
+| 编码器 key | `'size'` | `'size_digit'` |
+
+#### 根本原因
+
+**Class-Level State 问题**:
+```python
+class Message_Tokenizer:
+    TOK_LENS = TOK_LENS_22  # 可变类变量 - 问题根源
+    MSG_LEN = np.sum(TOK_LENS)  # 在类定义时计算
+
+    @classmethod
+    def set_token_mode(cls, token_mode):
+        cls.TOK_LENS = ...  # 修改全局状态
+```
+
+**后果**:
+1. Import 顺序影响结果
+2. 不同模块可能看到不同的 `MSG_LEN`
+3. Module-level 计算（如 `REF_LEN`）使用默认值
+
+#### TDD 方法解决
+
+**Step 1: 先写测试** (5 个测试文件, 115 个测试)
+- `tests/conftest.py` - fixtures
+- `tests/test_message_tokenizer.py` - 实例测试
+- `tests/test_vocab.py` - 编码器测试
+- `tests/test_encoding.py` - 编解码测试
+- `tests/test_validation_helpers.py` - 验证测试
+
+**Step 2: 代码修复**
+1. Message_Tokenizer 添加 `__init__(token_mode=24)` (instance-level state)
+2. Vocab 默认值 22→24
+3. 移除 validation_helpers.py 全局 Vocab
+4. run_inference.py 传递 `v=v`
+5. REF_LEN 默认 24-token 计算
+
+#### 关键代码修改
+
+**Message_Tokenizer (encoding.py)**:
+```python
+# 改为默认 24-token
+TOK_LENS = TOK_LENS_24  # Was: TOK_LENS_22
+
+# 添加 instance-level state
+def __init__(self, token_mode: int = 24) -> None:
+    self.token_mode = token_mode
+    self.tok_lens = self.TOK_LENS_24 if token_mode == 24 else self.TOK_LENS_22
+    ...
+
+# 标记旧 API 为 deprecated
+@classmethod
+def set_token_mode(cls, token_mode):
+    warnings.warn("deprecated, use Message_Tokenizer(token_mode=N)", DeprecationWarning)
+```
+
+**Vocab (encoding.py)**:
+```python
+def __init__(self, token_mode=24) -> None:  # Was: token_mode=22
+```
+
+#### 关键洞察
+
+1. **TDD 的价值**: 测试让我们发现了 Vocab 默认值遗漏的问题
+
+2. **Deprecation Warning 策略**: 不直接删除旧 API，而是标记为 deprecated，允许平滑迁移
+
+3. **Instance vs Class State**: 
+   - Class state 适合常量 (如 `TOK_LENS_22`, `TOK_LENS_24`)
+   - Instance state 适合配置 (如 `token_mode`, `msg_len`)
+
+4. **默认值的重要性**: 默认值应与主要用例一致（24-token 用于 checkpoint）
+
+#### 测试结果
+
+```
+============ 115 passed, 3 skipped, 21 warnings ============
+```
+
+3 个 skipped 测试是已知行为差异：
+- NA token 解码返回 0（不是 -9999）
+- START token 在部分位置允许
+
+#### Commits
+
+- `49c6722` refactor(encoding): add instance-level state to Message_Tokenizer
+- `a1dd385` fix(encoding): change Vocab default token_mode from 22 to 24
+
+---
