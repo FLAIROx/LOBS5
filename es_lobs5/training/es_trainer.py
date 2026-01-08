@@ -312,6 +312,10 @@ def create_es_config():
     # Other
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output_dir', type=str, default='./es_checkpoints')
+    parser.add_argument('--checkpoint_dir', type=str, default='./es_checkpoints',
+                        help='Directory to save ES checkpoints')
+    parser.add_argument('--checkpoint_every', type=int, default=50,
+                        help='Save checkpoint every N epochs')
 
     # W&B logging
     parser.add_argument('--wandb_project', type=str, default=None,
