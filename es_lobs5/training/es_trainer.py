@@ -746,8 +746,11 @@ class ESTrainer:
         msg_tokens, _, book_data, msg_raw, book_l2_init = data_tuple
 
         # Store for use in simulation
-        # Note: msg_tokens is already encoded with correct token_mode
-        self.replay_tokens = jnp.array(msg_tokens.reshape(-1))
+        # Note: msg_tokens from LOBSTER_Dataset is flattened, reshape to 2D
+        # Shape: (n_msgs, token_mode) for message-level indexing in historical_replay_step
+        n_msgs = msg_raw.shape[0]
+        token_mode = self.config.token_mode
+        self.replay_tokens = jnp.array(msg_tokens.reshape(n_msgs, token_mode))
         self.replay_data_raw = jnp.array(msg_raw)
         self.init_book_l2 = jnp.array(book_l2_init)
 
@@ -809,13 +812,13 @@ class ESTrainer:
             sim_state = self.sim.process_orders_array(sim_state, replay_jaxlob)
             print(f"[INIT-STATE] Replayed {n_replay} warmup messages")
 
-        # 3. Build context tokens from replay_tokens (already encoded by LOBSTER_Dataset)
+        # 3. Build context tokens from replay_tokens (encoded by LOBSTER_Dataset)
         msg_seq_len = self.lobs5_init.frozen_params.get('msg_seq_len', 500)
         expected_context_len = msg_seq_len * config.token_mode
 
-        # replay_tokens is already flattened (from _init_historical_replay_data)
-        context_tokens = n_replay * config.token_mode
-        msg_history = self.replay_tokens[:context_tokens]
+        # replay_tokens is 2D (n_msgs, token_mode), flatten for context
+        warmup_tokens = self.replay_tokens[:n_replay]  # (n_replay, token_mode)
+        msg_history = warmup_tokens.flatten()  # (n_replay * token_mode,)
 
         # Pad or truncate to expected size
         if len(msg_history) < expected_context_len:
