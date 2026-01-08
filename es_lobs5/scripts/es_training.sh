@@ -85,6 +85,9 @@ NOISER="${NOISER:-eggroll}"
 TASK="${TASK:-sell}"
 TASK_SIZE="${TASK_SIZE:-500}"
 
+# Data window control (empty = random, number = fixed)
+FILE_IDX="${FILE_IDX:-}"
+
 # Wandb
 WANDB_PROJECT="${WANDB_PROJECT:-es-lobs5}"
 WANDB_ENTITY="${WANDB_ENTITY:-kang-oxford}"
@@ -106,11 +109,19 @@ echo "  NOISER: ${NOISER}"
 echo "  TASK: ${TASK} x ${TASK_SIZE}"
 echo "  WANDB: ${WANDB_PROJECT} / ${WANDB_ENTITY}"
 echo "  CHECKPOINT_DIR: ${CHECKPOINT_DIR}"
+echo "  FILE_IDX: ${FILE_IDX:-random}"
 echo ""
 
 # -----------------------------------------------------------------------------
 # Run Training
 # -----------------------------------------------------------------------------
+# Build optional file_idx argument
+if [ -n "${FILE_IDX}" ]; then
+    FILE_IDX_ARG="--file_idx ${FILE_IDX}"
+else
+    FILE_IDX_ARG=""
+fi
+
 python es_lobs5/scripts/es_training.py \
     --lobs5_checkpoint "${CHECKPOINT}" \
     --replay_data_path "${DATA_DIR}" \
@@ -129,7 +140,8 @@ python es_lobs5/scripts/es_training.py \
     --checkpoint_every ${CHECKPOINT_EVERY} \
     --checkpoint_dir "${CHECKPOINT_DIR}" \
     --wandb_project "${WANDB_PROJECT}" \
-    --wandb_entity "${WANDB_ENTITY}"
+    --wandb_entity "${WANDB_ENTITY}" \
+    ${FILE_IDX_ARG}
 
 EXIT_CODE=$?
 

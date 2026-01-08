@@ -48,6 +48,8 @@ def main():
     print(f"Steps/Episode: {args.n_steps}")
     print(f"Warmup msgs: {getattr(args, 'n_warmup_msgs', 500)}")
     print(f"BG msgs/step: {getattr(args, 'background_msgs_per_step', 10)}")
+    file_idx = getattr(args, 'file_idx', None)
+    print(f"File idx: {file_idx if file_idx is not None else 'random'}")
     print(f"Noiser: {args.noiser}")
     print(f"Sigma: {args.sigma}, LR: {args.lr}")
     print(f"Wandb: {args.wandb_project or 'disabled'}")

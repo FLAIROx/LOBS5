@@ -302,6 +302,8 @@ def create_es_config():
                         help='Background message generation mode')
     parser.add_argument('--replay_data_path', type=str, default=None,
                         help='Path to historical data directory for replay mode')
+    parser.add_argument('--file_idx', type=int, default=None,
+                        help='Fixed file index for replay data (default: random, wraps with modulo)')
 
     # Data directory for initial state
     parser.add_argument('--data_dir', type=str, default=None,
