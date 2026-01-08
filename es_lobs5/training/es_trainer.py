@@ -745,14 +745,18 @@ class ESTrainer:
         # (tokens, y, book, raw_msgs, book_l2_init)
         msg_tokens, _, book_data, msg_raw, book_l2_init = data_tuple
 
-        # Store for use in simulation
-        # Note: msg_tokens from LOBSTER_Dataset is flattened, reshape to 2D
-        # Shape: (n_msgs, token_mode) for message-level indexing in historical_replay_step
-        n_msgs = msg_raw.shape[0]
-        token_mode = self.config.token_mode
-        self.replay_tokens = jnp.array(msg_tokens.reshape(n_msgs, token_mode))
+        # Store raw messages and encode them ourselves
+        # LOBSTER_Dataset's msg_tokens has masking applied (for training), not suitable for replay
+        # Instead, encode raw messages directly like run_inference.py does
+        from lob.encoding import encode_msgs
+
         self.replay_data_raw = jnp.array(msg_raw)
         self.init_book_l2 = jnp.array(book_l2_init)
+
+        # Encode raw messages to tokens (same as run_inference.py)
+        # Shape: (n_msgs, token_mode) for message-level indexing
+        encoded = encode_msgs(msg_raw, self.encoder, token_mode=self.config.token_mode)
+        self.replay_tokens = jnp.array(encoded)  # (n_msgs, token_mode)
 
         # Extract date from dataset files for logging
         from glob import glob
