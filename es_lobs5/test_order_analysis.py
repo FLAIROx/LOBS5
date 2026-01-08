@@ -171,6 +171,8 @@ def main():
         data_dir=args.data_dir,
         token_mode=args.token_mode,
         n_steps=args.n_steps,
+        n_warmup_msgs=args.n_warmup_msgs,
+        background_msgs_per_step=args.background_msgs_per_step,
     )
     result = collect_policy_orders(config, args.n_episodes)
 
