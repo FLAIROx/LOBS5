@@ -851,8 +851,10 @@ class ESTrainer:
         # Extract date from dataset files for logging
         from glob import glob
         msg_files = sorted(glob(os.path.join(data_path, '*message*.npy')))
-        if msg_files:
-            self.replay_data_date = os.path.basename(msg_files[file_idx]).split('_')[1]
+        if msg_files and len(msg_files) > 0:
+            # Use modulo to handle file_idx > len(msg_files)
+            safe_idx = file_idx % len(msg_files)
+            self.replay_data_date = os.path.basename(msg_files[safe_idx]).split('_')[1]
         else:
             self.replay_data_date = 'unknown'
         self.replay_data_dir = data_path
