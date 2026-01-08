@@ -56,28 +56,8 @@ def main():
     print(f"Wandb: {args.wandb_project or 'disabled'}")
     print("=" * 60)
 
-    # Initialize wandb
-    wandb_run = None
-    if args.wandb_project:
-        try:
-            run_name = getattr(args, 'wandb_name', None) or \
-                       f"es_n{args.n_perturbations}_s{args.seed}"
-            wandb_run = wandb.init(
-                project=args.wandb_project,
-                entity=getattr(args, 'wandb_entity', None),
-                name=run_name,
-                config=vars(args),
-                tags=['production', f'noiser-{args.noiser}', f'n{args.n_perturbations}'],
-                resume='allow' if getattr(args, 'resume_from', None) else None,
-            )
-            print(f"[WANDB] Initialized: {wandb_run.url}")
-        except Exception as e:
-            print(f"[WANDB] Failed to initialize: {e}")
-            print("[WANDB] Continuing without logging...")
-            wandb.init(mode='disabled')
-    else:
-        print("[WANDB] Disabled (no --wandb_project specified)")
-        wandb.init(mode='disabled')
+    # NOTE: wandb is initialized inside ESTrainer.train() to avoid duplicate init
+    # The SSL config above ensures it works in HPC environments
 
     try:
         # Create trainer
@@ -98,28 +78,13 @@ def main():
         elapsed = time.time() - start_time
         print(f"\n[TRAIN] Training completed in {elapsed/3600:.2f} hours")
 
-        # Update wandb summary
-        if wandb_run:
-            wandb_run.summary.update({
-                'total_time_hours': elapsed / 3600,
-                'completed': True,
-            })
-
     except KeyboardInterrupt:
         print("\n[TRAIN] Interrupted by user")
-        if wandb_run:
-            wandb_run.summary.update({'interrupted': True})
         raise
 
     except Exception as e:
         print(f"\n[TRAIN] Error: {e}")
-        if wandb_run:
-            wandb_run.summary.update({'error': str(e)})
         raise
-
-    finally:
-        wandb.finish()
-        print("[WANDB] Finished")
 
 
 if __name__ == '__main__':
