@@ -1829,10 +1829,12 @@ class ESTrainer:
         wandb_run = None
         if hasattr(self.config, 'wandb_project') and self.config.wandb_project:
             import wandb
+            # Get SLURM job ID if available
+            job_id = os.environ.get("SLURM_JOB_ID", "local")
             wandb_run = wandb.init(
                 project=self.config.wandb_project,
                 entity=self.config.wandb_entity,
-                name=f"es_jaxlob_n{self.config.n_perturbations}_s{self.config.seed}",
+                name=f"es_n{self.config.n_perturbations}_s{self.config.seed}_j{job_id}",
                 config={
                     'n_perturbations': self.config.n_perturbations,
                     'n_steps': self.config.n_steps,
