@@ -80,10 +80,12 @@ BG_MSGS="${BG_MSGS:-10}"
 SIGMA="${SIGMA:-0.01}"
 LR="${LR:-0.001}"
 NOISER="${NOISER:-eggroll}"
+LORA_RANK="${LORA_RANK:-4}"
 
 # Task configuration
 TASK="${TASK:-sell}"
 TASK_SIZE="${TASK_SIZE:-500}"
+TICK_SIZE="${TICK_SIZE:-100}"
 
 # Data window control (empty = random, number = fixed)
 FILE_IDX="${FILE_IDX:-}"
@@ -104,9 +106,9 @@ echo "  DATA_DIR: ${DATA_DIR}"
 echo "  N_EPOCHS: ${N_EPOCHS}"
 echo "  N_PERTURBATIONS: ${N_PERTURBATIONS}"
 echo "  N_STEPS: ${N_STEPS}"
-echo "  SIGMA: ${SIGMA}, LR: ${LR}"
+echo "  SIGMA: ${SIGMA}, LR: ${LR}, LORA_RANK: ${LORA_RANK}"
 echo "  NOISER: ${NOISER}"
-echo "  TASK: ${TASK} x ${TASK_SIZE}"
+echo "  TASK: ${TASK} x ${TASK_SIZE}, TICK_SIZE: ${TICK_SIZE}"
 echo "  WANDB: ${WANDB_PROJECT} / ${WANDB_ENTITY}"
 echo "  CHECKPOINT_DIR: ${CHECKPOINT_DIR}"
 echo "  FILE_IDX: ${FILE_IDX:-random}"
@@ -132,10 +134,12 @@ python es_lobs5/scripts/es_training.py \
     --background_msgs_per_step ${BG_MSGS} \
     --sigma ${SIGMA} \
     --lr ${LR} \
+    --lora_rank ${LORA_RANK} \
     --noiser ${NOISER} \
     --background_mode historical_replay \
     --task ${TASK} \
     --task_size ${TASK_SIZE} \
+    --tick_size ${TICK_SIZE} \
     --token_mode 24 \
     --checkpoint_every ${CHECKPOINT_EVERY} \
     --checkpoint_dir "${CHECKPOINT_DIR}" \
