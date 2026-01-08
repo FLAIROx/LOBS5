@@ -143,63 +143,62 @@ from lob.inference_no_errcorr import (
 
 # DEPRECATED: This is replaced by syntax_validation_matrix from lob/validation_helpers.py
 # which now correctly supports token_mode=24 with the get_encoder_key() fix.
-# Kept for backward compatibility only.
+# COMMENTED OUT to prevent accidental usage - use get_field_masks_from_validation_matrix() instead.
 # Position -> (field_name, token_min, token_max) for 24-token messages
-POSITION_TOKEN_RANGES_24 = {
-    0: ("event_type", 1004, 1007),
-    1: ("direction", 2110, 2111),
-    2: ("price_sign", 2108, 2109),
-    3: ("price", 1108, 2107),
-    4: ("size_high", 1008, 1107),
-    5: ("size_low", 1008, 1107),
-    6: ("delta_t_s", 4, 1003),
-    7: ("delta_t_ns_0", 4, 1003),
-    8: ("delta_t_ns_1", 4, 1003),
-    9: ("delta_t_ns_2", 4, 1003),
-    10: ("time_s_0", 4, 1003),
-    11: ("time_s_1", 4, 1003),
-    12: ("time_ns_0", 4, 1003),
-    13: ("time_ns_1", 4, 1003),
-    14: ("time_ns_2", 4, 1003),
-    15: ("price_ref_sign", 2108, 2109),
-    16: ("price_ref", 1108, 2107),
-    17: ("size_ref_high", 1008, 1107),
-    18: ("size_ref_low", 1008, 1107),
-    19: ("time_s_ref_0", 4, 1003),
-    20: ("time_s_ref_1", 4, 1003),
-    21: ("time_ns_ref_0", 4, 1003),
-    22: ("time_ns_ref_1", 4, 1003),
-    23: ("time_ns_ref_2", 4, 1003),
-}
+# POSITION_TOKEN_RANGES_24 = {
+#     0: ("event_type", 1004, 1007),
+#     1: ("direction", 2110, 2111),
+#     2: ("price_sign", 2108, 2109),
+#     3: ("price", 1108, 2107),
+#     4: ("size_high", 1008, 1107),
+#     5: ("size_low", 1008, 1107),
+#     6: ("delta_t_s", 4, 1003),
+#     7: ("delta_t_ns_0", 4, 1003),
+#     8: ("delta_t_ns_1", 4, 1003),
+#     9: ("delta_t_ns_2", 4, 1003),
+#     10: ("time_s_0", 4, 1003),
+#     11: ("time_s_1", 4, 1003),
+#     12: ("time_ns_0", 4, 1003),
+#     13: ("time_ns_1", 4, 1003),
+#     14: ("time_ns_2", 4, 1003),
+#     15: ("price_ref_sign", 2108, 2109),
+#     16: ("price_ref", 1108, 2107),
+#     17: ("size_ref_high", 1008, 1107),
+#     18: ("size_ref_low", 1008, 1107),
+#     19: ("time_s_ref_0", 4, 1003),
+#     20: ("time_s_ref_1", 4, 1003),
+#     21: ("time_ns_ref_0", 4, 1003),
+#     22: ("time_ns_ref_1", 4, 1003),
+#     23: ("time_ns_ref_2", 4, 1003),
+# }
 
-_FIELD_MASKS_24 = None
+# _FIELD_MASKS_24 = None  # COMMENTED OUT - no longer needed
 
 # DEPRECATED: Use get_field_masks_from_validation_matrix() instead.
-# This hardcoded implementation is kept for backward compatibility only.
-# The new approach uses lob/validation_helpers.syntax_validation_matrix for consistent constraint logic.
-def get_field_masks_24(vocab_size: int = 2112):
-    """Get field masks for constrained decoding (additive mask format).
-
-    Creates masks directly from POSITION_TOKEN_RANGES_24, avoiding
-    syntax_validation_matrix which has compatibility issues with 24-token mode.
-
-    Returns:
-        jnp.array of shape (24, vocab_size) where:
-        - 0.0 for valid tokens
-        - -1e9 for invalid tokens
-    """
-    global _FIELD_MASKS_24
-    if _FIELD_MASKS_24 is None:
-        masks = []
-        for pos in range(24):
-            _, tok_min, tok_max = POSITION_TOKEN_RANGES_24[pos]
-            # Start with -1e9 (invalid) for all tokens
-            mask = jnp.full(vocab_size, -1e9)
-            # Set valid range to 0.0
-            mask = mask.at[tok_min:tok_max+1].set(0.0)
-            masks.append(mask)
-        _FIELD_MASKS_24 = jnp.stack(masks)
-    return _FIELD_MASKS_24
+# COMMENTED OUT to prevent accidental usage.
+# def get_field_masks_24(vocab_size: int = 2112):
+#     """Get field masks for constrained decoding (additive mask format).
+#
+#     Creates masks directly from POSITION_TOKEN_RANGES_24, avoiding
+#     syntax_validation_matrix which has compatibility issues with 24-token mode.
+#
+#     Returns:
+#         jnp.array of shape (24, vocab_size) where:
+#         - 0.0 for valid tokens
+#         - -1e9 for invalid tokens
+#     """
+#     global _FIELD_MASKS_24
+#     if _FIELD_MASKS_24 is None:
+#         masks = []
+#         for pos in range(24):
+#             _, tok_min, tok_max = POSITION_TOKEN_RANGES_24[pos]
+#             # Start with -1e9 (invalid) for all tokens
+#             mask = jnp.full(vocab_size, -1e9)
+#             # Set valid range to 0.0
+#             mask = mask.at[tok_min:tok_max+1].set(0.0)
+#             masks.append(mask)
+#         _FIELD_MASKS_24 = jnp.stack(masks)
+#     return _FIELD_MASKS_24
 
 
 def get_field_masks_from_validation_matrix(token_mode: int, vocab_size: int):
@@ -1261,7 +1260,7 @@ class ESTrainer:
                 replayed_msg_tokens = replay_tokens[replay_ptr]
                 replayed_msg_raw = replay_data_raw[replay_ptr]
 
-                sim_msg = decoded_msg_to_jaxlob_format(replayed_msg_raw)
+                sim_msg = msg_to_jnp(replayed_msg_raw)  # Using imported function from lob.inference_no_errcorr
                 bg_order_id = WORLD_ORDER_ID_START + oid_offset
                 sim_msg = sim_msg.at[4].set(bg_order_id)
                 sim_msg = sim_msg.at[5].set(-2000)
