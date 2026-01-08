@@ -15,7 +15,7 @@
 #SBATCH --gres=gpu:4
 
 source ~/miniforge3/etc/profile.d/conda.sh
-conda activate lobs5  # Changed from 'lob' to 'lobs5' for correct environment
+conda activate lob  # lob env has orbax 0.11.6 (compatible with OCDBT checkpoint format)
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
