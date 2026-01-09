@@ -56,6 +56,8 @@ LobState = None
 Message_Tokenizer = None
 encoding = None
 get_best_bid_and_ask = None
+create_trade = None
+add_trade = None
 _all_noisers = None
 _ES_PaddedLobPredModel = None
 
@@ -109,10 +111,14 @@ __all__ = ['ESTrainer', 'create_es_config', 'es_train']
 
 def _lazy_import_jaxlob():
     """Lazy import JaxLOB to avoid import errors when not using this mode."""
-    global OrderBook, LobState, Message_Tokenizer, encoding, get_best_bid_and_ask
+    global OrderBook, LobState, Message_Tokenizer, encoding, get_best_bid_and_ask, create_trade, add_trade
     if OrderBook is None:
         from gymnax_exchange.jaxob.jorderbook import OrderBook as _OrderBook, LobState as _LobState
-        from gymnax_exchange.jaxob.JaxOrderBookArrays import get_best_bid_and_ask as _get_best_bid_and_ask
+        from gymnax_exchange.jaxob.JaxOrderBookArrays import (
+            get_best_bid_and_ask as _get_best_bid_and_ask,
+            create_trade as _create_trade,
+            add_trade as _add_trade,
+        )
         from lob.encoding import Message_Tokenizer as _Message_Tokenizer
         import lob.encoding as _encoding
         OrderBook = _OrderBook
@@ -120,6 +126,8 @@ def _lazy_import_jaxlob():
         Message_Tokenizer = _Message_Tokenizer
         encoding = _encoding
         get_best_bid_and_ask = _get_best_bid_and_ask
+        create_trade = _create_trade
+        add_trade = _add_trade
 
 
 def _get_flax_loaders():
@@ -1593,41 +1601,65 @@ class ESTrainer:
         )
 
         # =====================================================================
-        # FORCED LIQUIDATION: Market order to close remaining position
-        # This is the "hidden" final step that ensures task completion.
+        # FORCED LIQUIDATION: Artificial trade to close remaining position
+        # This is the "hidden" final step that ensures 100% task completion.
+        # Uses doom price (far touch - penalty) to penalize incomplete execution.
         # =====================================================================
         model_quantity = final_quant_executed  # Save before liquidation
         quant_remaining = task_size - final_quant_executed
         liquidation_order_id = POLICY_ORDER_ID_START + config.n_steps
 
-        def _create_liquidation_order(args):
-            """Create aggressive IOC order for forced liquidation."""
+        # Doom price penalty in ticks (worse price for unfilled quantity)
+        DOOM_PENALTY_TICKS = 5
+
+        def _create_doom_trade(args):
+            """Create artificial trade at doom price for forced liquidation.
+
+            Unlike IOC orders, this GUARANTEES 100% fill by creating a virtual
+            trade record. The doom price penalizes agents for not executing
+            during regular steps.
+            """
             sim_state, quant_to_liquidate = args
             best_ask, best_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
 
-            # For sell task: hit the bid (aggressive sell)
-            # For buy task: lift the ask (aggressive buy)
+            # For sell task: doom price = best_bid - penalty (worse for seller)
+            # For buy task: doom price = best_ask + penalty (worse for buyer)
             is_sell = (config.task == 'sell')
-            price = jnp.where(is_sell, best_bid, best_ask)
-            side_jaxlob = jnp.where(is_sell, -1, 1)  # -1=sell, 1=buy (JaxLOB format)
+            doom_price = jnp.where(
+                is_sell,
+                best_bid - DOOM_PENALTY_TICKS * config.tick_size,
+                best_ask + DOOM_PENALTY_TICKS * config.tick_size
+            )
 
-            # Event type 4 = IOC/Execute (immediate fill or cancel)
-            sim_msg = jnp.array([
-                4,                      # event_type = IOC
-                side_jaxlob,            # side: -1=sell, 1=buy
-                quant_to_liquidate,     # quantity
-                price,                  # aggressive price
-                liquidation_order_id,   # order_id
-                -1000,                  # trader_id (policy)
-                0,                      # time_s
-                0,                      # time_ns
-            ], dtype=jnp.int32)
-            return process_order_array(sim_state, sim_msg)
+            # Create artificial trade
+            # Trade format: [price, quant, passOID, agrOID, time_s, time_ns, passTID, agrTID]
+            # Use negative IDs (-666666) to mark as artificial/doom trade
+            doom_trade = create_trade(
+                doom_price,                    # price (with penalty)
+                quant_to_liquidate,            # quantity
+                -666666,                       # passOID (artificial counterparty)
+                liquidation_order_id,          # agrOID (policy's order)
+                0,                             # time_s
+                0,                             # time_ns
+                -666666,                       # passTID (artificial counterparty)
+                -1000,                         # agrTID (policy trader ID)
+            )
+
+            # Add doom trade to trades array
+            new_trades = add_trade(sim_state.trades, doom_trade)
+
+            # Return updated LobState with new trades
+            return LobState(
+                asks=sim_state.asks,
+                bids=sim_state.bids,
+                trades=new_trades,
+                key=sim_state.key
+            )
 
         # Only execute liquidation if there's remaining quantity
         final_state = jax.lax.cond(
             quant_remaining > 0,
-            _create_liquidation_order,
+            _create_doom_trade,
             lambda args: args[0],  # Return unchanged state
             (final_state, quant_remaining)
         )
@@ -1665,12 +1697,11 @@ class ESTrainer:
         agent_trades = jnp.sum(is_policy_trade)
 
         # Calculate execution breakdown
-        # model_quantity was saved before liquidation (line ~1599)
+        # model_quantity was saved before liquidation (line ~1608)
+        # With artificial doom trade, agent_quantity == task_size is GUARANTEED
         liquidation_quantity = agent_quantity - model_quantity
-        unfilled_quantity = task_size - agent_quantity
 
-        # Final fitness = PnL (simplified - forced liquidation ensures task completion)
-        # No need for agent_quantity > 0 condition anymore
+        # Final fitness = PnL (simplified - doom trade ensures task completion)
         fitness = jnp.where(jnp.isfinite(pnl), pnl, 0.0)
 
         info = {
@@ -1679,10 +1710,9 @@ class ESTrainer:
             'pnl_raw': pnl_raw,                # raw value in cents
             'pnl_normalized': pnl_normalized,  # before tanh (in "ticks")
             # Execution breakdown
-            'agent_quantity': agent_quantity,          # total executed = model + liquidation
+            'agent_quantity': agent_quantity,          # total executed = model + doom trade (always == task_size)
             'model_quantity': model_quantity,          # executed by model orders
-            'liquidation_quantity': liquidation_quantity,  # executed by forced liquidation
-            'unfilled_quantity': unfilled_quantity,    # unfilled due to insufficient depth
+            'liquidation_quantity': liquidation_quantity,  # executed by doom trade at penalty price
             'agent_trades': agent_trades,
             'total_trades': total_trades,
             'init_mid_price': init_mid_price,
