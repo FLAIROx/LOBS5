@@ -12,7 +12,7 @@
 #
 # Environment Variables:
 #   N_NODES           - Number of nodes to use (default: 1)
-#   N_PERTURBATIONS   - Population size (must be divisible by N_NODES * 4 GPUs)
+#   N_PERTURBATIONS   - Perturbations PER GPU (default: 32), total = N_PERTURBATIONS * N_NODES * 4
 #   ... all other variables from es_training.sh are supported
 #
 # =============================================================================
@@ -28,7 +28,9 @@ N_TOTAL_GPUS=$((N_NODES * N_GPUS_PER_NODE))
 CHECKPOINT="${CHECKPOINT:-/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/}"
 DATA_DIR="${DATA_DIR:-/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc}"
 N_EPOCHS="${N_EPOCHS:-1000}"
-N_PERTURBATIONS="${N_PERTURBATIONS:-$((N_TOTAL_GPUS * 32))}"  # Default: 32 per GPU
+# N_PERTURBATIONS is per-GPU, total = N_PERTURBATIONS * N_TOTAL_GPUS
+N_PERTURBATIONS_PER_GPU="${N_PERTURBATIONS:-32}"
+N_PERTURBATIONS=$((N_PERTURBATIONS_PER_GPU * N_TOTAL_GPUS))
 N_STEPS="${N_STEPS:-100}"
 N_WARMUP="${N_WARMUP:-500}"
 BG_MSGS="${BG_MSGS:-10}"
@@ -44,13 +46,6 @@ WANDB_PROJECT="${WANDB_PROJECT:-es-lobs5}"
 WANDB_ENTITY="${WANDB_ENTITY:-kang-oxford}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-100}"
 
-# Validate n_perturbations is divisible by total GPUs
-if [ $((N_PERTURBATIONS % N_TOTAL_GPUS)) -ne 0 ]; then
-    echo "ERROR: N_PERTURBATIONS ($N_PERTURBATIONS) must be divisible by total GPUs ($N_TOTAL_GPUS)"
-    echo "       Suggested: N_PERTURBATIONS=$((N_TOTAL_GPUS * (N_PERTURBATIONS / N_TOTAL_GPUS + 1)))"
-    exit 1
-fi
-
 # Get git info (before heredoc, so it's captured at submission time)
 GIT_BRANCH=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 branch --show-current 2>/dev/null || echo "unknown")
 GIT_COMMIT_SHORT=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -63,7 +58,7 @@ echo "=============================================="
 echo "N_NODES: ${N_NODES}"
 echo "GPUs per node: ${N_GPUS_PER_NODE}"
 echo "Total GPUs: ${N_TOTAL_GPUS}"
-echo "N_PERTURBATIONS: ${N_PERTURBATIONS} (${N_PERTURBATIONS}/${N_TOTAL_GPUS} = $((N_PERTURBATIONS / N_TOTAL_GPUS)) per GPU)"
+echo "N_PERTURBATIONS: ${N_PERTURBATIONS_PER_GPU} per GPU × ${N_TOTAL_GPUS} GPUs = ${N_PERTURBATIONS} total"
 echo "----------------------------------------------"
 echo "Git Branch: ${GIT_BRANCH}"
 echo "Git Commit: ${GIT_COMMIT_SHORT}"
