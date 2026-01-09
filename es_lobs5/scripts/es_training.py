@@ -24,6 +24,32 @@ import time
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 
+# =============================================================================
+# CRITICAL: Multi-node distributed initialization MUST happen before any JAX
+# imports that might initialize the XLA backend. This includes es_trainer.py
+# which has jax.config.update() at module level.
+# =============================================================================
+def _init_distributed_if_needed():
+    """Initialize JAX distributed if --coord_addr is provided."""
+    # Quick check for distributed args without full argparse
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--coord_addr', type=str, default=None)
+    parser.add_argument('--num_procs', type=int, default=1)
+    parser.add_argument('--proc_id', type=int, default=0)
+    args, _ = parser.parse_known_args()
+
+    if args.coord_addr is not None:
+        import jax
+        print(f"[DIST] Initializing JAX distributed: coord={args.coord_addr}, procs={args.num_procs}, id={args.proc_id}")
+        jax.distributed.initialize(args.coord_addr, args.num_procs, args.proc_id)
+        print(f"[DIST] Process {jax.process_index()} of {jax.process_count()} initialized with {len(jax.devices())} devices")
+        return True
+    return False
+
+_is_distributed = _init_distributed_if_needed()
+# =============================================================================
+
 # WandB configuration (must be set before wandb import)
 os.environ["WANDB_MODE"] = "online"
 os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"

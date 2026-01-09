@@ -598,18 +598,15 @@ class ESTrainer:
         self.config = config
 
         # ========================================================================
-        # Multi-node distributed initialization (MUST be before any JAX operations)
-        # Reference: HyperscaleES/llm_experiments/general_do_evolution_multi_gpu.py
+        # Multi-node distributed detection
+        # NOTE: jax.distributed.initialize() is called in es_training.py BEFORE
+        # importing this module, because it must happen before any JAX operations.
+        # Here we just detect if we're in distributed mode.
         # ========================================================================
-        coord_addr = getattr(config, 'coord_addr', None)
-        if coord_addr is not None:
-            num_procs = getattr(config, 'num_procs', 1)
-            proc_id = getattr(config, 'proc_id', 0)
-            print(f"[DIST] Initializing JAX distributed: coord={coord_addr}, procs={num_procs}, id={proc_id}")
-            jax.distributed.initialize(coord_addr, num_procs, proc_id)
+        if jax.process_count() > 1:
             self._is_distributed = True
             self._process_index = jax.process_index()
-            print(f"[DIST] Process {self._process_index} of {jax.process_count()} initialized")
+            print(f"[DIST] Running in distributed mode: process {self._process_index} of {jax.process_count()}")
         else:
             self._is_distributed = False
             self._process_index = 0
