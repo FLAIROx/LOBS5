@@ -606,10 +606,12 @@ class ESTrainer:
         if jax.process_count() > 1:
             self._is_distributed = True
             self._process_index = jax.process_index()
-            print(f"[DIST] Running in distributed mode: process {self._process_index} of {jax.process_count()}")
+            self._process_count = jax.process_count()
+            print(f"[DIST] Running in distributed mode: process {self._process_index} of {self._process_count}")
         else:
             self._is_distributed = False
             self._process_index = 0
+            self._process_count = 1
 
         # Legacy alias: n_threads -> n_perturbations
         if hasattr(config, 'n_threads') and getattr(config, 'n_threads', None) is not None:
@@ -1808,18 +1810,53 @@ class ESTrainer:
         n_devices = getattr(self, '_n_devices', 1)
 
         # ========================================================================
+        # Multi-node partitioning: Each process evaluates a DIFFERENT subset of
+        # perturbations to avoid redundant computation across nodes.
+        #
+        # Example with 256 perturbations and 8 processes:
+        #   Process 0: thread_ids [0-31]    (32 perturbations)
+        #   Process 1: thread_ids [32-63]   (32 perturbations)
+        #   ...
+        #   Process 7: thread_ids [224-255] (32 perturbations)
+        #
+        # After evaluation, use process_allgather to combine results.
+        # ========================================================================
+        n_processes = getattr(self, '_process_count', 1)
+        process_idx = getattr(self, '_process_index', 0)
+
+        if self._is_distributed and n_processes > 1:
+            # Validate divisibility
+            assert n_perturbations % n_processes == 0, \
+                f"[DIST ERROR] n_perturbations ({n_perturbations}) must be divisible by n_processes ({n_processes}). " \
+                f"Consider using n_perturbations={n_processes * (n_perturbations // n_processes)}"
+
+            # Each process evaluates a subset of perturbations
+            local_n_perturbations = n_perturbations // n_processes
+            start_idx = process_idx * local_n_perturbations
+            end_idx = start_idx + local_n_perturbations
+
+            # Generate keys only for this process's perturbations
+            all_keys = jax.random.split(key, n_perturbations)
+            keys = all_keys[start_idx:end_idx]
+            thread_ids = jnp.arange(start_idx, end_idx)
+
+            if epoch == 0:
+                print(f"[DIST] Process {process_idx}/{n_processes}: evaluating thread_ids [{start_idx}-{end_idx-1}] ({local_n_perturbations} perturbations)")
+        else:
+            # Single-node or non-distributed: evaluate all perturbations
+            keys = jax.random.split(key, n_perturbations)
+            thread_ids = jnp.arange(n_perturbations)
+
+        # ========================================================================
         # H1: Validate n_perturbations divisibility for shard_map
         # When using multi-GPU, n_perturbations must be evenly divisible by n_devices
         # so each device gets the same number of perturbations to evaluate.
         # ========================================================================
+        local_n_perturbations = len(thread_ids)
         if n_devices > 1:
-            assert n_perturbations % n_devices == 0, \
-                f"[H1 ERROR] n_perturbations ({n_perturbations}) must be divisible by n_devices ({n_devices}). " \
-                f"Consider using n_perturbations={n_devices * (n_perturbations // n_devices)} or n_perturbations={n_devices * ((n_perturbations // n_devices) + 1)}"
-
-        # Generate keys for all perturbations
-        keys = jax.random.split(key, n_perturbations)
-        thread_ids = jnp.arange(n_perturbations)
+            assert local_n_perturbations % n_devices == 0, \
+                f"[H1 ERROR] local_n_perturbations ({local_n_perturbations}) must be divisible by n_devices ({n_devices}). " \
+                f"Consider adjusting n_perturbations to be divisible by (n_processes × n_devices)."
 
         # ========================================================================
         # G1 + H1: Use pre-compiled eval_batch function
@@ -1871,18 +1908,26 @@ class ESTrainer:
         # Multi-node: Gather fitnesses and infos from all processes
         # In distributed mode, each process only has its local shard of results.
         # process_allgather collects all shards to form the complete arrays.
+        #
+        # After gathering, we have ALL n_perturbations fitness values.
+        # The iterinfos must use GLOBAL thread_ids [0..n_perturbations-1]
+        # for correct gradient computation across all perturbations.
         # ========================================================================
-        if self._is_distributed:
+        if self._is_distributed and n_processes > 1:
             fitnesses = process_allgather(fitnesses, tiled=True)
             infos = jax.tree.map(
                 lambda x: process_allgather(x, tiled=True),
                 infos
             )
+            # Use GLOBAL thread_ids for gradient update (all n_perturbations)
+            global_thread_ids = jnp.arange(n_perturbations)
+        else:
+            global_thread_ids = thread_ids
 
-        # ES gradient update
+        # ES gradient update (use global thread_ids after gathering)
         iterinfos = (
             jnp.full(n_perturbations, epoch, dtype=jnp.int32),
-            thread_ids
+            global_thread_ids
         )
 
         # ========================================================================
