@@ -276,6 +276,8 @@ def create_es_config():
     parser.add_argument('--sigma', type=float, default=0.01, help='Noise std')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--lora_rank', type=int, default=4, help='LORA rank')
+    parser.add_argument('--freeze_nonlora', type=bool, default=True,
+                        help='Freeze non-LORA params (embeddings, base model). Default: True')
 
     # Training configuration
     parser.add_argument('--n_perturbations', type=int, default=128,
@@ -781,16 +783,28 @@ class ESTrainer:
         # Get group_size from config (required for EggRollBS, default 0 for EggRoll)
         group_size = getattr(config, 'group_size', 0)
 
+        # freeze_nonlora=True: Only train LORA parameters, freeze embeddings & base model
+        # freeze_nonlora=False: Train ALL parameters (not recommended for large models)
+        freeze_nonlora = getattr(config, 'freeze_nonlora', True)  # Default: freeze non-LORA
+
         self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
             self.lobs5_init.params,
             sigma=config.sigma,
             lr=config.lr,
             rank=config.lora_rank,
-            freeze_nonlora=False,
+            freeze_nonlora=freeze_nonlora,
             noise_reuse=0,
             group_size=group_size,
             solver=None,  # Uses default optax.sgd
         )
+
+        # Log training mode
+        if freeze_nonlora:
+            print(f"[NOISER] LORA-only training: freeze_nonlora=True, rank={config.lora_rank}")
+            print(f"[NOISER] Only LORA parameters will be updated (embeddings & base model frozen)")
+        else:
+            print(f"[NOISER] Full fine-tuning: freeze_nonlora=False, rank={config.lora_rank}")
+            print(f"[NOISER] WARNING: ALL parameters will be updated (including embeddings)")
 
     def _init_jaxlob(self):
         """Initialize JaxLOB order book simulator.
