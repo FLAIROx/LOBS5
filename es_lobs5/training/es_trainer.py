@@ -761,8 +761,12 @@ class ESTrainer:
         from lob.validation_helpers import syntax_validation_matrix
         self.syntax_valid_mask = syntax_validation_matrix(self.vocab)
 
+        # Check BF16 mixed precision status (controlled by USE_BF16 env var, default='1')
+        use_bf16 = os.environ.get('USE_BF16', '1') == '1'
+
         print(f"[INIT-FLAX] Flax model loaded successfully")
         print(f"[INIT-FLAX]   token_mode={token_mode}, batchnorm={self.flax_batchnorm}")
+        print(f"[INIT-FLAX]   mixed_precision={'BF16' if use_bf16 else 'FP32'} (USE_BF16={os.environ.get('USE_BF16', '1')})")
 
     def _init_noiser(self):
         """Initialize EGGROLL noiser for Policy.
