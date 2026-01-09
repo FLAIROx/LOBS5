@@ -668,10 +668,23 @@ class ESTrainer:
         # H3: Multi-GPU Mesh Configuration (MUST be before _compile_eval_batch)
         # Reference: HyperscaleES/llm_experiments/general_do_evolution_multi_gpu.py
         # Creates a 1D mesh along 'data' axis for data-parallel ES evaluation
+        #
+        # Multi-node mode (HyperscaleES pattern):
+        # - Each process has 1 local GPU (via SLURM --ntasks-per-node=4)
+        # - Use jax.local_devices() for local mesh
+        # - Cross-node gradient sync via process_allgather in train_epoch
         # ========================================================================
-        self._n_devices = len(jax.devices())
-        self._mesh = Mesh(jax.devices(), ('data',))
-        print(f"[H3] Created mesh with {self._n_devices} devices")
+        if self._is_distributed:
+            # Multi-node: Each process has 1 local device
+            local_devices = jax.local_devices()
+            self._n_devices = len(local_devices)
+            self._mesh = Mesh(local_devices, ('data',))
+            print(f"[H3] Multi-node: Using {self._n_devices} local device(s) (process {self._process_index})")
+        else:
+            # Single-node: Use all devices
+            self._n_devices = len(jax.devices())
+            self._mesh = Mesh(jax.devices(), ('data',))
+            print(f"[H3] Single-node: Using {self._n_devices} device(s)")
         print(f"[H3] Mesh axis: {self._mesh.axis_names}")
 
         # ========================================================================

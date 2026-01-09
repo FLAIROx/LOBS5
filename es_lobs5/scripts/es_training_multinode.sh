@@ -67,7 +67,7 @@ cat > "${TEMP_SBATCH}" << SBATCH_EOF
 #!/bin/bash
 #SBATCH --job-name=es-train-${N_NODES}n
 #SBATCH --nodes=${N_NODES}
-#SBATCH --ntasks-per-node=1
+#SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
 #SBATCH --time=24:00:00
@@ -108,7 +108,7 @@ COORD_PORT=12345
 echo ""
 echo "Distributed Configuration:"
 echo "  Coordinator: \${COORD_ADDR}:\${COORD_PORT}"
-echo "  Num processes: ${N_NODES}"
+echo "  Num processes: \${SLURM_NTASKS} (${N_NODES} nodes x 4 GPUs)"
 echo ""
 
 # Build optional file_idx argument
@@ -121,8 +121,8 @@ fi
 echo "DEBUG: SLURM_NODEID=\${SLURM_NODEID}, SLURM_PROCID=\${SLURM_PROCID}, SLURM_LOCALID=\${SLURM_LOCALID}"
 echo "DEBUG: SLURM_NTASKS=\${SLURM_NTASKS}, SLURM_NNODES=\${SLURM_NNODES}"
 
-# Launch with srun (one process per node)
-srun bash -c 'echo "SRUN DEBUG: NODEID=\${SLURM_NODEID}, PROCID=\${SLURM_PROCID} on \$(hostname)"'
+# Launch with srun (4 processes per node, one per GPU)
+srun bash -c 'echo "SRUN DEBUG: PROCID=\${SLURM_PROCID}, LOCALID=\${SLURM_LOCALID}, CUDA_VISIBLE_DEVICES=\${CUDA_VISIBLE_DEVICES:-not_set} on \$(hostname)"'
 srun python es_lobs5/scripts/es_training.py \\
     --lobs5_checkpoint "${CHECKPOINT}" \\
     --replay_data_path "${DATA_DIR}" \\
@@ -145,7 +145,7 @@ srun python es_lobs5/scripts/es_training.py \\
     --wandb_project "${WANDB_PROJECT}" \\
     --wandb_entity "${WANDB_ENTITY}" \\
     --coord_addr "\${COORD_ADDR}:\${COORD_PORT}" \\
-    --num_procs ${N_NODES} \\
+    --num_procs \${SLURM_NTASKS} \\
     \${FILE_IDX_ARG}
 
 EXIT_CODE=\$?

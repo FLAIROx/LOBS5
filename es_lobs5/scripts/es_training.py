@@ -44,8 +44,9 @@ def _init_distributed_if_needed():
         # Get proc_id from command line or SLURM environment variable
         proc_id = args.proc_id
         if proc_id is None:
-            # Try SLURM_NODEID first (set by srun)
-            proc_id = int(os.environ.get('SLURM_NODEID', 0))
+            # Use SLURM_PROCID for global process ID (0 to ntasks-1)
+            # With ntasks-per-node=4, this gives unique ID per GPU across all nodes
+            proc_id = int(os.environ.get('SLURM_PROCID', 0))
         print(f"[DIST] Initializing JAX distributed: coord={args.coord_addr}, procs={args.num_procs}, id={proc_id}")
         print(f"[DIST] SLURM env: NODEID={os.environ.get('SLURM_NODEID', 'N/A')}, PROCID={os.environ.get('SLURM_PROCID', 'N/A')}")
         jax.distributed.initialize(args.coord_addr, args.num_procs, proc_id)
