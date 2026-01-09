@@ -44,6 +44,7 @@ jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)  # Cache all 
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
+from jax.experimental.multihost_utils import process_allgather
 from functools import partial
 import argparse
 from tqdm import tqdm
@@ -331,6 +332,14 @@ def create_es_config():
     parser.add_argument('--wandb_entity', type=str, default=None,
                         help='Weights & Biases entity/username')
 
+    # Multi-node distributed training
+    parser.add_argument('--coord_addr', type=str, default=None,
+                        help='Coordinator address (IP:port) for multi-node distributed training')
+    parser.add_argument('--num_procs', type=int, default=None,
+                        help='Total number of processes (one per node)')
+    parser.add_argument('--proc_id', type=int, default=None,
+                        help='Process ID for this node (0-indexed)')
+
     return parser
 
 
@@ -587,6 +596,23 @@ class ESTrainer:
         print("[INIT] Starting ESTrainer initialization")
 
         self.config = config
+
+        # ========================================================================
+        # Multi-node distributed initialization (MUST be before any JAX operations)
+        # Reference: HyperscaleES/llm_experiments/general_do_evolution_multi_gpu.py
+        # ========================================================================
+        coord_addr = getattr(config, 'coord_addr', None)
+        if coord_addr is not None:
+            num_procs = getattr(config, 'num_procs', 1)
+            proc_id = getattr(config, 'proc_id', 0)
+            print(f"[DIST] Initializing JAX distributed: coord={coord_addr}, procs={num_procs}, id={proc_id}")
+            jax.distributed.initialize(coord_addr, num_procs, proc_id)
+            self._is_distributed = True
+            self._process_index = jax.process_index()
+            print(f"[DIST] Process {self._process_index} of {jax.process_count()} initialized")
+        else:
+            self._is_distributed = False
+            self._process_index = 0
 
         # Legacy alias: n_threads -> n_perturbations
         if hasattr(config, 'n_threads') and getattr(config, 'n_threads', None) is not None:
@@ -1832,6 +1858,18 @@ class ESTrainer:
             initial_msg_history,
         )
 
+        # ========================================================================
+        # Multi-node: Gather fitnesses and infos from all processes
+        # In distributed mode, each process only has its local shard of results.
+        # process_allgather collects all shards to form the complete arrays.
+        # ========================================================================
+        if self._is_distributed:
+            fitnesses = process_allgather(fitnesses, tiled=True)
+            infos = jax.tree.map(
+                lambda x: process_allgather(x, tiled=True),
+                infos
+            )
+
         # ES gradient update
         iterinfos = (
             jnp.full(n_perturbations, epoch, dtype=jnp.int32),
@@ -1917,29 +1955,33 @@ class ESTrainer:
                 print(f"[TRAIN] Warning: Could not resume from {resume_from}: {e}")
                 print("[TRAIN] Starting fresh training")
 
-        # Initialize W&B
+        # Initialize W&B (only on rank 0 in distributed mode)
         wandb_run = None
         if hasattr(self.config, 'wandb_project') and self.config.wandb_project:
-            import wandb
-            # Get SLURM job ID if available
-            job_id = os.environ.get("SLURM_JOB_ID", "local")
-            wandb_run = wandb.init(
-                project=self.config.wandb_project,
-                entity=self.config.wandb_entity,
-                name=f"es_n{self.config.n_perturbations}_s{self.config.seed}_j{job_id}",
-                config={
-                    'n_perturbations': self.config.n_perturbations,
-                    'n_steps': self.config.n_steps,
-                    'noiser': self.config.noiser,
-                    'sigma': self.config.sigma,
-                    'lr': self.config.lr,
-                    'lora_rank': self.config.lora_rank,
-                    'checkpoint': self.config.lobs5_checkpoint,
-                    'background_mode': self.config.background_mode,
-                },
-                resume='allow' if resume_from else None,
-            )
-            print(f"[TRAIN] W&B initialized: {wandb_run.url}")
+            if self._process_index == 0:
+                import wandb
+                # Get SLURM job ID if available
+                job_id = os.environ.get("SLURM_JOB_ID", "local")
+                n_procs = jax.process_count() if self._is_distributed else 1
+                wandb_run = wandb.init(
+                    project=self.config.wandb_project,
+                    entity=self.config.wandb_entity,
+                    name=f"es_n{self.config.n_perturbations}_s{self.config.seed}_j{job_id}",
+                    config={
+                        'n_perturbations': self.config.n_perturbations,
+                        'n_steps': self.config.n_steps,
+                        'noiser': self.config.noiser,
+                        'sigma': self.config.sigma,
+                        'lr': self.config.lr,
+                        'lora_rank': self.config.lora_rank,
+                        'checkpoint': self.config.lobs5_checkpoint,
+                        'background_mode': self.config.background_mode,
+                        'n_processes': n_procs,
+                        'n_devices_total': len(jax.devices()),
+                    },
+                    resume='allow' if resume_from else None,
+                )
+                print(f"[TRAIN] W&B initialized: {wandb_run.url}")
 
         # Get initial state
         initial_sim_state, initial_msg_history = self._create_initial_sim_state()
@@ -1956,14 +1998,15 @@ class ESTrainer:
             is_best = mean_fitness > best_fitness
             if is_best:
                 best_fitness = mean_fitness
-                # Save best model
-                best_path = os.path.join(checkpoint_dir, 'best')
-                self.save_checkpoint(best_path)
-                self._save_training_state(best_path, epoch, best_fitness)
-                print(f"[TRAIN] New best model saved: fitness={best_fitness:.4f}")
+                # Save best model (only on rank 0 in distributed mode)
+                if self._process_index == 0:
+                    best_path = os.path.join(checkpoint_dir, 'best')
+                    self.save_checkpoint(best_path)
+                    self._save_training_state(best_path, epoch, best_fitness)
+                    print(f"[TRAIN] New best model saved: fitness={best_fitness:.4f}")
 
-            # Periodic checkpointing
-            if (epoch + 1) % checkpoint_every == 0:
+            # Periodic checkpointing (only on rank 0 in distributed mode)
+            if (epoch + 1) % checkpoint_every == 0 and self._process_index == 0:
                 ckpt_path = os.path.join(checkpoint_dir, f'epoch_{epoch}')
                 self.save_checkpoint(ckpt_path)
                 self._save_training_state(ckpt_path, epoch, best_fitness)
