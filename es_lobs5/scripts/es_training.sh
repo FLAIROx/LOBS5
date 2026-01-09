@@ -54,7 +54,7 @@ conda activate lobs5
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTHONDONTWRITEBYTECODE=1
-export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/JaxMARL-HFT:$PYTHONPATH"
+export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/AlphaTrade:$PYTHONPATH"
 export PYTHONUNBUFFERED=1
 
 # -----------------------------------------------------------------------------
