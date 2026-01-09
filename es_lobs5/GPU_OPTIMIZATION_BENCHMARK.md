@@ -68,27 +68,26 @@ The 93% improvement was **NOT** from batched loading, but from `freeze_nonlora=T
 
 ## Optimization 1: Historical Replay Batched Loading
 
-**Status:** Pending (needs re-test with correct baseline)
-**Expected Impact:** 5-10% (lower than previously claimed)
+**Status:** ❌ REJECTED
+**Job ID:** 1865815
+**Expected Impact:** 5-10%
+**Actual Impact:** **No improvement (possibly negative)**
 
 **Rationale:**
 - Convert dynamic indexing `replay_tokens[replay_ptr]` to static indexing `batch[i]`
 - XLA can better optimize static index patterns
 
-**Changes:**
-```python
-# Before: Dynamic indexing inside scan
-replayed_msg_tokens = replay_tokens[replay_ptr]
+**Test Results:**
+| Metric | Baseline | Batched Loading | Change |
+|--------|----------|-----------------|--------|
+| Total Time | 596.3s | 561.8s | -5.8% (noise) |
+| XLA Compile | 252s | **284s** | **+12.7% worse** |
+| Training Loop | 304s | **334s** | **+10% worse** |
 
-# After: Pre-batch outside scan
-bg_tokens_batch = jax.lax.dynamic_slice(replay_tokens, (ptr_init, 0), (K, M))
-replayed_msg_tokens = bg_tokens_batch[bg_msg_idx]
-```
-
-| Metric | Baseline | After | Change |
-|--------|----------|-------|--------|
-| Total Time | TBD | TBD | TBD |
-| Per-Epoch Time | TBD | TBD | TBD |
+**Conclusion:**
+- XLA already optimizes the original dynamic indexing well
+- Pre-batching adds overhead (closure capture, dynamic_slice)
+- **Optimization rejected** - no real benefit
 
 ---
 
