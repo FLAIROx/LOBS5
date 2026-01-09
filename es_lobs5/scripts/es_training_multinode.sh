@@ -122,8 +122,10 @@ echo "DEBUG: SLURM_NODEID=\${SLURM_NODEID}, SLURM_PROCID=\${SLURM_PROCID}, SLURM
 echo "DEBUG: SLURM_NTASKS=\${SLURM_NTASKS}, SLURM_NNODES=\${SLURM_NNODES}"
 
 # Launch with srun (4 processes per node, one per GPU)
-srun bash -c 'echo "SRUN DEBUG: PROCID=\${SLURM_PROCID}, LOCALID=\${SLURM_LOCALID}, CUDA_VISIBLE_DEVICES=\${CUDA_VISIBLE_DEVICES:-not_set} on \$(hostname)"'
-srun python es_lobs5/scripts/es_training.py \\
+# NOTE: On this cluster, SLURM doesn't auto-set CUDA_VISIBLE_DEVICES per-task.
+# We must explicitly set it based on SLURM_LOCALID (0-3 for each node).
+srun bash -c 'echo "SRUN DEBUG: PROCID=\${SLURM_PROCID}, LOCALID=\${SLURM_LOCALID}, CUDA_VISIBLE_DEVICES=\${SLURM_LOCALID} on \$(hostname)"'
+srun bash -c 'export CUDA_VISIBLE_DEVICES=\${SLURM_LOCALID}; python es_lobs5/scripts/es_training.py \\
     --lobs5_checkpoint "${CHECKPOINT}" \\
     --replay_data_path "${DATA_DIR}" \\
     --n_epochs ${N_EPOCHS} \\
@@ -146,7 +148,7 @@ srun python es_lobs5/scripts/es_training.py \\
     --wandb_entity "${WANDB_ENTITY}" \\
     --coord_addr "\${COORD_ADDR}:\${COORD_PORT}" \\
     --num_procs \${SLURM_NTASKS} \\
-    \${FILE_IDX_ARG}
+    \${FILE_IDX_ARG}'
 
 EXIT_CODE=\$?
 
