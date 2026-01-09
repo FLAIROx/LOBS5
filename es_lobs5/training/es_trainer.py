@@ -810,6 +810,29 @@ class ESTrainer:
             print(f"[NOISER] Full fine-tuning: freeze_nonlora=False, rank={config.lora_rank}")
             print(f"[NOISER] WARNING: ALL parameters will be updated (including embeddings)")
 
+        # Calculate actual trainable parameters based on es_map
+        # ES types: 0=PARAM (full), 1=MM_PARAM (LORA), 2=EMB_PARAM (frozen), 3=EXCLUDED (frozen)
+        total_params = 0
+        trainable_params = 0
+
+        def count_params(param, es_type):
+            nonlocal total_params, trainable_params
+            size = param.size
+            total_params += size
+            # MM_PARAM (1) = LORA update, PARAM (0) = full update (if not frozen)
+            if es_type == 1:  # MM_PARAM - always LORA updated
+                trainable_params += size
+            elif es_type == 0 and not freeze_nonlora:  # PARAM - only if not frozen
+                trainable_params += size
+
+        jax.tree.map(count_params, self.lobs5_init.params, self.lobs5_init.es_map)
+
+        frozen_params = total_params - trainable_params
+        print(f"[NOISER] Parameter breakdown:")
+        print(f"[NOISER]   Total: {total_params:,}")
+        print(f"[NOISER]   Trainable: {trainable_params:,} ({100*trainable_params/total_params:.2f}%)")
+        print(f"[NOISER]   Frozen: {frozen_params:,} ({100*frozen_params/total_params:.2f}%)")
+
     def _init_jaxlob(self):
         """Initialize JaxLOB order book simulator.
 
