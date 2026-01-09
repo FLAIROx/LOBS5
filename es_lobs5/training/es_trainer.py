@@ -1592,6 +1592,46 @@ class ESTrainer:
             length=config.n_steps,
         )
 
+        # =====================================================================
+        # FORCED LIQUIDATION: Market order to close remaining position
+        # This is the "hidden" final step that ensures task completion.
+        # =====================================================================
+        model_quantity = final_quant_executed  # Save before liquidation
+        quant_remaining = task_size - final_quant_executed
+        liquidation_order_id = POLICY_ORDER_ID_START + config.n_steps
+
+        def _create_liquidation_order(args):
+            """Create aggressive IOC order for forced liquidation."""
+            sim_state, quant_to_liquidate = args
+            best_ask, best_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
+
+            # For sell task: hit the bid (aggressive sell)
+            # For buy task: lift the ask (aggressive buy)
+            is_sell = (config.task == 'sell')
+            price = jnp.where(is_sell, best_bid, best_ask)
+            side_jaxlob = jnp.where(is_sell, -1, 1)  # -1=sell, 1=buy (JaxLOB format)
+
+            # Event type 4 = IOC/Execute (immediate fill or cancel)
+            sim_msg = jnp.array([
+                4,                      # event_type = IOC
+                side_jaxlob,            # side: -1=sell, 1=buy
+                quant_to_liquidate,     # quantity
+                price,                  # aggressive price
+                liquidation_order_id,   # order_id
+                -1000,                  # trader_id (policy)
+                0,                      # time_s
+                0,                      # time_ns
+            ], dtype=jnp.int32)
+            return process_order_array(sim_state, sim_msg)
+
+        # Only execute liquidation if there's remaining quantity
+        final_state = jax.lax.cond(
+            quant_remaining > 0,
+            _create_liquidation_order,
+            lambda args: args[0],  # Return unchanged state
+            (final_state, quant_remaining)
+        )
+
         # Compute fitness (PnL)
         trades = final_state.trades
         valid_trades_mask = trades[:, 0] != -1
@@ -1621,31 +1661,30 @@ class ESTrainer:
         pnl_normalized = pnl_raw / jnp.maximum(normalization_scale, 1.0)
         pnl = jnp.tanh(pnl_normalized)  # squash to -1 to 1, 0 = executed at mid price
 
-        # Completion penalty (disabled - penalty was too large relative to PnL signal)
-        # shortfall = jnp.maximum(config.task_size - agent_quantity, 0)
-        # completion_penalty = -shortfall * init_mid_price / 1e6 * 0.1
-        completion_penalty = jnp.float32(0.0)
-
         total_trades = jnp.sum(valid_trades_mask)
         agent_trades = jnp.sum(is_policy_trade)
 
-        # Final fitness
-        base_fitness = jnp.where(
-            agent_quantity > 0,
-            pnl + completion_penalty,
-            jnp.where(total_trades > 0, -0.05, -0.1)
-        )
-        fitness = jnp.where(jnp.isfinite(base_fitness), base_fitness, 0.0)
+        # Calculate execution breakdown
+        # model_quantity was saved before liquidation (line ~1599)
+        liquidation_quantity = agent_quantity - model_quantity
+        unfilled_quantity = task_size - agent_quantity
+
+        # Final fitness = PnL (simplified - forced liquidation ensures task completion)
+        # No need for agent_quantity > 0 condition anymore
+        fitness = jnp.where(jnp.isfinite(pnl), pnl, 0.0)
 
         info = {
             'fitness': fitness,
             'pnl': pnl,                        # normalized to -1 to 1 (tanh)
             'pnl_raw': pnl_raw,                # raw value in cents
             'pnl_normalized': pnl_normalized,  # before tanh (in "ticks")
-            'agent_quantity': agent_quantity,
+            # Execution breakdown
+            'agent_quantity': agent_quantity,          # total executed = model + liquidation
+            'model_quantity': model_quantity,          # executed by model orders
+            'liquidation_quantity': liquidation_quantity,  # executed by forced liquidation
+            'unfilled_quantity': unfilled_quantity,    # unfilled due to insufficient depth
             'agent_trades': agent_trades,
             'total_trades': total_trades,
-            'completion_penalty': completion_penalty,
             'init_mid_price': init_mid_price,
             'policy_msgs': policy_msgs_all,    # shape: (n_steps, msg_len) for order analysis
         }
@@ -1886,6 +1925,10 @@ class ESTrainer:
                 fitness_max = float(jnp.max(fitnesses))
                 fitness_min = float(jnp.min(fitnesses))
 
+                # Calculate model fill rate
+                model_qty = float(epoch_info.get('model_quantity', 0))
+                model_fill_rate = model_qty / self.config.task_size if self.config.task_size > 0 else 0.0
+
                 wandb_run.log({
                     'epoch': epoch,
                     'fitness/mean': float(mean_fitness),
@@ -1895,9 +1938,18 @@ class ESTrainer:
                     'fitness/min': fitness_min,
                     'pnl/mean': float(epoch_info['pnl']),
                     'execution/agent_quantity': float(epoch_info['agent_quantity']),
+                    'execution/model_quantity': float(epoch_info.get('model_quantity', 0)),
+                    'execution/liquidation_quantity': float(epoch_info.get('liquidation_quantity', 0)),
+                    'execution/unfilled_quantity': float(epoch_info.get('unfilled_quantity', 0)),
+                    'execution/model_fill_rate': model_fill_rate,
                     'execution/agent_trades': float(epoch_info['agent_trades']),
                     'execution/total_trades': float(epoch_info['total_trades']),
                 })
+
+            # Warning for unfilled quantity (insufficient depth)
+            unfilled_qty = float(epoch_info.get('unfilled_quantity', 0))
+            if unfilled_qty > 0:
+                print(f"[WARNING] Epoch {epoch}: {unfilled_qty:.0f} shares unfilled due to insufficient depth!")
 
             if epoch % 10 == 0:
                 print(f"Epoch {epoch}: mean={mean_fitness:.4f}, best={best_fitness:.4f}, std={jnp.std(fitnesses):.4f}")
