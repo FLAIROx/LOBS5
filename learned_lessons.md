@@ -786,3 +786,100 @@ ESTrainer was generating orders with wrong size distribution (mean=5792 instead 
 
 #### Commits
 - `e201b84` fix(es-trainer): use Flax model for token generation with correct token_mode
+
+---
+
+## 2026-01-09
+
+### Lesson 7: Multi-Node JAX Distributed Training for ES
+
+#### Problem
+Multi-node ES training failed with OOM errors (122GB allocation on 96GB GPU).
+
+**Root cause:** Each of 8 processes was evaluating ALL 256 perturbations independently, resulting in:
+1. **8× redundant computation** across nodes
+2. **122GB memory per GPU** (256 × ~476MB forward pass)
+
+#### Key Insight: JAX Distributed Process Model
+
+```
+                    Single-Node (4 GPUs)          Multi-Node (8 GPUs, 2 nodes)
+                    ─────────────────────         ───────────────────────────────
+SLURM config:       --ntasks-per-node=1           --ntasks-per-node=4
+                    --gres=gpu:4                  --gres=gpu:4
+
+Processes:          1 process, 4 devices          8 processes, 1 device each
+
+How JAX sees it:    jax.devices() → 4 GPUs        jax.devices() → 8 global GPUs
+                    jax.local_devices() → 4       jax.local_devices() → 1
+
+Mesh strategy:      Mesh over 4 devices           Mesh over 1 device (per process)
+                    shard_map distributes         process_allgather aggregates
+```
+
+#### Solution: Partition Perturbations Across Processes
+
+```python
+# Each process evaluates DIFFERENT thread_ids
+if self._is_distributed and n_processes > 1:
+    local_n_perturbations = n_perturbations // n_processes  # 256/8 = 32
+    start_idx = process_idx * local_n_perturbations
+    thread_ids = jnp.arange(start_idx, start_idx + local_n_perturbations)
+    # Process 0: [0-31], Process 1: [32-63], ..., Process 7: [224-255]
+
+# After evaluation, gather all fitness values
+fitnesses = process_allgather(fitnesses, tiled=True)
+global_thread_ids = jnp.arange(n_perturbations)  # [0..255] for gradient
+```
+
+#### Why This Accelerates (Not Redundant)
+
+| Aspect | Before Fix | After Fix |
+|--------|------------|-----------|
+| Thread IDs per process | [0-255] (same on all) | [0-31], [32-63], ... (unique) |
+| Forward passes per GPU | 256 | 32 |
+| Memory per GPU | ~122 GB (OOM) | ~15 GB ✓ |
+| Wall-clock time | 8× slower (redundant) | **8× faster (parallel)** |
+
+**Critical:** EggRoll noise is deterministic from `(base_key, epoch, thread_id)`. Different thread_ids → different perturbations → correct ES gradient.
+
+#### HyperscaleES Pattern
+
+```bash
+#SBATCH --ntasks-per-node=4    # 1 process per GPU
+#SBATCH --gres=gpu:4           # 4 GPUs per node
+```
+
+```python
+# HyperscaleES uses global mesh over ALL devices
+mesh = jax.make_mesh((len(jax.devices()),), ('data',))  # All 8 GPUs
+global_indices = np.arange(total_parallel_generations)  # [0..8191]
+thread_idxes = jax.device_put(global_indices, NamedSharding(mesh, P('data')))
+# JAX automatically shards to different devices
+```
+
+#### Do NOT Set CUDA_VISIBLE_DEVICES
+
+```python
+# WRONG - breaks JAX distributed topology discovery
+os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
+
+# RIGHT - let JAX handle device assignment
+# jax.distributed.initialize() needs all GPUs visible for topology
+# jax.local_devices() returns only this process's assigned device
+```
+
+#### Verification
+
+```
+[DIST] Process 0/8: evaluating thread_ids [0-31] (32 perturbations)
+[DIST] Process 1/8: evaluating thread_ids [32-63] (32 perturbations)
+...
+[DIST] Process 7/8: evaluating thread_ids [224-255] (32 perturbations)
+Epoch 0: mean=0.2699  # All processes see same aggregated result
+```
+
+#### Commits
+- `482dfb7` fix(es-trainer): adopt HyperscaleES multi-node pattern (4 tasks per node)
+- `7171b09` revert: remove CUDA_VISIBLE_DEVICES override (breaks JAX distributed)
+- `f4295c3` fix(es-trainer): partition perturbations across processes in multi-node mode
