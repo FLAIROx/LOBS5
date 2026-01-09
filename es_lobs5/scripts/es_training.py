@@ -22,12 +22,15 @@ import time
 
 # =============================================================================
 # CRITICAL: Set CUDA_VISIBLE_DEVICES based on SLURM_LOCALID BEFORE any JAX
-# imports. On some clusters (like GH200), SLURM doesn't auto-set this per-task.
-# This ensures each process only sees its assigned GPU.
+# imports. On some clusters (like GH200), SLURM sets CUDA_VISIBLE_DEVICES to
+# all GPUs (0,1,2,3) for all tasks instead of one per task. We override it
+# to ensure each process only sees its assigned GPU.
 # =============================================================================
-if 'SLURM_LOCALID' in os.environ and 'CUDA_VISIBLE_DEVICES' not in os.environ:
-    os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['SLURM_LOCALID']
-    print(f"[CUDA] Set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']} from SLURM_LOCALID")
+if 'SLURM_LOCALID' in os.environ:
+    local_id = os.environ['SLURM_LOCALID']
+    old_cuda_devices = os.environ.get('CUDA_VISIBLE_DEVICES', 'not_set')
+    os.environ['CUDA_VISIBLE_DEVICES'] = local_id
+    print(f"[CUDA] Set CUDA_VISIBLE_DEVICES={local_id} (was: {old_cuda_devices}) from SLURM_LOCALID")
 
 # Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
