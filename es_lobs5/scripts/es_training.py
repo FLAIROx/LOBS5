@@ -36,13 +36,19 @@ def _init_distributed_if_needed():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--coord_addr', type=str, default=None)
     parser.add_argument('--num_procs', type=int, default=1)
-    parser.add_argument('--proc_id', type=int, default=0)
+    parser.add_argument('--proc_id', type=int, default=None)  # Default None, will use env var
     args, _ = parser.parse_known_args()
 
     if args.coord_addr is not None:
         import jax
-        print(f"[DIST] Initializing JAX distributed: coord={args.coord_addr}, procs={args.num_procs}, id={args.proc_id}")
-        jax.distributed.initialize(args.coord_addr, args.num_procs, args.proc_id)
+        # Get proc_id from command line or SLURM environment variable
+        proc_id = args.proc_id
+        if proc_id is None:
+            # Try SLURM_NODEID first (set by srun)
+            proc_id = int(os.environ.get('SLURM_NODEID', 0))
+        print(f"[DIST] Initializing JAX distributed: coord={args.coord_addr}, procs={args.num_procs}, id={proc_id}")
+        print(f"[DIST] SLURM env: NODEID={os.environ.get('SLURM_NODEID', 'N/A')}, PROCID={os.environ.get('SLURM_PROCID', 'N/A')}")
+        jax.distributed.initialize(args.coord_addr, args.num_procs, proc_id)
         print(f"[DIST] Process {jax.process_index()} of {jax.process_count()} initialized with {len(jax.devices())} devices")
         return True
     return False

@@ -117,7 +117,12 @@ if [ -n "${FILE_IDX}" ]; then
     FILE_IDX_ARG="--file_idx ${FILE_IDX}"
 fi
 
+# Debug: Show SLURM environment variables
+echo "DEBUG: SLURM_NODEID=\${SLURM_NODEID}, SLURM_PROCID=\${SLURM_PROCID}, SLURM_LOCALID=\${SLURM_LOCALID}"
+echo "DEBUG: SLURM_NTASKS=\${SLURM_NTASKS}, SLURM_NNODES=\${SLURM_NNODES}"
+
 # Launch with srun (one process per node)
+srun bash -c 'echo "SRUN DEBUG: NODEID=\${SLURM_NODEID}, PROCID=\${SLURM_PROCID} on \$(hostname)"'
 srun python es_lobs5/scripts/es_training.py \\
     --lobs5_checkpoint "${CHECKPOINT}" \\
     --replay_data_path "${DATA_DIR}" \\
@@ -141,7 +146,6 @@ srun python es_lobs5/scripts/es_training.py \\
     --wandb_entity "${WANDB_ENTITY}" \\
     --coord_addr "\${COORD_ADDR}:\${COORD_PORT}" \\
     --num_procs ${N_NODES} \\
-    --proc_id \${SLURM_PROCID} \\
     \${FILE_IDX_ARG}
 
 EXIT_CODE=\$?
