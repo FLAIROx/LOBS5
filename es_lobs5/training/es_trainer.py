@@ -1647,65 +1647,58 @@ class ESTrainer:
         )
 
         # =====================================================================
-        # FORCED LIQUIDATION: Artificial trade to close remaining position
-        # This is the "hidden" final step that ensures 100% task completion.
-        # Uses doom price (far touch - penalty) to penalize incomplete execution.
+        # FORCED LIQUIDATION: Real market order to sweep the order book
+        # This is the "hidden" final step that attempts to close remaining
+        # position. Unlike doom_trade, this uses a REAL order that may NOT
+        # fill completely if there's insufficient book depth.
+        #
+        # SELL: price = 0 → matches all bids from high to low
+        # BUY: price = maxint → matches all asks from low to high
         # =====================================================================
-        model_quantity = final_quant_executed  # Save before liquidation
+        model_quantity = final_quant_executed  # Save quantity from model orders
         quant_remaining = task_size - final_quant_executed
         liquidation_order_id = POLICY_ORDER_ID_START + config.n_steps
 
-        # Doom price penalty in ticks (worse price for unfilled quantity)
-        DOOM_PENALTY_TICKS = 5
+        def _create_market_order(args):
+            """Create real market order that sweeps the order book.
 
-        def _create_doom_trade(args):
-            """Create artificial trade at doom price for forced liquidation.
+            Unlike doom_trade (virtual trade), this submits a REAL order
+            through the JaxLOB matching engine. May have unfilled quantity
+            if book depth is insufficient.
 
-            Unlike IOC orders, this GUARANTEES 100% fill by creating a virtual
-            trade record. The doom price penalizes agents for not executing
-            during regular steps.
+            Args:
+                args: (sim_state, quant_to_liquidate) tuple
+
+            Returns:
+                Updated LobState after order processing
             """
             sim_state, quant_to_liquidate = args
-            best_ask, best_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
 
-            # For sell task: doom price = best_bid - penalty (worse for seller)
-            # For buy task: doom price = best_ask + penalty (worse for buyer)
             is_sell = (config.task == 'sell')
-            doom_price = jnp.where(
-                is_sell,
-                best_bid - DOOM_PENALTY_TICKS * config.tick_size,
-                best_ask + DOOM_PENALTY_TICKS * config.tick_size
-            )
+            # Market price: sell at 0 (matches all bids), buy at maxint (matches all asks)
+            market_price = jnp.where(is_sell, 0, jaxlob_cfg.maxint)
+            # JaxLOB side: -1 = sell (hit bids), 1 = buy (lift asks)
+            side_jaxlob = jnp.where(is_sell, -1, 1)
 
-            # Create artificial trade
-            # Trade format: [price, quant, passOID, agrOID, time_s, time_ns, passTID, agrTID]
-            # Use negative IDs (-666666) to mark as artificial/doom trade
-            doom_trade = create_trade(
-                doom_price,                    # price (with penalty)
-                quant_to_liquidate,            # quantity
-                -666666,                       # passOID (artificial counterparty)
-                liquidation_order_id,          # agrOID (policy's order)
-                0,                             # time_s
-                0,                             # time_ns
-                -666666,                       # passTID (artificial counterparty)
-                POLICY_TRADER_ID,              # agrTID (policy trader ID)
-            )
+            # Message format: [event_type, side, quantity, price, order_id, trader_id, time_s, time_ns]
+            # Event type 1 = Limit order (at extreme price = effective market order)
+            sim_msg = jnp.array([
+                1,                      # event_type = Limit
+                side_jaxlob,            # side (-1=sell, 1=buy)
+                quant_to_liquidate,     # quantity
+                market_price,           # price (0 or maxint)
+                liquidation_order_id,   # order_id
+                POLICY_TRADER_ID,       # trader_id
+                0,                      # time_s
+                0,                      # time_ns
+            ], dtype=jnp.int32)
 
-            # Add doom trade to trades array
-            new_trades = add_trade(sim_state.trades, doom_trade)
-
-            # Return updated LobState with new trades
-            return LobState(
-                asks=sim_state.asks,
-                bids=sim_state.bids,
-                trades=new_trades,
-                key=sim_state.key
-            )
+            return process_order_array(sim_state, sim_msg)
 
         # Only execute liquidation if there's remaining quantity
         final_state = jax.lax.cond(
             quant_remaining > 0,
-            _create_doom_trade,
+            _create_market_order,
             lambda args: args[0],  # Return unchanged state
             (final_state, quant_remaining)
         )
@@ -1743,11 +1736,16 @@ class ESTrainer:
         agent_trades = jnp.sum(is_policy_trade)
 
         # Calculate execution breakdown
-        # model_quantity was saved before liquidation (line ~1608)
-        # With artificial doom trade, agent_quantity == task_size is GUARANTEED
+        # model_quantity: executed by model orders during regular steps
+        # liquidation_quantity: executed by force_market_order at end
+        # unfilled_quantity: not executed due to insufficient book depth
+        # NOTE: With force_market_order, agent_quantity MAY BE < task_size!
         liquidation_quantity = agent_quantity - model_quantity
+        unfilled_quantity = task_size - agent_quantity
 
-        # Final fitness = PnL (simplified - doom trade ensures task completion)
+        # Final fitness = PnL (only counts what was actually filled)
+        # Unfilled quantity has no revenue and no cost, so PnL is naturally
+        # lower when fill is incomplete (agent receives less for sell task)
         fitness = jnp.where(jnp.isfinite(pnl), pnl, 0.0)
 
         info = {
@@ -1756,9 +1754,10 @@ class ESTrainer:
             'pnl_raw': pnl_raw,                # raw value in cents
             'pnl_normalized': pnl_normalized,  # before tanh (in "ticks")
             # Execution breakdown
-            'agent_quantity': agent_quantity,          # total executed = model + doom trade (always == task_size)
+            'agent_quantity': agent_quantity,          # total executed = model + liquidation (may be < task_size!)
             'model_quantity': model_quantity,          # executed by model orders
-            'liquidation_quantity': liquidation_quantity,  # executed by doom trade at penalty price
+            'liquidation_quantity': liquidation_quantity,  # executed by force_market_order
+            'unfilled_quantity': unfilled_quantity,    # NOT executed (book depth insufficient)
             'agent_trades': agent_trades,
             'total_trades': total_trades,
             'init_mid_price': init_mid_price,
@@ -2018,9 +2017,17 @@ class ESTrainer:
                 fitness_max = float(jnp.max(fitnesses))
                 fitness_min = float(jnp.min(fitnesses))
 
-                # Calculate model fill rate (how much was filled by model vs doom trade)
+                # Calculate execution rates
+                task_size = self.config.task_size if self.config.task_size > 0 else 1.0
+                agent_qty = float(epoch_info['agent_quantity'])
                 model_qty = float(epoch_info.get('model_quantity', 0))
-                model_fill_rate = model_qty / self.config.task_size if self.config.task_size > 0 else 0.0
+                liquidation_qty = float(epoch_info.get('liquidation_quantity', 0))
+                unfilled_qty = float(epoch_info.get('unfilled_quantity', 0))
+
+                fill_rate = agent_qty / task_size                    # Total fill rate (may be < 1.0!)
+                model_fill_rate = model_qty / task_size              # Model orders fill rate
+                liquidation_fill_rate = liquidation_qty / task_size  # Force market order fill rate
+                unfill_rate = unfilled_qty / task_size               # Unfilled rate (book depth insufficient)
 
                 wandb_run.log({
                     'epoch': epoch,
@@ -2030,13 +2037,23 @@ class ESTrainer:
                     'fitness/max': fitness_max,
                     'fitness/min': fitness_min,
                     'pnl/mean': float(epoch_info['pnl']),
-                    'execution/agent_quantity': float(epoch_info['agent_quantity']),
-                    'execution/model_quantity': float(epoch_info.get('model_quantity', 0)),
-                    'execution/liquidation_quantity': float(epoch_info.get('liquidation_quantity', 0)),
-                    'execution/model_fill_rate': model_fill_rate,  # 1.0 = all filled by model, 0.0 = all by doom trade
+                    # Execution quantities
+                    'execution/agent_quantity': agent_qty,             # Total filled = model + liquidation
+                    'execution/model_quantity': model_qty,             # Filled by model orders
+                    'execution/liquidation_quantity': liquidation_qty, # Filled by force_market_order
+                    'execution/unfilled_quantity': unfilled_qty,       # NOT filled (book depth insufficient)
+                    # Execution rates
+                    'execution/fill_rate': fill_rate,                  # Total fill rate (may be < 1.0!)
+                    'execution/model_fill_rate': model_fill_rate,      # Model orders fill rate
+                    'execution/liquidation_fill_rate': liquidation_fill_rate,  # Force market order fill rate
+                    'execution/unfill_rate': unfill_rate,              # Unfilled rate
                     'execution/agent_trades': float(epoch_info['agent_trades']),
                     'execution/total_trades': float(epoch_info['total_trades']),
                 })
+
+                # Print warning if unfilled > 0
+                if unfilled_qty > 0:
+                    print(f"[WARNING] Epoch {epoch}: {unfilled_qty:.0f} shares unfilled (unfill_rate={unfill_rate:.1%})")
 
             if epoch % 10 == 0:
                 print(f"Epoch {epoch}: mean={mean_fitness:.4f}, best={best_fitness:.4f}, std={jnp.std(fitnesses):.4f}")
