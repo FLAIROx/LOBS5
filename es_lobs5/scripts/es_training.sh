@@ -52,6 +52,16 @@ cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
 source /lus/lfs1aip2/home/s5e/kangli.s5e/miniforge3/etc/profile.d/conda.sh
 conda activate lobs5
 
+# -----------------------------------------------------------------------------
+# JAX Compilation Cache (must be set BEFORE Python/JAX starts)
+# Caches XLA compilation results to disk for fast warm start (~20min → <2min)
+# NOTE: Same config = cache hit; different config (N_STEPS, etc) = cache miss
+# -----------------------------------------------------------------------------
+export JAX_COMPILATION_CACHE_DIR="$HOME/.cache/es_lobs5_jax_compilation"
+export JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES=-1
+export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0
+mkdir -p "$JAX_COMPILATION_CACHE_DIR"
+
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/AlphaTrade:$PYTHONPATH"
