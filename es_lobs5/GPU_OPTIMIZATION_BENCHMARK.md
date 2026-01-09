@@ -18,19 +18,33 @@ This document tracks performance benchmarks for each optimization applied to the
 ## Baseline (Pre-optimization)
 
 **Date:** 2026-01-09
-**Commit:** (current HEAD before optimization)
-**Job ID:** TBD
+**Commit:** 31d667d (docs: add GPU optimization code changes reference)
+**Job ID:** 1865747
 
 | Metric | Value |
 |--------|-------|
-| Total Time (10 epochs) | TBD |
-| Per-Epoch Time | TBD |
-| First Epoch (incl. compile) | TBD |
-| Avg Epoch (excluding first) | TBD |
+| Total Time (10 epochs) | **1696.5 seconds** |
+| Per-Epoch Time (avg) | **169.64 seconds** |
+| First Epoch (incl. XLA compile) | **573 seconds** |
+| Avg Epoch (epochs 2-10) | **~90 seconds** |
+
+**Detailed epoch times:**
+- Epoch 0: 573s (XLA compilation)
+- Epoch 1: 87s
+- Epoch 2: 87s
+- Epoch 3: 87s
+- Epoch 4: 86s
+- Epoch 5: 87s
+- Epoch 6: 87s
+- Epoch 7: 87s
+- Epoch 8: 87s
+- Epoch 9: 87s
 
 **Notes:**
-- XLA compilation cache enabled
+- XLA compilation cache enabled (first run triggers compilation)
 - Standard float32 precision
+- 360M parameter model (360,436,845 params)
+- 4 GPUs (shard_map + vmap)
 
 ---
 

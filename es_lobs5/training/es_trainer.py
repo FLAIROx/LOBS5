@@ -1514,8 +1514,51 @@ class ESTrainer:
             # Select background generation function
             n_warmup_cfg = getattr(config, 'n_warmup_msgs', 500)
             if config.background_mode == 'historical_replay':
-                step_fn_background = historical_replay_step
                 replay_ptr_init = jnp.int32(n_warmup_cfg + step_idx * config.background_msgs_per_step)
+
+                # ================================================================
+                # OPTIMIZATION: Pre-batch all background messages before scan
+                # This eliminates dynamic indexing inside the scan loop.
+                # Uses jax.lax.dynamic_slice for JAX-traceable slicing.
+                # ================================================================
+                bg_tokens_batch = jax.lax.dynamic_slice(
+                    replay_tokens,
+                    (replay_ptr_init, 0),
+                    (config.background_msgs_per_step, msg_len)
+                )
+                bg_raw_batch = jax.lax.dynamic_slice(
+                    replay_data_raw,
+                    (replay_ptr_init, 0),
+                    (config.background_msgs_per_step, replay_data_raw.shape[1])
+                )
+
+                def historical_replay_step_batched(wcarry, bg_msg_idx):
+                    """Load pre-batched messages from historical data (optimized).
+
+                    Uses pre-sliced bg_tokens_batch and bg_raw_batch instead of
+                    dynamic indexing into replay_tokens/replay_data_raw.
+                    """
+                    key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr = wcarry
+
+                    # Use pre-batched data (captured from closure)
+                    replayed_msg_tokens = bg_tokens_batch[bg_msg_idx]
+                    replayed_msg_raw = bg_raw_batch[bg_msg_idx]
+
+                    sim_msg = msg_to_jnp(replayed_msg_raw)
+                    bg_order_id = WORLD_ORDER_ID_START + oid_offset
+                    sim_msg = sim_msg.at[4].set(bg_order_id)
+                    sim_msg = sim_msg.at[5].set(HISTORICAL_TRADER_ID)
+
+                    sim_st = process_order_array(sim_st, sim_msg)
+                    book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
+                    msg_hist = jnp.concatenate([msg_hist[msg_len:], replayed_msg_tokens])
+
+                    oid_offset = oid_offset + 1
+                    new_replay_ptr = replay_ptr + 1
+
+                    return (key, msg_hist, hidden, sim_st, book_f, oid_offset, new_replay_ptr), replayed_msg_tokens
+
+                step_fn_background = historical_replay_step_batched
             else:
                 step_fn_background = world_model_step
                 replay_ptr_init = jnp.int32(0)
