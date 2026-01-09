@@ -1955,7 +1955,7 @@ class ESTrainer:
                 fitness_max = float(jnp.max(fitnesses))
                 fitness_min = float(jnp.min(fitnesses))
 
-                # Calculate model fill rate
+                # Calculate model fill rate (how much was filled by model vs doom trade)
                 model_qty = float(epoch_info.get('model_quantity', 0))
                 model_fill_rate = model_qty / self.config.task_size if self.config.task_size > 0 else 0.0
 
@@ -1970,16 +1970,10 @@ class ESTrainer:
                     'execution/agent_quantity': float(epoch_info['agent_quantity']),
                     'execution/model_quantity': float(epoch_info.get('model_quantity', 0)),
                     'execution/liquidation_quantity': float(epoch_info.get('liquidation_quantity', 0)),
-                    'execution/unfilled_quantity': float(epoch_info.get('unfilled_quantity', 0)),
-                    'execution/model_fill_rate': model_fill_rate,
+                    'execution/model_fill_rate': model_fill_rate,  # 1.0 = all filled by model, 0.0 = all by doom trade
                     'execution/agent_trades': float(epoch_info['agent_trades']),
                     'execution/total_trades': float(epoch_info['total_trades']),
                 })
-
-            # Warning for unfilled quantity (insufficient depth)
-            unfilled_qty = float(epoch_info.get('unfilled_quantity', 0))
-            if unfilled_qty > 0:
-                print(f"[WARNING] Epoch {epoch}: {unfilled_qty:.0f} shares unfilled due to insufficient depth!")
 
             if epoch % 10 == 0:
                 print(f"Epoch {epoch}: mean={mean_fitness:.4f}, best={best_fitness:.4f}, std={jnp.std(fitnesses):.4f}")
