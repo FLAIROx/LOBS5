@@ -15,118 +15,129 @@ This document tracks performance benchmarks for each optimization applied to the
 
 ---
 
-## Baseline (Pre-optimization)
+## ⚠️ IMPORTANT: Testing Condition Clarification
+
+**Previous tests had confounded variables:**
+
+| Test | freeze_nonlora | Parameters Trained | Result |
+|------|----------------|-------------------|--------|
+| Original Baseline (31d667d) | **False** | 360M (all) | 87s/epoch |
+| Opt 1 Test (4e30831) | **True** | LORA only (~1M) | 6s/epoch |
+
+The 93% improvement was **NOT** from batched loading, but from `freeze_nonlora=True` (only training LORA parameters).
+
+**All future tests must use `freeze_nonlora=True` for valid comparison.**
+
+---
+
+## Baseline (Pre-optimization, freeze_nonlora=False) - DEPRECATED
 
 **Date:** 2026-01-09
-**Commit:** 31d667d (docs: add GPU optimization code changes reference)
+**Commit:** 31d667d
 **Job ID:** 1865747
+**⚠️ Status:** DEPRECATED - Uses freeze_nonlora=False (360M params)
 
 | Metric | Value |
 |--------|-------|
-| Total Time (10 epochs) | **1696.5 seconds** |
-| Per-Epoch Time (avg) | **169.64 seconds** |
-| First Epoch (incl. XLA compile) | **573 seconds** |
-| Avg Epoch (epochs 2-10) | **~90 seconds** |
+| Total Time (10 epochs) | 1696.5 seconds |
+| Per-Epoch Time (avg) | 169.64 seconds |
+| First Epoch (incl. XLA compile) | 573 seconds |
+| Avg Epoch (epochs 2-10) | ~90 seconds |
 
-**Detailed epoch times:**
-- Epoch 0: 573s (XLA compilation)
-- Epoch 1: 87s
-- Epoch 2: 87s
-- Epoch 3: 87s
-- Epoch 4: 86s
-- Epoch 5: 87s
-- Epoch 6: 87s
-- Epoch 7: 87s
-- Epoch 8: 87s
-- Epoch 9: 87s
+---
+
+## NEW Baseline (freeze_nonlora=True)
+
+**Date:** 2026-01-09
+**Commit:** 6937fe8 (revert batched loading)
+**Job ID:** 1865796
+**Status:** Running...
+
+| Metric | Value |
+|--------|-------|
+| Total Time (10 epochs) | TBD |
+| Per-Epoch Time (avg) | TBD |
+| First Epoch (incl. XLA compile) | TBD |
+| Avg Epoch (epochs 2-10) | TBD |
 
 **Notes:**
-- XLA compilation cache enabled (first run triggers compilation)
-- Standard float32 precision
-- 360M parameter model (360,436,845 params)
-- 4 GPUs (shard_map + vmap)
+- `freeze_nonlora=True` (LORA-only training)
+- This is the correct baseline for optimization comparison
 
 ---
 
 ## Optimization 1: Historical Replay Batched Loading
 
-**Status:** COMPLETED
-**Job ID:** 1865778
-**Commit:** 4e30831
+**Status:** Pending (needs re-test with correct baseline)
+**Expected Impact:** 5-10% (lower than previously claimed)
+
+**Rationale:**
+- Convert dynamic indexing `replay_tokens[replay_ptr]` to static indexing `batch[i]`
+- XLA can better optimize static index patterns
+
+**Changes:**
+```python
+# Before: Dynamic indexing inside scan
+replayed_msg_tokens = replay_tokens[replay_ptr]
+
+# After: Pre-batch outside scan
+bg_tokens_batch = jax.lax.dynamic_slice(replay_tokens, (ptr_init, 0), (K, M))
+replayed_msg_tokens = bg_tokens_batch[bg_msg_idx]
+```
 
 | Metric | Baseline | After | Change |
 |--------|----------|-------|--------|
-| Total Time (10 epochs) | 1696.5s | **803.9s** | **-52.6%** |
-| Per-Epoch Time (avg) | 169.64s | 80.39s | -52.6% |
-| First Epoch (XLA compile) | 573s | 375s | **-34.6%** |
-| Avg Epoch (2-10) | 87s | **~6s** | **-93.1%** |
-
-**Changes:**
-- Pre-slice all background messages before `jax.lax.scan` using `jax.lax.dynamic_slice`
-- Replace dynamic indexing with batched array access
-- XLA generates more efficient code with static slice shapes
-
-**Analysis:**
-- The optimization significantly reduces per-epoch time from 87s to ~6s (93% improvement!)
-- XLA compilation is also faster (375s vs 573s) due to simpler compiled graph
-- The batched approach eliminates dynamic indexing overhead inside the scan loop
+| Total Time | TBD | TBD | TBD |
+| Per-Epoch Time | TBD | TBD | TBD |
 
 ---
 
-## Optimization 2: BF16 Mixed Precision
+## Optimization 2: Static Shape Optimization
 
 **Status:** Pending
-**Expected Impact:** 5-10%
+**Expected Impact:** 3-5%
+
+**Changes:**
+```python
+# Before: Dynamic concatenate
+msg_hist = jnp.concatenate([msg_hist[msg_len:], new_tokens])
+
+# After: Static roll + update
+msg_hist = jnp.roll(msg_hist, -msg_len, axis=0)
+msg_hist = msg_hist.at[-msg_len:].set(new_tokens)
+```
 
 | Metric | Baseline | After | Change |
 |--------|----------|-------|--------|
-| Total Time | - | - | - |
-| Per-Epoch Time | - | - | - |
-
-**Changes:**
-- Enable bfloat16 for ES model weights
-- Keep decoder/log_softmax in float32
+| Total Time | TBD | TBD | TBD |
+| Per-Epoch Time | TBD | TBD | TBD |
 
 ---
 
-## Optimization 3: Static Shape Optimization
-
-**Status:** Pending
-**Expected Impact:** 5-10%
-
-| Metric | Baseline | After | Change |
-|--------|----------|-------|--------|
-| Total Time | - | - | - |
-| Per-Epoch Time | - | - | - |
-
-**Changes:**
-- Replace dynamic concatenate with `jax.lax.dynamic_update_slice`
-- Ensure static shapes for XLA fusion
-
----
-
-## Optimization 4: XLA Environment Flags
+## Optimization 3: XLA Environment Flags
 
 **Status:** Pending
 **Expected Impact:** Variable
 
+**Changes:**
+```bash
+export XLA_FLAGS="--xla_gpu_enable_triton_gemm=true"
+```
+
 | Metric | Baseline | After | Change |
 |--------|----------|-------|--------|
-| Total Time | - | - | - |
-| Per-Epoch Time | - | - | - |
-
-**Changes:**
-- Add `XLA_FLAGS="--xla_gpu_enable_triton_gemm=true"`
+| Total Time | TBD | TBD | TBD |
+| Per-Epoch Time | TBD | TBD | TBD |
 
 ---
 
 ## Summary
 
-| Optimization | Per-Epoch Change | Cumulative |
-|--------------|------------------|------------|
-| Baseline | - | - |
-| 1. Batched Loading | - | - |
-| 2. BF16 | - | - |
-| 3. Static Shape | - | - |
-| 4. XLA Flags | - | - |
-| **Final** | - | - |
+| Optimization | Per-Epoch Change | Cumulative | Valid Test? |
+|--------------|------------------|------------|-------------|
+| OLD Baseline (freeze=False) | 87s | - | N/A |
+| NEW Baseline (freeze=True) | TBD | - | ✅ |
+| 1. Batched Loading | TBD | TBD | Pending |
+| 2. Static Shape | TBD | TBD | Pending |
+| 3. XLA Flags | TBD | TBD | Pending |
+| **Final** | TBD | TBD | - |
