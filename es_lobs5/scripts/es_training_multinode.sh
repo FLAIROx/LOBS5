@@ -51,6 +51,12 @@ if [ $((N_PERTURBATIONS % N_TOTAL_GPUS)) -ne 0 ]; then
     exit 1
 fi
 
+# Get git info (before heredoc, so it's captured at submission time)
+GIT_BRANCH=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 branch --show-current 2>/dev/null || echo "unknown")
+GIT_COMMIT_SHORT=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_COMMIT_FULL=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 rev-parse HEAD 2>/dev/null || echo "unknown")
+GIT_COMMIT_MSG=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 log -1 --format='%s' 2>/dev/null || echo "unknown")
+
 echo "=============================================="
 echo " ES Training Multi-Node Setup"
 echo "=============================================="
@@ -58,6 +64,9 @@ echo "N_NODES: ${N_NODES}"
 echo "GPUs per node: ${N_GPUS_PER_NODE}"
 echo "Total GPUs: ${N_TOTAL_GPUS}"
 echo "N_PERTURBATIONS: ${N_PERTURBATIONS} (${N_PERTURBATIONS}/${N_TOTAL_GPUS} = $((N_PERTURBATIONS / N_TOTAL_GPUS)) per GPU)"
+echo "----------------------------------------------"
+echo "Git Branch: ${GIT_BRANCH}"
+echo "Git Commit: ${GIT_COMMIT_SHORT}"
 echo "=============================================="
 
 # Create temporary SBATCH script
@@ -82,6 +91,10 @@ echo "Job ID: \${SLURM_JOB_ID}"
 echo "Nodes: \${SLURM_NODELIST}"
 echo "Total GPUs: ${N_TOTAL_GPUS}"
 echo "Start time: \$(date)"
+echo "----------------------------------------------"
+echo "Git Branch: ${GIT_BRANCH}"
+echo "Git Commit: ${GIT_COMMIT_SHORT} (${GIT_COMMIT_FULL})"
+echo "Commit Msg: ${GIT_COMMIT_MSG}"
 echo "=============================================="
 
 # Environment Setup

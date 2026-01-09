@@ -35,6 +35,14 @@
 #
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# Git Version Info (captured at submission time)
+# -----------------------------------------------------------------------------
+GIT_BRANCH=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 branch --show-current 2>/dev/null || echo "unknown")
+GIT_COMMIT_SHORT=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_COMMIT_FULL=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 rev-parse HEAD 2>/dev/null || echo "unknown")
+GIT_COMMIT_MSG=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 log -1 --format='%s' 2>/dev/null || echo "unknown")
+
 echo "=============================================="
 echo " ES Training - Production"
 echo "=============================================="
@@ -42,6 +50,10 @@ echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node: ${SLURM_NODELIST}"
 echo "GPUs: 4"
 echo "Start time: $(date)"
+echo "----------------------------------------------"
+echo "Git Branch: ${GIT_BRANCH}"
+echo "Git Commit: ${GIT_COMMIT_SHORT} (${GIT_COMMIT_FULL})"
+echo "Commit Msg: ${GIT_COMMIT_MSG}"
 echo "=============================================="
 
 # -----------------------------------------------------------------------------
