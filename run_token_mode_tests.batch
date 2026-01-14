@@ -1,0 +1,59 @@
+#!/bin/bash
+#SBATCH --job-name=token_mode_tests
+#SBATCH --output=logs/token_mode_tests_%j.out
+#SBATCH --error=logs/token_mode_tests_%j.err
+#SBATCH --time=00:30:00
+#SBATCH --partition=workq
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+
+echo "=============================================="
+echo " Token Mode Unit Tests"
+echo "=============================================="
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $(hostname)"
+echo "Start time: $(date)"
+echo "=============================================="
+
+# Activate conda environment
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate lobs5
+
+cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+
+# Set JAX to CPU-only for faster tests
+export JAX_PLATFORMS=cpu
+
+# Install pytest if not available
+pip install pytest --quiet 2>/dev/null || echo "pytest already installed"
+
+echo ""
+echo "[1] Running syntax check on encoding.py..."
+python -m py_compile lob/encoding.py && echo "✓ encoding.py syntax OK" || echo "✗ encoding.py syntax error"
+
+echo ""
+echo "[2] Running Message_Tokenizer tests..."
+python -m pytest tests/test_message_tokenizer.py -v --tb=short -x 2>&1 | head -100
+
+echo ""
+echo "[3] Running Vocab tests..."
+python -m pytest tests/test_vocab.py -v --tb=short -x 2>&1 | head -100
+
+echo ""
+echo "[4] Running Encoding tests..."
+python -m pytest tests/test_encoding.py -v --tb=short -x 2>&1 | head -100
+
+echo ""
+echo "[5] Running Validation Helpers tests..."
+python -m pytest tests/test_validation_helpers.py -v --tb=short -x 2>&1 | head -100
+
+echo ""
+echo "[6] Running all tests with summary..."
+python -m pytest tests/ -v --tb=short 2>&1 | tail -50
+
+echo ""
+echo "=============================================="
+echo "End time: $(date)"
+echo "=============================================="

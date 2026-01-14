@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=vocab_verify
+#SBATCH --output=logs/vocab_verify_%j.out
+#SBATCH --error=logs/vocab_verify_%j.err
+#SBATCH --time=00:30:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --partition=workq
+#SBATCH --gres=gpu:4
+
+# Activate environment
+source /lus/lfs1aip2/home/s5e/kangli.s5e/miniforge3/etc/profile.d/conda.sh
+conda activate lobs5
+
+cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+
+# PYTHONPATH
+export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/JaxMARL-HFT:$PYTHONPATH"
+export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5:$PYTHONPATH"
+
+echo "============================================"
+echo "Vocab验证: 原始 vs Perturbed Token"
+echo "============================================"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURM_NODELIST"
+echo "Start: $(date)"
+echo "============================================"
+
+# Show GPU info
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1
+
+echo ""
+
+python test_vocab_verify.py
+
+echo ""
+echo "============================================"
+echo "完成: $(date)"
+echo "============================================"

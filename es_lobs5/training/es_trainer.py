@@ -44,6 +44,7 @@ jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)  # Cache all 
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
+from jax.experimental.multihost_utils import process_allgather
 from functools import partial
 import argparse
 from tqdm import tqdm
@@ -56,6 +57,8 @@ LobState = None
 Message_Tokenizer = None
 encoding = None
 get_best_bid_and_ask = None
+create_trade = None
+add_trade = None
 _all_noisers = None
 _ES_PaddedLobPredModel = None
 
@@ -109,10 +112,14 @@ __all__ = ['ESTrainer', 'create_es_config', 'es_train']
 
 def _lazy_import_jaxlob():
     """Lazy import JaxLOB to avoid import errors when not using this mode."""
-    global OrderBook, LobState, Message_Tokenizer, encoding, get_best_bid_and_ask
+    global OrderBook, LobState, Message_Tokenizer, encoding, get_best_bid_and_ask, create_trade, add_trade
     if OrderBook is None:
         from gymnax_exchange.jaxob.jorderbook import OrderBook as _OrderBook, LobState as _LobState
-        from gymnax_exchange.jaxob.JaxOrderBookArrays import get_best_bid_and_ask as _get_best_bid_and_ask
+        from gymnax_exchange.jaxob.JaxOrderBookArrays import (
+            get_best_bid_and_ask as _get_best_bid_and_ask,
+            create_trade as _create_trade,
+            add_trade as _add_trade,
+        )
         from lob.encoding import Message_Tokenizer as _Message_Tokenizer
         import lob.encoding as _encoding
         OrderBook = _OrderBook
@@ -120,6 +127,8 @@ def _lazy_import_jaxlob():
         Message_Tokenizer = _Message_Tokenizer
         encoding = _encoding
         get_best_bid_and_ask = _get_best_bid_and_ask
+        create_trade = _create_trade
+        add_trade = _add_trade
 
 
 def _get_flax_loaders():
@@ -267,6 +276,8 @@ def create_es_config():
     parser.add_argument('--sigma', type=float, default=0.01, help='Noise std')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--lora_rank', type=int, default=4, help='LORA rank')
+    parser.add_argument('--freeze_nonlora', type=bool, default=True,
+                        help='Freeze non-LORA params (embeddings, base model). Default: True')
 
     # Training configuration
     parser.add_argument('--n_perturbations', type=int, default=128,
@@ -302,6 +313,8 @@ def create_es_config():
                         help='Background message generation mode')
     parser.add_argument('--replay_data_path', type=str, default=None,
                         help='Path to historical data directory for replay mode')
+    parser.add_argument('--file_idx', type=int, default=None,
+                        help='Fixed file index for replay data (default: random, wraps with modulo)')
 
     # Data directory for initial state
     parser.add_argument('--data_dir', type=str, default=None,
@@ -310,12 +323,24 @@ def create_es_config():
     # Other
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output_dir', type=str, default='./es_checkpoints')
+    parser.add_argument('--checkpoint_dir', type=str, default='./es_checkpoints',
+                        help='Directory to save ES checkpoints')
+    parser.add_argument('--checkpoint_every', type=int, default=50,
+                        help='Save checkpoint every N epochs')
 
     # W&B logging
     parser.add_argument('--wandb_project', type=str, default=None,
                         help='Weights & Biases project name')
     parser.add_argument('--wandb_entity', type=str, default=None,
                         help='Weights & Biases entity/username')
+
+    # Multi-node distributed training
+    parser.add_argument('--coord_addr', type=str, default=None,
+                        help='Coordinator address (IP:port) for multi-node distributed training')
+    parser.add_argument('--num_procs', type=int, default=None,
+                        help='Total number of processes (one per node)')
+    parser.add_argument('--proc_id', type=int, default=None,
+                        help='Process ID for this node (0-indexed)')
 
     return parser
 
@@ -574,6 +599,22 @@ class ESTrainer:
 
         self.config = config
 
+        # ========================================================================
+        # Multi-node distributed detection
+        # NOTE: jax.distributed.initialize() is called in es_training.py BEFORE
+        # importing this module, because it must happen before any JAX operations.
+        # Here we just detect if we're in distributed mode.
+        # ========================================================================
+        if jax.process_count() > 1:
+            self._is_distributed = True
+            self._process_index = jax.process_index()
+            self._process_count = jax.process_count()
+            print(f"[DIST] Running in distributed mode: process {self._process_index} of {self._process_count}")
+        else:
+            self._is_distributed = False
+            self._process_index = 0
+            self._process_count = 1
+
         # Legacy alias: n_threads -> n_perturbations
         if hasattr(config, 'n_threads') and getattr(config, 'n_threads', None) is not None:
             if not hasattr(config, 'n_perturbations') or getattr(config, 'n_perturbations', 128) == 128:
@@ -631,10 +672,23 @@ class ESTrainer:
         # H3: Multi-GPU Mesh Configuration (MUST be before _compile_eval_batch)
         # Reference: HyperscaleES/llm_experiments/general_do_evolution_multi_gpu.py
         # Creates a 1D mesh along 'data' axis for data-parallel ES evaluation
+        #
+        # Multi-node mode (HyperscaleES pattern):
+        # - Each process has 1 local GPU (via SLURM --ntasks-per-node=4)
+        # - Use jax.local_devices() for local mesh
+        # - Cross-node gradient sync via process_allgather in train_epoch
         # ========================================================================
-        self._n_devices = len(jax.devices())
-        self._mesh = Mesh(jax.devices(), ('data',))
-        print(f"[H3] Created mesh with {self._n_devices} devices")
+        if self._is_distributed:
+            # Multi-node: Each process has 1 local device
+            local_devices = jax.local_devices()
+            self._n_devices = len(local_devices)
+            self._mesh = Mesh(local_devices, ('data',))
+            print(f"[H3] Multi-node: Using {self._n_devices} local device(s) (process {self._process_index})")
+        else:
+            # Single-node: Use all devices
+            self._n_devices = len(jax.devices())
+            self._mesh = Mesh(jax.devices(), ('data',))
+            print(f"[H3] Single-node: Using {self._n_devices} device(s)")
         print(f"[H3] Mesh axis: {self._mesh.axis_names}")
 
         # ========================================================================
@@ -707,8 +761,12 @@ class ESTrainer:
         from lob.validation_helpers import syntax_validation_matrix
         self.syntax_valid_mask = syntax_validation_matrix(self.vocab)
 
+        # Check BF16 mixed precision status (controlled by USE_BF16 env var, default='1')
+        use_bf16 = os.environ.get('USE_BF16', '1') == '1'
+
         print(f"[INIT-FLAX] Flax model loaded successfully")
         print(f"[INIT-FLAX]   token_mode={token_mode}, batchnorm={self.flax_batchnorm}")
+        print(f"[INIT-FLAX]   mixed_precision={'BF16' if use_bf16 else 'FP32'} (USE_BF16={os.environ.get('USE_BF16', '1')})")
 
     def _init_noiser(self):
         """Initialize EGGROLL noiser for Policy.
@@ -729,16 +787,51 @@ class ESTrainer:
         # Get group_size from config (required for EggRollBS, default 0 for EggRoll)
         group_size = getattr(config, 'group_size', 0)
 
+        # freeze_nonlora=True: Only train LORA parameters, freeze embeddings & base model
+        # freeze_nonlora=False: Train ALL parameters (not recommended for large models)
+        freeze_nonlora = getattr(config, 'freeze_nonlora', True)  # Default: freeze non-LORA
+
         self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
             self.lobs5_init.params,
             sigma=config.sigma,
             lr=config.lr,
             rank=config.lora_rank,
-            freeze_nonlora=False,
+            freeze_nonlora=freeze_nonlora,
             noise_reuse=0,
             group_size=group_size,
             solver=None,  # Uses default optax.sgd
         )
+
+        # Log training mode
+        if freeze_nonlora:
+            print(f"[NOISER] LORA-only training: freeze_nonlora=True, rank={config.lora_rank}")
+            print(f"[NOISER] Only LORA parameters will be updated (embeddings & base model frozen)")
+        else:
+            print(f"[NOISER] Full fine-tuning: freeze_nonlora=False, rank={config.lora_rank}")
+            print(f"[NOISER] WARNING: ALL parameters will be updated (including embeddings)")
+
+        # Calculate actual trainable parameters based on es_map
+        # ES types: 0=PARAM (full), 1=MM_PARAM (LORA), 2=EMB_PARAM (frozen), 3=EXCLUDED (frozen)
+        total_params = 0
+        trainable_params = 0
+
+        def count_params(param, es_type):
+            nonlocal total_params, trainable_params
+            size = param.size
+            total_params += size
+            # MM_PARAM (1) = LORA update, PARAM (0) = full update (if not frozen)
+            if es_type == 1:  # MM_PARAM - always LORA updated
+                trainable_params += size
+            elif es_type == 0 and not freeze_nonlora:  # PARAM - only if not frozen
+                trainable_params += size
+
+        jax.tree.map(count_params, self.lobs5_init.params, self.lobs5_init.es_map)
+
+        frozen_params = total_params - trainable_params
+        print(f"[NOISER] Parameter breakdown:")
+        print(f"[NOISER]   Total: {total_params:,}")
+        print(f"[NOISER]   Trainable: {trainable_params:,} ({100*trainable_params/total_params:.2f}%)")
+        print(f"[NOISER]   Frozen: {frozen_params:,} ({100*frozen_params/total_params:.2f}%)")
 
     def _init_jaxlob(self):
         """Initialize JaxLOB order book simulator.
@@ -845,8 +938,10 @@ class ESTrainer:
         # Extract date from dataset files for logging
         from glob import glob
         msg_files = sorted(glob(os.path.join(data_path, '*message*.npy')))
-        if msg_files:
-            self.replay_data_date = os.path.basename(msg_files[file_idx]).split('_')[1]
+        if msg_files and len(msg_files) > 0:
+            # Use modulo to handle file_idx > len(msg_files)
+            safe_idx = file_idx % len(msg_files)
+            self.replay_data_date = os.path.basename(msg_files[safe_idx]).split('_')[1]
         else:
             self.replay_data_date = 'unknown'
         self.replay_data_dir = data_path
@@ -1256,6 +1351,29 @@ class ESTrainer:
         msg_seq_len = fp.get('msg_seq_len', 500)
         context_len = msg_len * msg_seq_len
 
+        # =====================================================================
+        #                        TRADER ID CONSTANTS
+        # =====================================================================
+        # THREE DISTINCT TRADER IDs to identify order sources in JaxLOB:
+        #
+        #   (1) HISTORICAL_TRADER_ID = -2000
+        #       → Orders replayed from historical market data files
+        #       → Background liquidity from real market recordings
+        #
+        #   (2) POLICY_TRADER_ID = -1000
+        #       → Orders generated by the ES-trained policy model
+        #       → The agent being trained (our trading decisions)
+        #
+        #   (3) WORLD_TRADER_ID = -3000
+        #       → Orders generated by the world model (background generator)
+        #       → AI-generated background market activity
+        #
+        # These IDs enable tracking and analysis of order flow by source.
+        # =====================================================================
+        HISTORICAL_TRADER_ID = -2000
+        POLICY_TRADER_ID = -1000
+        WORLD_TRADER_ID = -3000
+
         # Order ID ranges
         POLICY_ORDER_ID_START = 1000000
         WORLD_ORDER_ID_START = 2000000
@@ -1357,7 +1475,7 @@ class ESTrainer:
                 sim_msg = msg_to_jnp(replayed_msg_raw)  # Using imported function from lob.inference_no_errcorr
                 bg_order_id = WORLD_ORDER_ID_START + oid_offset
                 sim_msg = sim_msg.at[4].set(bg_order_id)
-                sim_msg = sim_msg.at[5].set(-2000)
+                sim_msg = sim_msg.at[5].set(HISTORICAL_TRADER_ID)
 
                 sim_st = process_order_array(sim_st, sim_msg)
                 book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
@@ -1410,7 +1528,7 @@ class ESTrainer:
                 world_order_id = WORLD_ORDER_ID_START + oid_offset
                 sim_msg, _ = get_sim_msg_es(
                     world_msg, sim_obj, sim_st, mid_price, world_order_id, config.tick_size, encoder,
-                    trader_id=-2000, token_mode=config.token_mode
+                    trader_id=WORLD_TRADER_ID, token_mode=config.token_mode
                 )
 
                 sim_st = process_order_array(sim_st, sim_msg)
@@ -1525,7 +1643,7 @@ class ESTrainer:
             policy_order_id = POLICY_ORDER_ID_START + step_idx
             sim_msg, msg_decoded = get_sim_msg_es(
                 policy_msg, sim_obj, sim_state, mid_price, policy_order_id, config.tick_size, encoder,
-                trader_id=-1000, token_mode=config.token_mode
+                trader_id=POLICY_TRADER_ID, token_mode=config.token_mode
             )
 
             # Cancel previous unfilled policy order
@@ -1584,6 +1702,63 @@ class ESTrainer:
             length=config.n_steps,
         )
 
+        # =====================================================================
+        # FORCED LIQUIDATION: Real market order to sweep the order book
+        # This is the "hidden" final step that attempts to close remaining
+        # position. Unlike doom_trade, this uses a REAL order that may NOT
+        # fill completely if there's insufficient book depth.
+        #
+        # SELL: price = 0 → matches all bids from high to low
+        # BUY: price = maxint → matches all asks from low to high
+        # =====================================================================
+        model_quantity = final_quant_executed  # Save quantity from model orders
+        quant_remaining = task_size - final_quant_executed
+        liquidation_order_id = POLICY_ORDER_ID_START + config.n_steps
+
+        def _create_market_order(args):
+            """Create real market order that sweeps the order book.
+
+            Unlike doom_trade (virtual trade), this submits a REAL order
+            through the JaxLOB matching engine. May have unfilled quantity
+            if book depth is insufficient.
+
+            Args:
+                args: (sim_state, quant_to_liquidate) tuple
+
+            Returns:
+                Updated LobState after order processing
+            """
+            sim_state, quant_to_liquidate = args
+
+            is_sell = (config.task == 'sell')
+            # Market price: sell at 0 (matches all bids), buy at maxint (matches all asks)
+            market_price = jnp.where(is_sell, 0, jaxlob_cfg.maxint)
+            # JaxLOB side: -1 = sell (hit bids), 1 = buy (lift asks)
+            side_jaxlob = jnp.where(is_sell, -1, 1)
+
+            # Message format: [event_type, side, quantity, price, order_id, trader_id, time_s, time_ns]
+            # Event type 1 = Limit order (at extreme price = effective market order)
+            sim_msg = jnp.array([
+                1,                      # event_type = Limit
+                side_jaxlob,            # side (-1=sell, 1=buy)
+                quant_to_liquidate,     # quantity
+                market_price,           # price (0 or maxint)
+                liquidation_order_id,   # order_id
+                POLICY_TRADER_ID,       # trader_id
+                0,                      # time_s
+                0,                      # time_ns
+            ], dtype=jnp.int32)
+
+            return process_order_array(sim_state, sim_msg)
+
+        # Only execute liquidation if there's remaining quantity
+        final_state = jax.lax.cond(
+            quant_remaining > 0,
+            _create_market_order,
+            lambda args: args[0],  # Return unchanged state
+            (final_state, quant_remaining)
+        )
+
         # Compute fitness (PnL)
         trades = final_state.trades
         valid_trades_mask = trades[:, 0] != -1
@@ -1613,31 +1788,34 @@ class ESTrainer:
         pnl_normalized = pnl_raw / jnp.maximum(normalization_scale, 1.0)
         pnl = jnp.tanh(pnl_normalized)  # squash to -1 to 1, 0 = executed at mid price
 
-        # Completion penalty (disabled - penalty was too large relative to PnL signal)
-        # shortfall = jnp.maximum(config.task_size - agent_quantity, 0)
-        # completion_penalty = -shortfall * init_mid_price / 1e6 * 0.1
-        completion_penalty = jnp.float32(0.0)
-
         total_trades = jnp.sum(valid_trades_mask)
         agent_trades = jnp.sum(is_policy_trade)
 
-        # Final fitness
-        base_fitness = jnp.where(
-            agent_quantity > 0,
-            pnl + completion_penalty,
-            jnp.where(total_trades > 0, -0.05, -0.1)
-        )
-        fitness = jnp.where(jnp.isfinite(base_fitness), base_fitness, 0.0)
+        # Calculate execution breakdown
+        # model_quantity: executed by model orders during regular steps
+        # liquidation_quantity: executed by force_market_order at end
+        # unfilled_quantity: not executed due to insufficient book depth
+        # NOTE: With force_market_order, agent_quantity MAY BE < task_size!
+        liquidation_quantity = agent_quantity - model_quantity
+        unfilled_quantity = task_size - agent_quantity
+
+        # Final fitness = PnL (only counts what was actually filled)
+        # Unfilled quantity has no revenue and no cost, so PnL is naturally
+        # lower when fill is incomplete (agent receives less for sell task)
+        fitness = jnp.where(jnp.isfinite(pnl), pnl, 0.0)
 
         info = {
             'fitness': fitness,
             'pnl': pnl,                        # normalized to -1 to 1 (tanh)
             'pnl_raw': pnl_raw,                # raw value in cents
             'pnl_normalized': pnl_normalized,  # before tanh (in "ticks")
-            'agent_quantity': agent_quantity,
+            # Execution breakdown
+            'agent_quantity': agent_quantity,          # total executed = model + liquidation (may be < task_size!)
+            'model_quantity': model_quantity,          # executed by model orders
+            'liquidation_quantity': liquidation_quantity,  # executed by force_market_order
+            'unfilled_quantity': unfilled_quantity,    # NOT executed (book depth insufficient)
             'agent_trades': agent_trades,
             'total_trades': total_trades,
-            'completion_penalty': completion_penalty,
             'init_mid_price': init_mid_price,
             'policy_msgs': policy_msgs_all,    # shape: (n_steps, msg_len) for order analysis
         }
@@ -1673,18 +1851,53 @@ class ESTrainer:
         n_devices = getattr(self, '_n_devices', 1)
 
         # ========================================================================
+        # Multi-node partitioning: Each process evaluates a DIFFERENT subset of
+        # perturbations to avoid redundant computation across nodes.
+        #
+        # Example with 256 perturbations and 8 processes:
+        #   Process 0: thread_ids [0-31]    (32 perturbations)
+        #   Process 1: thread_ids [32-63]   (32 perturbations)
+        #   ...
+        #   Process 7: thread_ids [224-255] (32 perturbations)
+        #
+        # After evaluation, use process_allgather to combine results.
+        # ========================================================================
+        n_processes = getattr(self, '_process_count', 1)
+        process_idx = getattr(self, '_process_index', 0)
+
+        if self._is_distributed and n_processes > 1:
+            # Validate divisibility
+            assert n_perturbations % n_processes == 0, \
+                f"[DIST ERROR] n_perturbations ({n_perturbations}) must be divisible by n_processes ({n_processes}). " \
+                f"Consider using n_perturbations={n_processes * (n_perturbations // n_processes)}"
+
+            # Each process evaluates a subset of perturbations
+            local_n_perturbations = n_perturbations // n_processes
+            start_idx = process_idx * local_n_perturbations
+            end_idx = start_idx + local_n_perturbations
+
+            # Generate keys only for this process's perturbations
+            all_keys = jax.random.split(key, n_perturbations)
+            keys = all_keys[start_idx:end_idx]
+            thread_ids = jnp.arange(start_idx, end_idx)
+
+            if epoch == 0:
+                print(f"[DIST] Process {process_idx}/{n_processes}: evaluating thread_ids [{start_idx}-{end_idx-1}] ({local_n_perturbations} perturbations)")
+        else:
+            # Single-node or non-distributed: evaluate all perturbations
+            keys = jax.random.split(key, n_perturbations)
+            thread_ids = jnp.arange(n_perturbations)
+
+        # ========================================================================
         # H1: Validate n_perturbations divisibility for shard_map
         # When using multi-GPU, n_perturbations must be evenly divisible by n_devices
         # so each device gets the same number of perturbations to evaluate.
         # ========================================================================
+        local_n_perturbations = len(thread_ids)
         if n_devices > 1:
-            assert n_perturbations % n_devices == 0, \
-                f"[H1 ERROR] n_perturbations ({n_perturbations}) must be divisible by n_devices ({n_devices}). " \
-                f"Consider using n_perturbations={n_devices * (n_perturbations // n_devices)} or n_perturbations={n_devices * ((n_perturbations // n_devices) + 1)}"
-
-        # Generate keys for all perturbations
-        keys = jax.random.split(key, n_perturbations)
-        thread_ids = jnp.arange(n_perturbations)
+            assert local_n_perturbations % n_devices == 0, \
+                f"[H1 ERROR] local_n_perturbations ({local_n_perturbations}) must be divisible by n_devices ({n_devices}). " \
+                f"Consider adjusting n_perturbations to be divisible by (n_processes × n_devices)."
 
         # ========================================================================
         # G1 + H1: Use pre-compiled eval_batch function
@@ -1732,10 +1945,30 @@ class ESTrainer:
             initial_msg_history,
         )
 
-        # ES gradient update
+        # ========================================================================
+        # Multi-node: Gather fitnesses and infos from all processes
+        # In distributed mode, each process only has its local shard of results.
+        # process_allgather collects all shards to form the complete arrays.
+        #
+        # After gathering, we have ALL n_perturbations fitness values.
+        # The iterinfos must use GLOBAL thread_ids [0..n_perturbations-1]
+        # for correct gradient computation across all perturbations.
+        # ========================================================================
+        if self._is_distributed and n_processes > 1:
+            fitnesses = process_allgather(fitnesses, tiled=True)
+            infos = jax.tree.map(
+                lambda x: process_allgather(x, tiled=True),
+                infos
+            )
+            # Use GLOBAL thread_ids for gradient update (all n_perturbations)
+            global_thread_ids = jnp.arange(n_perturbations)
+        else:
+            global_thread_ids = thread_ids
+
+        # ES gradient update (use global thread_ids after gathering)
         iterinfos = (
             jnp.full(n_perturbations, epoch, dtype=jnp.int32),
-            thread_ids
+            global_thread_ids
         )
 
         # ========================================================================
@@ -1817,27 +2050,33 @@ class ESTrainer:
                 print(f"[TRAIN] Warning: Could not resume from {resume_from}: {e}")
                 print("[TRAIN] Starting fresh training")
 
-        # Initialize W&B
+        # Initialize W&B (only on rank 0 in distributed mode)
         wandb_run = None
         if hasattr(self.config, 'wandb_project') and self.config.wandb_project:
-            import wandb
-            wandb_run = wandb.init(
-                project=self.config.wandb_project,
-                entity=self.config.wandb_entity,
-                name=f"es_jaxlob_n{self.config.n_perturbations}_s{self.config.seed}",
-                config={
-                    'n_perturbations': self.config.n_perturbations,
-                    'n_steps': self.config.n_steps,
-                    'noiser': self.config.noiser,
-                    'sigma': self.config.sigma,
-                    'lr': self.config.lr,
-                    'lora_rank': self.config.lora_rank,
-                    'checkpoint': self.config.lobs5_checkpoint,
-                    'background_mode': self.config.background_mode,
-                },
-                resume='allow' if resume_from else None,
-            )
-            print(f"[TRAIN] W&B initialized: {wandb_run.url}")
+            if self._process_index == 0:
+                import wandb
+                # Get SLURM job ID if available
+                job_id = os.environ.get("SLURM_JOB_ID", "local")
+                n_procs = jax.process_count() if self._is_distributed else 1
+                wandb_run = wandb.init(
+                    project=self.config.wandb_project,
+                    entity=self.config.wandb_entity,
+                    name=f"es_n{self.config.n_perturbations}_s{self.config.seed}_j{job_id}",
+                    config={
+                        'n_perturbations': self.config.n_perturbations,
+                        'n_steps': self.config.n_steps,
+                        'noiser': self.config.noiser,
+                        'sigma': self.config.sigma,
+                        'lr': self.config.lr,
+                        'lora_rank': self.config.lora_rank,
+                        'checkpoint': self.config.lobs5_checkpoint,
+                        'background_mode': self.config.background_mode,
+                        'n_processes': n_procs,
+                        'n_devices_total': len(jax.devices()),
+                    },
+                    resume='allow' if resume_from else None,
+                )
+                print(f"[TRAIN] W&B initialized: {wandb_run.url}")
 
         # Get initial state
         initial_sim_state, initial_msg_history = self._create_initial_sim_state()
@@ -1854,14 +2093,15 @@ class ESTrainer:
             is_best = mean_fitness > best_fitness
             if is_best:
                 best_fitness = mean_fitness
-                # Save best model
-                best_path = os.path.join(checkpoint_dir, 'best')
-                self.save_checkpoint(best_path)
-                self._save_training_state(best_path, epoch, best_fitness)
-                print(f"[TRAIN] New best model saved: fitness={best_fitness:.4f}")
+                # Save best model (only on rank 0 in distributed mode)
+                if self._process_index == 0:
+                    best_path = os.path.join(checkpoint_dir, 'best')
+                    self.save_checkpoint(best_path)
+                    self._save_training_state(best_path, epoch, best_fitness)
+                    print(f"[TRAIN] New best model saved: fitness={best_fitness:.4f}")
 
-            # Periodic checkpointing
-            if (epoch + 1) % checkpoint_every == 0:
+            # Periodic checkpointing (only on rank 0 in distributed mode)
+            if (epoch + 1) % checkpoint_every == 0 and self._process_index == 0:
                 ckpt_path = os.path.join(checkpoint_dir, f'epoch_{epoch}')
                 self.save_checkpoint(ckpt_path)
                 self._save_training_state(ckpt_path, epoch, best_fitness)
@@ -1876,6 +2116,18 @@ class ESTrainer:
                 fitness_max = float(jnp.max(fitnesses))
                 fitness_min = float(jnp.min(fitnesses))
 
+                # Calculate execution rates
+                task_size = self.config.task_size if self.config.task_size > 0 else 1.0
+                agent_qty = float(epoch_info['agent_quantity'])
+                model_qty = float(epoch_info.get('model_quantity', 0))
+                liquidation_qty = float(epoch_info.get('liquidation_quantity', 0))
+                unfilled_qty = float(epoch_info.get('unfilled_quantity', 0))
+
+                fill_rate = agent_qty / task_size                    # Total fill rate (may be < 1.0!)
+                model_fill_rate = model_qty / task_size              # Model orders fill rate
+                liquidation_fill_rate = liquidation_qty / task_size  # Force market order fill rate
+                unfill_rate = unfilled_qty / task_size               # Unfilled rate (book depth insufficient)
+
                 wandb_run.log({
                     'epoch': epoch,
                     'fitness/mean': float(mean_fitness),
@@ -1884,10 +2136,23 @@ class ESTrainer:
                     'fitness/max': fitness_max,
                     'fitness/min': fitness_min,
                     'pnl/mean': float(epoch_info['pnl']),
-                    'execution/agent_quantity': float(epoch_info['agent_quantity']),
+                    # Execution quantities
+                    'execution/agent_quantity': agent_qty,             # Total filled = model + liquidation
+                    'execution/model_quantity': model_qty,             # Filled by model orders
+                    'execution/liquidation_quantity': liquidation_qty, # Filled by force_market_order
+                    'execution/unfilled_quantity': unfilled_qty,       # NOT filled (book depth insufficient)
+                    # Execution rates
+                    'execution/fill_rate': fill_rate,                  # Total fill rate (may be < 1.0!)
+                    'execution/model_fill_rate': model_fill_rate,      # Model orders fill rate
+                    'execution/liquidation_fill_rate': liquidation_fill_rate,  # Force market order fill rate
+                    'execution/unfill_rate': unfill_rate,              # Unfilled rate
                     'execution/agent_trades': float(epoch_info['agent_trades']),
                     'execution/total_trades': float(epoch_info['total_trades']),
                 })
+
+                # Print warning if unfilled > 0
+                if unfilled_qty > 0:
+                    print(f"[WARNING] Epoch {epoch}: {unfilled_qty:.0f} shares unfilled (unfill_rate={unfill_rate:.1%})")
 
             if epoch % 10 == 0:
                 print(f"Epoch {epoch}: mean={mean_fitness:.4f}, best={best_fitness:.4f}, std={jnp.std(fitnesses):.4f}")
