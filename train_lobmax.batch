@@ -31,7 +31,7 @@ echo "============================================"
 #   MODEL_PRESET=125M sbatch train_lobmax.batch
 #   MODEL_PRESET=360M sbatch train_lobmax.batch
 # ============================================
-MODEL_PRESET=${MODEL_PRESET:-30M}
+MODEL_PRESET=${MODEL_PRESET:-125M}
 echo "[*] LOBMAX Model preset: $MODEL_PRESET"
 export MODEL_PRESET
 
