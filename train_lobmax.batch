@@ -11,7 +11,7 @@
 #SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
 
 # === Test config: small model ===
-export PER_GPU_BSZ=4
+export PER_GPU_BSZ=${PER_GPU_BSZ:-4}
 
 echo "============================================"
 echo "LOBMAX Training Job"
