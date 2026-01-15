@@ -38,7 +38,7 @@ class LOBMAXConfig:
     n_classes: int = 128          # Output classes (prediction targets)
     
     # === Sequence Length ===
-    max_target_length: int = 8192  # Maximum sequence length (reduced to fit memory)
+    max_target_length: int = 12288  # Maximum sequence length (24 * 500)
     max_prefill_predict_length: int = -1
     
     # === Attention Configuration ===
@@ -111,9 +111,8 @@ class LOBMAXConfig:
     # === kv cache quantization ===
     quantize_kvcache: bool = False
     
-    # Reduced sequence length to fit in memory (was 12288/12256)
-    max_position_embeddings: int = 8192
-    original_max_position_embeddings: int = 8192
+    max_position_embeddings: int = 12288
+    original_max_position_embeddings: int = 12288
     
     # LOBMAX Specific
     rope_factor: float = 1.0
@@ -221,9 +220,9 @@ class LOBMAXConfig:
             n_layers=getattr(args, 'n_layers', 24),
             vocab_size=getattr(args, 'vocab_size', 128),
             n_classes=getattr(args, 'n_classes', 128),
-            max_target_length=getattr(args, 'max_target_length', 8192),
-            max_position_embeddings=getattr(args, 'max_target_length', 8192),
-            original_max_position_embeddings=getattr(args, 'max_target_length', 8192),
+            max_target_length=getattr(args, 'max_target_length', 12288),
+            max_position_embeddings=getattr(args, 'max_target_length', 12288),
+            original_max_position_embeddings=getattr(args, 'max_target_length', 12288),
             attention=getattr(args, 'attention_kernel', 'flash'),
             rope_type=getattr(args, 'rope_type', 'llama3.1'),
             dropout_rate=getattr(args, 'p_dropout', 0.0),
