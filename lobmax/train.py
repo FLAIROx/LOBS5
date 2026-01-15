@@ -167,15 +167,17 @@ def train_lobmax(args):
 
     # =========================================================================
     # Create JIT-compiled train_step
+    # Create JIT-compiled train_step
     # =========================================================================
     from lob.train_helpers import create_jit_train_step, create_jit_eval_step
 
     log_with_timestamp("Creating JIT-compiled training functions...")
+    # NOTE: create_jit_*_step signatures changed, batchnorm arg removed from them
     jit_train_step_fn = create_jit_train_step(
-        mesh, state, args.batchnorm, has_book_data=args.use_book_data
+        mesh, state, has_book_data=args.use_book_data
     )
     jit_eval_step_fn = create_jit_eval_step(
-        mesh, state, args.batchnorm, has_book_data=args.use_book_data
+        mesh, state, has_book_data=args.use_book_data
     )
     log_with_timestamp("JIT compilation ready")
 
@@ -233,16 +235,20 @@ def train_lobmax(args):
         )
 
         epoch_time = time.time() - epoch_start
-
+        
         # Validation
+        # NOTE: validate signature: (state, apply_fn, testloader, seq_len, in_dim, batchnorm, num_devices, epoch, ...)
         val_loss, val_acc = validate(
             state,
+            state.apply_fn,  # Pass apply_fn!
             valloader,
             seq_len,
+            book_dim, # in_dim
             args.batchnorm,
             args.num_devices,
-            None,  # init_hidden
-            jit_eval_step_fn,
+            epoch,
+            # Kwargs
+            eval_step_fn=jit_eval_step_fn,
         )
 
         # Logging
