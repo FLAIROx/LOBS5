@@ -160,9 +160,31 @@ class LOBMAXModel(nn.Module):
         if x_b.ndim == 2:
             x_b = x_b[None, :, :]  # (L, d_book) -> (1, L, d_book)
         
-        B, L = x_m.shape
+        # Validate consistency
+        assert x_m.shape[0] == x_b.shape[0], "Batch dim mismatch"
+        assert x_m.shape[1] == x_b.shape[1], "Seq len mismatch"
         
-        # Create positions if not provided
+        B, L = x_m.shape
+        original_L = L
+        
+        # Pad for Flash Attention (block size 128)
+        # Note: We rely on the model to handle padding tokens gracefully (e.g. valid mask or learning to ignore)
+        ALIGN = 128
+        if L % ALIGN != 0:
+            pad_len = ALIGN - (L % ALIGN)
+            x_m = jnp.pad(x_m, ((0, 0), (0, pad_len)), constant_values=0)
+            x_b = jnp.pad(x_b, ((0, 0), (0, pad_len), (0, 0)), constant_values=0.0)
+            
+            if positions is not None:
+                if positions.ndim == 1:
+                    positions = jnp.pad(positions, (0, pad_len), constant_values=0)
+                else:
+                    positions = jnp.pad(positions, ((0, 0), (0, pad_len)), constant_values=0)
+                    
+            # Update L to padded length
+            L = L + pad_len
+        
+        # Create positions if not provided (using padded L)
         if positions is None:
             positions = jnp.arange(L)[None, :].repeat(B, axis=0)
         
@@ -180,6 +202,10 @@ class LOBMAXModel(nn.Module):
         
         # === Final Norm ===
         x = self.final_norm(name="final_norm")(x)
+        
+        # Undo Padding if it was applied
+        if x.shape[1] > original_L:
+            x = x[:, :original_L, :]
         
         # === Pooling / Mode ===
         if cfg.mode == "pool":
