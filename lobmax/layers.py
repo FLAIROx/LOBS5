@@ -90,8 +90,9 @@ class TransformerLayer(nn.Module):
         weight_dtype = cfg.get_weight_dtype()
         
         # Input shape for attention initialization
-        # Will be set properly during first call
-        self._inputs_shape = None
+        # Use dummy shape to allow initialization in setup()
+        # MaxText needs shape primarily for the last dimension (d_model)
+        dummy_shape = (1, 1, d_model)
         
         # === Define Submodules in setup() for Remat compatibility ===
         self.pre_attn_norm = rms_norm(
@@ -112,8 +113,8 @@ class TransformerLayer(nn.Module):
             max_target_length=cfg.max_target_length,
             max_prefill_predict_length=cfg.max_prefill_predict_length,
             attention_kernel=cfg.attention,
-            inputs_q_shape=None, # Will be inferred
-            inputs_kv_shape=None,
+            inputs_q_shape=dummy_shape,
+            inputs_kv_shape=dummy_shape,
             mesh=self.mesh,
             dtype=dtype,
             weight_dtype=weight_dtype,
