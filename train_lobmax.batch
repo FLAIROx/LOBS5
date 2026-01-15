@@ -199,7 +199,7 @@ python -u -B run_lobmax.py \
     --book_transform=True \
     --masking=none \
     --num_devices='"$GPUS_PER_NODE"' \
-    --n_data_workers=12 \
+    --n_data_workers=0 \
     --pin_memory=True \
     --prefetch_factor=6 \
     --persistent_workers=True \
