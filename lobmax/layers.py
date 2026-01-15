@@ -92,8 +92,66 @@ class TransformerLayer(nn.Module):
         # Input shape for attention initialization
         # Will be set properly during first call
         self._inputs_shape = None
+        
+        # === Define Submodules in setup() for Remat compatibility ===
+        self.pre_attn_norm = rms_norm(
+            num_features=d_model,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+            name=f"pre_attn_norm", # Layer index is implicit in scope
+            epsilon=cfg.normalization_layer_epsilon,
+            kernel_axes=("norm",),
+        )
+        
+        # Attention
+        self.attention = attention_as_linen(
+            config=cfg,
+            num_query_heads=cfg.num_heads,
+            num_kv_heads=cfg.num_kv_heads,
+            head_dim=cfg.head_dim,
+            max_target_length=cfg.max_target_length,
+            max_prefill_predict_length=cfg.max_prefill_predict_length,
+            attention_kernel=cfg.attention,
+            inputs_q_shape=None, # Will be inferred
+            inputs_kv_shape=None,
+            mesh=self.mesh,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+            dropout_rate=cfg.dropout_rate if self.training else 0.0,
+            name=f"attention",
+            float32_qk_product=cfg.float32_qk_product,
+            float32_logits=cfg.float32_logits,
+            model_mode=MODEL_MODE_TRAIN if self.training else "prefill",
+        )
+        
+        self.pre_ffn_norm = rms_norm(
+            num_features=d_model,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+            name=f"pre_ffn_norm",
+            epsilon=cfg.normalization_layer_epsilon,
+            kernel_axes=("norm",),
+        )
+        
+        self.mlp = linears.mlp_block(
+            in_features=d_model,
+            intermediate_dim=cfg.mlp_dim,
+            activations=cfg.mlp_activations,
+            intermediate_dropout_rate=cfg.dropout_rate if self.training else 0.0,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+            name=f"mlp",
+            model_mode=MODEL_MODE_TRAIN if self.training else "prefill",
+            config=cfg,
+            quant=None,
+            mesh=self.mesh,
+        )
+        
+        if self.training and cfg.dropout_rate > 0:
+            self.dropout = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))
     
     @nn.compact
+    @nn.remat
     def __call__(self, x, positions=None):
         """
         Apply transformer layer.
@@ -105,11 +163,6 @@ class TransformerLayer(nn.Module):
         Returns:
             Output tensor with same shape as input
         """
-        cfg = self.config
-        d_model = self.d_model or cfg.d_model
-        dtype = cfg.get_dtype()
-        weight_dtype = cfg.get_weight_dtype()
-        
         # Handle both (L, d_model) and (B, L, d_model) inputs
         original_shape = x.shape
         if x.ndim == 2:
@@ -129,37 +182,9 @@ class TransformerLayer(nn.Module):
         
         # === Pre-Norm + Attention ===
         residual = x
-        x = rms_norm(
-            num_features=d_model,
-            dtype=dtype,
-            weight_dtype=weight_dtype,
-            name=f"pre_attn_norm_{self.layer_idx}",
-            epsilon=cfg.normalization_layer_epsilon,
-            kernel_axes=("norm",),
-        )(x)
+        x = self.pre_attn_norm(x)
         
-        # Attention layer
-        attention = attention_as_linen(
-            config=cfg,
-            num_query_heads=cfg.num_heads,
-            num_kv_heads=cfg.num_kv_heads,
-            head_dim=cfg.head_dim,
-            max_target_length=cfg.max_target_length,
-            max_prefill_predict_length=cfg.max_prefill_predict_length,
-            attention_kernel=cfg.attention,
-            inputs_q_shape=x.shape,
-            inputs_kv_shape=x.shape,
-            mesh=self.mesh,
-            dtype=dtype,
-            weight_dtype=weight_dtype,
-            dropout_rate=cfg.dropout_rate if self.training else 0.0,
-            name=f"attention_{self.layer_idx}",
-            float32_qk_product=cfg.float32_qk_product,
-            float32_logits=cfg.float32_logits,
-            model_mode=MODEL_MODE_TRAIN if self.training else "prefill",
-        )
-        
-        attn_out, _ = attention(
+        attn_out, _ = self.attention(
             x,  # query
             x,  # key/value
             positions,
@@ -172,37 +197,15 @@ class TransformerLayer(nn.Module):
         
         # === Pre-Norm + FFN ===
         residual = x
-        x = rms_norm(
-            num_features=d_model,
-            dtype=dtype,
-            weight_dtype=weight_dtype,
-            name=f"pre_ffn_norm_{self.layer_idx}",
-            epsilon=cfg.normalization_layer_epsilon,
-            kernel_axes=("norm",),
-        )(x)
+        x = self.pre_ffn_norm(x)
         
-        # SwiGLU FFN
-        ffn_out = linears.mlp_block(
-            in_features=d_model,
-            intermediate_dim=cfg.mlp_dim,
-            activations=cfg.mlp_activations,
-            intermediate_dropout_rate=cfg.dropout_rate if self.training else 0.0,
-            dtype=dtype,
-            weight_dtype=weight_dtype,
-            name=f"mlp_{self.layer_idx}",
-            model_mode=MODEL_MODE_TRAIN if self.training else "prefill",
-            config=cfg,
-            quant=None,
-            mesh=self.mesh,
-        )(x, deterministic=not self.training)
+        ffn_out = self.mlp(x, deterministic=not self.training)
         
         x = residual + ffn_out
         
         # Dropout on output
-        if self.training and cfg.dropout_rate > 0:
-            x = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
-                x, deterministic=not self.training
-            )
+        if self.training and self.config.dropout_rate > 0:
+            x = self.dropout(x, deterministic=not self.training)
         
         # Restore original shape if needed
         if len(original_shape) == 2:
