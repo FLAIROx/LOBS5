@@ -259,6 +259,10 @@ if __name__ == "__main__":
     import torch
     torch.multiprocessing.set_start_method('spawn')
 
+    from lob.sharding_utils import initialize_mesh
+    num_total_devices = jax.device_count()
+    initialize_mesh(num_total_devices)
+
     from lobmax.train import train_lobmax
     train_lobmax(args)
 

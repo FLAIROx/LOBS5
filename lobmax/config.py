@@ -106,6 +106,27 @@ class LOBMAXConfig:
     local_rope_max_timescale: int = -1
     attention_sink: bool = False
     chunk_attn_window_size: int = 0
+    expert_shard_attention_option: str = "off"
+    
+    # === MoBA (Mixture of Block Attention) ===
+    moba_chunk_size: int = 1024
+    moba_topk: int = 2
+    
+    # === Model Name (for MaxText checking) ===
+    model_name: str = "lobmax"
+    
+    # === Logical Axis Rules ===
+    logical_axis_rules: Tuple[Tuple[str, str], ...] = (
+        ('batch', 'data'),
+        ('activation_batch', 'data'),
+        ('activation_length', 'model'),
+        ('heads', 'model'),
+        ('kv', 'model'),
+        ('embed', 'model'),
+        ('mlp', 'model'),
+        ('vocab', 'model'),
+        ('norm', 'data'),
+    )
     
     @property
     def emb_dim(self) -> int:

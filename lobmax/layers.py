@@ -281,11 +281,26 @@ class StackedTransformerEncoder(nn.Module):
             Output (L, d_model) or (B, L, d_model)
         """
         # Handle 2D input
+        # Handle inputs
         original_ndim = x.ndim
-        if x.ndim == 2:
-            x = x[None, :, :]
         
-        B, L, _ = x.shape
+        if self.use_embed_layer:
+            # x is indices: (L,) -> (1, L), (B, L) -> (B, L)
+            if x.ndim == 1:
+                x = x[None, :]
+            # B, L = x.shape  <- Don't unpack yet, we need 3D after embedding
+        else:
+            # x is features: (L, D) -> (1, L, D), (B, L, D) -> (B, L, D)
+            if x.ndim == 2:
+                x = x[None, :, :]
+        
+        # We need B and L for positions
+        if x.ndim == 2:
+            B, L = x.shape
+        elif x.ndim == 3:
+            B, L, _ = x.shape
+        else:
+            raise ValueError(f"Unexpected input shape: {x.shape}")
         
         # Default positions
         if positions is None:
