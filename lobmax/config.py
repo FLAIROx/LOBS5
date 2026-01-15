@@ -111,15 +111,19 @@ class LOBMAXConfig:
     # === kv cache quantization ===
     quantize_kvcache: bool = False
     
-    # === RoPE Advanced ===
-    max_position_embeddings: int = 12288
-    original_max_position_embeddings: int = 12288
+    # Reduced sequence length to fit in memory (was 12288/12256)
+    max_position_embeddings: int = 8192
+    original_max_position_embeddings: int = 8192
+    
+    # LOBMAX Specific
     rope_factor: float = 1.0
     beta_fast: float = 32.0
     beta_slow: float = 1.0
     rope_attention_scaling: float = 1.0
     rope_interleave: bool = False
     rope_truncate: bool = False
+    
+    # Architecture
     partial_rotary_factor: float = 1.0
     
     # === Paged Attention (Unused) ===
