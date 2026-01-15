@@ -183,6 +183,15 @@ if __name__ == "__main__":
         print(f"    micro_bsz={micro_bsz}/GPU × {args.num_devices} devices = {args.global_bsz} (global_bsz)")
         print(f"    lr_base={args.lr_base}")
 
+    # Override global_bsz with PER_GPU_BSZ environment variable (if set)
+    # This allows sweeping batch sizes without changing the preset code
+    if 'PER_GPU_BSZ' in os.environ:
+        micro_bsz = int(os.environ['PER_GPU_BSZ'])
+        args.global_bsz = micro_bsz * args.num_devices
+        print(f"[*] Overriding with PER_GPU_BSZ={micro_bsz}")
+        print(f"    New global_bsz = {args.global_bsz}")
+
+
     # ============================================
     # Fill in defaults
     # ============================================
