@@ -110,13 +110,14 @@ class LOBMAXModel(nn.Module):
         ]
         
         # Final normalization
-        self.final_norm = partial(
-            rms_norm,
+        # Final normalization
+        self.final_norm = rms_norm(
             num_features=cfg.d_model,
             dtype=dtype,
             weight_dtype=cfg.get_weight_dtype(),
             epsilon=cfg.normalization_layer_epsilon,
             kernel_axes=("norm",),
+            name="final_norm",
         )
         
         # Output decoder
@@ -201,7 +202,7 @@ class LOBMAXModel(nn.Module):
             x = layer(x, positions=positions)
         
         # === Final Norm ===
-        x = self.final_norm(name="final_norm")(x)
+        x = self.final_norm(x)
         
         # Undo Padding if it was applied
         if x.shape[1] > original_L:
