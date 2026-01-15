@@ -245,3 +245,5 @@ xvla_detailed_timing.py
 xvla_params_only.py
 xvla_timing_benchmark.py
 xvla_timing.slurm
+logs/**
+exclude_files.commit

@@ -15,12 +15,26 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from flax import linen as nn
 
-# Add MaxText to path
-MAXTEXT_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'maxtext', 'src')
-if MAXTEXT_PATH not in sys.path:
-    sys.path.insert(0, MAXTEXT_PATH)
+# Add MaxText layers to path (avoid importing MaxText __init__.py which has orbax version conflicts)
+MAXTEXT_LAYERS_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'maxtext', 'src', 'MaxText', 'layers')
+MAXTEXT_SRC_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'maxtext', 'src')
+if MAXTEXT_SRC_PATH not in sys.path:
+    sys.path.insert(0, MAXTEXT_SRC_PATH)
 
-from MaxText.layers.normalizations import rms_norm
+# Import directly from layer modules to avoid MaxText __init__.py
+import importlib.util
+def _import_maxtext_module(module_name, file_path):
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+# Import normalizations
+_normalizations = _import_maxtext_module(
+    'normalizations', 
+    os.path.join(MAXTEXT_LAYERS_PATH, 'normalizations.py')
+)
+rms_norm = _normalizations.rms_norm
 
 from lobmax.config import LOBMAXConfig
 from lobmax.layers import (
