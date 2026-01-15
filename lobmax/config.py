@@ -138,6 +138,12 @@ class LOBMAXConfig:
     # === Misc MaxText ===
     use_chunked_prefill: bool = False
     fused_mlp: bool = False
+    activations_in_float32: bool = False
+    sparse_matmul: bool = False
+    mlp_bias: bool = False
+    use_post_attn_norm: bool = False
+    use_post_ffw_norm: bool = False
+    using_pipeline_parallelism: bool = False
     
     # === MoBA (Mixture of Block Attention) ===
     moba_chunk_size: int = 1024
