@@ -1,0 +1,369 @@
+"""
+LOBMAX Layers
+
+Transformer layers based on MaxText's LLaMA-style implementation.
+These layers replace S5's SequenceLayer with Transformer attention + FFN.
+"""
+
+import os
+import sys
+from functools import partial
+from typing import Any, Optional, Tuple
+
+import jax
+import jax.numpy as jnp
+from jax.sharding import Mesh
+from flax import linen as nn
+
+# Add MaxText to path
+MAXTEXT_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'maxtext', 'src')
+if MAXTEXT_PATH not in sys.path:
+    sys.path.insert(0, MAXTEXT_PATH)
+
+from MaxText.layers.attentions import attention_as_linen
+from MaxText.layers.normalizations import rms_norm
+from MaxText.layers import linears
+from MaxText.common_types import MODEL_MODE_TRAIN
+
+from lobmax.config import LOBMAXConfig
+
+
+class TransformerLayer(nn.Module):
+    """
+    Single Transformer layer (LLaMA-style) to replace S5 SequenceLayer.
+    
+    Architecture:
+        x -> RMSNorm -> Attention -> residual -> RMSNorm -> FFN -> residual
+    
+    This maintains the same interface as S5's SequenceLayer:
+        __call__(x) -> x with shape (L, d_model)
+    
+    Args:
+        config: LOBMAXConfig with model parameters
+        mesh: JAX device mesh for sharding
+        layer_idx: Layer index (for naming)
+        d_model: Model dimension (overrides config if provided)
+    """
+    config: LOBMAXConfig
+    mesh: Mesh
+    layer_idx: int = 0
+    d_model: int = None  # Allow override for book encoder
+    training: bool = True
+    
+    def setup(self):
+        cfg = self.config
+        d_model = self.d_model or cfg.d_model
+        dtype = cfg.get_dtype()
+        weight_dtype = cfg.get_weight_dtype()
+        
+        # Input shape for attention initialization
+        # Will be set properly during first call
+        self._inputs_shape = None
+    
+    @nn.compact
+    def __call__(self, x, positions=None):
+        """
+        Apply transformer layer.
+        
+        Args:
+            x: Input tensor (L, d_model) or (B, L, d_model)
+            positions: Position indices (L,) or (B, L) for RoPE
+            
+        Returns:
+            Output tensor with same shape as input
+        """
+        cfg = self.config
+        d_model = self.d_model or cfg.d_model
+        dtype = cfg.get_dtype()
+        weight_dtype = cfg.get_weight_dtype()
+        
+        # Handle both (L, d_model) and (B, L, d_model) inputs
+        original_shape = x.shape
+        if x.ndim == 2:
+            # (L, d_model) -> (1, L, d_model)
+            x = x[None, :, :]
+            if positions is not None and positions.ndim == 1:
+                positions = positions[None, :]
+        
+        B, L, D = x.shape
+        
+        # Default positions if not provided
+        if positions is None:
+            positions = jnp.arange(L)[None, :].repeat(B, axis=0)
+        
+        # Segment IDs (not used for simple sequences)
+        segment_ids = None
+        
+        # === Pre-Norm + Attention ===
+        residual = x
+        x = rms_norm(
+            num_features=d_model,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+            name=f"pre_attn_norm_{self.layer_idx}",
+            epsilon=cfg.normalization_layer_epsilon,
+            kernel_axes=("norm",),
+        )(x)
+        
+        # Attention layer
+        attention = attention_as_linen(
+            config=cfg,
+            num_query_heads=cfg.num_heads,
+            num_kv_heads=cfg.num_kv_heads,
+            head_dim=cfg.head_dim,
+            max_target_length=cfg.max_target_length,
+            max_prefill_predict_length=cfg.max_prefill_predict_length,
+            attention_kernel=cfg.attention,
+            inputs_q_shape=x.shape,
+            inputs_kv_shape=x.shape,
+            mesh=self.mesh,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+            dropout_rate=cfg.dropout_rate if self.training else 0.0,
+            name=f"attention_{self.layer_idx}",
+            float32_qk_product=cfg.float32_qk_product,
+            float32_logits=cfg.float32_logits,
+            model_mode=MODEL_MODE_TRAIN if self.training else "prefill",
+        )
+        
+        attn_out, _ = attention(
+            x,  # query
+            x,  # key/value
+            positions,
+            decoder_segment_ids=segment_ids,
+            deterministic=not self.training,
+            model_mode=MODEL_MODE_TRAIN if self.training else "prefill",
+        )
+        
+        x = residual + attn_out
+        
+        # === Pre-Norm + FFN ===
+        residual = x
+        x = rms_norm(
+            num_features=d_model,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+            name=f"pre_ffn_norm_{self.layer_idx}",
+            epsilon=cfg.normalization_layer_epsilon,
+            kernel_axes=("norm",),
+        )(x)
+        
+        # SwiGLU FFN
+        ffn_out = linears.mlp_block(
+            in_features=d_model,
+            intermediate_dim=cfg.mlp_dim,
+            activations=cfg.mlp_activations,
+            intermediate_dropout_rate=cfg.dropout_rate if self.training else 0.0,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+            name=f"mlp_{self.layer_idx}",
+            model_mode=MODEL_MODE_TRAIN if self.training else "prefill",
+            config=cfg,
+            quant=None,
+            mesh=self.mesh,
+        )(x, deterministic=not self.training)
+        
+        x = residual + ffn_out
+        
+        # Dropout on output
+        if self.training and cfg.dropout_rate > 0:
+            x = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
+                x, deterministic=not self.training
+            )
+        
+        # Restore original shape if needed
+        if len(original_shape) == 2:
+            x = x[0]  # (1, L, d_model) -> (L, d_model)
+        
+        return x
+
+
+class StackedTransformerEncoder(nn.Module):
+    """
+    Stack of Transformer layers to replace S5's StackedEncoderModel.
+    
+    Maintains same interface:
+        __call__(x, integration_timesteps) -> x
+    
+    Args:
+        config: LOBMAXConfig
+        mesh: JAX device mesh
+        n_layers: Number of transformer layers
+        d_model: Model dimension
+        use_embed_layer: Whether to use embedding layer (for tokens)
+        vocab_size: Vocabulary size (if use_embed_layer=True)
+        training: Training mode
+    """
+    config: LOBMAXConfig
+    mesh: Mesh
+    n_layers: int
+    d_model: int = None
+    use_embed_layer: bool = False
+    vocab_size: int = -1
+    training: bool = True
+    
+    def setup(self):
+        cfg = self.config
+        d_model = self.d_model or cfg.d_model
+        dtype = cfg.get_dtype()
+        
+        # Encoder (embedding or projection)
+        if self.use_embed_layer:
+            self.encoder = nn.Embed(
+                num_embeddings=self.vocab_size,
+                features=d_model,
+                dtype=dtype,
+                name="token_embedding",
+            )
+        else:
+            self.encoder = nn.Dense(
+                features=d_model,
+                dtype=dtype,
+                name="input_projection",
+            )
+        
+        # Stack of transformer layers
+        self.layers = [
+            TransformerLayer(
+                config=cfg,
+                mesh=self.mesh,
+                layer_idx=i,
+                d_model=d_model,
+                training=self.training,
+                name=f"layer_{i}",
+            )
+            for i in range(self.n_layers)
+        ]
+    
+    def __call__(self, x, integration_timesteps=None, positions=None):
+        """
+        Forward pass through stacked transformer.
+        
+        Args:
+            x: Input (L, d_input) or (B, L, d_input)
+            integration_timesteps: Unused (compatibility with S5 interface)
+            positions: Optional position indices for RoPE
+            
+        Returns:
+            Output (L, d_model) or (B, L, d_model)
+        """
+        # Handle 2D input
+        original_ndim = x.ndim
+        if x.ndim == 2:
+            x = x[None, :, :]
+        
+        B, L, _ = x.shape
+        
+        # Default positions
+        if positions is None:
+            positions = jnp.arange(L)[None, :].repeat(B, axis=0)
+        
+        # Encode input
+        x = self.encoder(x)
+        
+        # Apply transformer layers
+        for layer in self.layers:
+            x = layer(x, positions=positions)
+        
+        # Restore original shape
+        if original_ndim == 2:
+            x = x[0]
+        
+        return x
+
+
+class TransformerBookEncoder(nn.Module):
+    """
+    Book Encoder with Transformer layers.
+    Replaces S5's LobBookModel.
+    
+    Architecture:
+        x -> Pre-layers -> Dense projection -> Post-layers
+    
+    Args:
+        config: LOBMAXConfig
+        mesh: JAX device mesh
+        d_book: Input book dimension
+        training: Training mode
+    """
+    config: LOBMAXConfig
+    mesh: Mesh
+    d_book: int
+    training: bool = True
+    
+    def setup(self):
+        cfg = self.config
+        dtype = cfg.get_dtype()
+        
+        # Pre-processing layers (operate on d_book)
+        self.pre_layers = [
+            TransformerLayer(
+                config=cfg,
+                mesh=self.mesh,
+                layer_idx=i,
+                d_model=self.d_book,  # Use book dimension
+                training=self.training,
+                name=f"pre_layer_{i}",
+            )
+            for i in range(cfg.n_book_pre_layers)
+        ]
+        
+        # Projection to d_model
+        self.projection = nn.Dense(
+            features=cfg.d_model,
+            dtype=dtype,
+            name="book_projection",
+        )
+        
+        # Post-processing layers (operate on d_model)
+        self.post_layers = [
+            TransformerLayer(
+                config=cfg,
+                mesh=self.mesh,
+                layer_idx=i,
+                d_model=cfg.d_model,
+                training=self.training,
+                name=f"post_layer_{i}",
+            )
+            for i in range(cfg.n_book_post_layers)
+        ]
+    
+    def __call__(self, x, integration_timesteps=None, positions=None):
+        """
+        Forward pass through book encoder.
+        
+        Args:
+            x: Book state (L, d_book) or (B, L, d_book)
+            integration_timesteps: Unused (S5 compatibility)
+            positions: Position indices for RoPE
+            
+        Returns:
+            Encoded book (L, d_model) or (B, L, d_model)
+        """
+        # Handle 2D input
+        original_ndim = x.ndim
+        if x.ndim == 2:
+            x = x[None, :, :]
+        
+        B, L, _ = x.shape
+        
+        # Default positions
+        if positions is None:
+            positions = jnp.arange(L)[None, :].repeat(B, axis=0)
+        
+        # Pre-layers (d_book dimension)
+        for layer in self.pre_layers:
+            x = layer(x, positions=positions)
+        
+        # Project to d_model
+        x = self.projection(x)
+        
+        # Post-layers (d_model dimension)
+        for layer in self.post_layers:
+            x = layer(x, positions=positions)
+        
+        # Restore original shape
+        if original_ndim == 2:
+            x = x[0]
+        
+        return x
