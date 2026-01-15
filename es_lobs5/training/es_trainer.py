@@ -442,7 +442,7 @@ def get_sim_msg_es(
     tick_size: int,
     encoder: Dict,
     trader_id: int = -88,
-    token_mode: int = 22,
+    token_mode: int = 24,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Convert predicted message tokens to JaxLOB format.
@@ -891,7 +891,7 @@ class ESTrainer:
         # Use inference.get_dataset() - SAME code path as run_inference.py
         # This ensures consistent token_mode handling
         n_warmup = getattr(self.config, 'n_warmup_msgs', 500)
-        n_sim = getattr(self.config, 'n_sim_steps', 1000)
+        n_sim = getattr(self.config, 'n_sim_steps', 100)
 
         self.replay_dataset = inference.get_dataset(
             data_dir=data_path,
@@ -1639,7 +1639,20 @@ class ESTrainer:
             )
 
             # Convert to JaxLOB format
-            mid_price = get_mid_price(jaxlob_cfg, sim_state, config.tick_size)
+            # Calculate mid, bid, ask with validity checks (logic from get_mid_price)
+            best_ask, best_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
+            DEFAULT_MID = 10000
+            
+            bid_valid = (best_bid > 0) & (best_bid < 900000000)
+            ask_valid = (best_ask > 0) & (best_ask < 900000000)
+            
+            best_bid = jnp.where(bid_valid, best_bid, DEFAULT_MID - config.tick_size)
+            best_ask = jnp.where(ask_valid, best_ask, DEFAULT_MID + config.tick_size)
+            
+            mid = (best_bid + best_ask) // 2
+            mid = jnp.where((mid > 0) & jnp.isfinite(mid), mid, DEFAULT_MID)
+            mid_price = (mid // config.tick_size) * config.tick_size
+
             policy_order_id = POLICY_ORDER_ID_START + step_idx
             sim_msg, msg_decoded = get_sim_msg_es(
                 policy_msg, sim_obj, sim_state, mid_price, policy_order_id, config.tick_size, encoder,
@@ -1687,9 +1700,10 @@ class ESTrainer:
             book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
 
-            # Return policy_msg for order analysis (shape: (msg_len,))
+            # Return policy_msg and price stats for order analysis/plotting
+            scan_out = (policy_msg, mid_price, best_bid, best_ask)
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-                    book_feat, world_oid_offset, inventory, cash), policy_msg
+                    book_feat, world_oid_offset, inventory, cash), scan_out
 
         # Run episode
         # H2: Apply pvary to initial carry values when inside shard_map
@@ -1705,8 +1719,8 @@ class ESTrainer:
             maybe_pvary(jnp.int32(0)),   # inventory (starts at 0)
             maybe_pvary(jnp.float32(0.0)), # cash (starts at 0)
         )
-        # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
-        (_, _, _, _, final_state, _, _, final_inventory, final_cash), policy_msgs_all = jax.lax.scan(
+        # Capture policy_msgs_all and price histories
+        (_, _, _, _, final_state, _, _, final_inventory, final_cash), (policy_msgs_all, mid_hist, bid_hist, ask_hist) = jax.lax.scan(
             step_fn,
             main_scan_init,
             jnp.arange(config.n_steps),
@@ -1824,6 +1838,11 @@ class ESTrainer:
             'model_quantity': jnp.abs(final_inventory),
             'liquidation_quantity': liq_executed,
             'unfilled_quantity': final_inv_post,
+            
+            # Histories for plotting (will be (n_steps,) arrays)
+            'history_mid': mid_hist,
+            'history_bid': bid_hist,
+            'history_ask': ask_hist,
         }
 
         return fitness, info
@@ -2011,7 +2030,14 @@ class ESTrainer:
             self.noiser_params = noiser_params_updated
             self.lobs5_init.params = updated_params
 
-        aggregated_info = {k: jnp.mean(v) for k, v in infos.items()}
+        aggregated_info = {}
+        for k, v in infos.items():
+            if k.startswith('history_'):
+                # For histories, take the first sample (index 0) instead of averaging
+                # v shape: (n_perturbations, n_steps) -> take v[0] shape (n_steps,)
+                aggregated_info[k] = v[0]
+            else:
+                aggregated_info[k] = jnp.mean(v)
 
         return jnp.mean(fitnesses), fitnesses, aggregated_info
 
@@ -2116,7 +2142,6 @@ class ESTrainer:
                 self.save_checkpoint(latest_path)
                 self._save_training_state(latest_path, epoch, best_fitness)
 
-            # Log to W&B
             if wandb_run:
                 fitness_std = float(jnp.std(fitnesses))
                 fitness_max = float(jnp.max(fitnesses))
@@ -2134,7 +2159,7 @@ class ESTrainer:
                 liquidation_fill_rate = liquidation_qty / task_size  # Force market order fill rate
                 unfill_rate = unfilled_qty / task_size               # Unfilled rate (book depth insufficient)
 
-                wandb_run.log({
+                log_dict = {
                     'epoch': epoch,
                     'fitness/mean': float(mean_fitness),
                     'fitness/best_ever': float(best_fitness),
@@ -2154,7 +2179,35 @@ class ESTrainer:
                     'execution/unfill_rate': unfill_rate,              # Unfilled rate
                     'execution/agent_trades': float(epoch_info['agent_trades']),
                     'execution/total_trades': float(epoch_info['total_trades']),
-                })
+                }
+
+                # Log historical plots if available (sample from first thread)
+                if 'history_mid' in epoch_info:
+                    import numpy as np
+                    steps = np.arange(len(epoch_info['history_mid']))
+                    
+                    # Mid Price Plot
+                    data_mid = [[x, y] for x, y in zip(steps, np.array(epoch_info['history_mid']))]
+                    table_mid = wandb.Table(data=data_mid, columns=["step", "price"])
+                    log_dict['charts/history_mid'] = wandb.plot.line(
+                        table_mid, "step", "price", title=f"Mid Price History (Epoch {epoch})"
+                    )
+                    
+                    # Best Bid Plot
+                    data_bid = [[x, y] for x, y in zip(steps, np.array(epoch_info['history_bid']))]
+                    table_bid = wandb.Table(data=data_bid, columns=["step", "price"])
+                    log_dict['charts/history_bid'] = wandb.plot.line(
+                        table_bid, "step", "price", title=f"Best Bid History (Epoch {epoch})"
+                    )
+
+                    # Best Ask Plot
+                    data_ask = [[x, y] for x, y in zip(steps, np.array(epoch_info['history_ask']))]
+                    table_ask = wandb.Table(data=data_ask, columns=["step", "price"])
+                    log_dict['charts/history_ask'] = wandb.plot.line(
+                        table_ask, "step", "price", title=f"Best Ask History (Epoch {epoch})"
+                    )
+
+                wandb_run.log(log_dict)
 
                 # Print warning if unfilled > 0
                 if unfilled_qty > 0:
