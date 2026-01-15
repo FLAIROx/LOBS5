@@ -199,11 +199,7 @@ class LOBMAXModel(nn.Module):
         
         # === Fused Transformer ===
         for layer in self.fused_layers:
-            if self.training:
-                # Use remat (gradient checkpointing) to save memory for long sequences
-                x = nn.remat(layer)(x, positions=positions)
-            else:
-                x = layer(x, positions=positions)
+            x = layer(x, positions=positions)
         
         # === Final Norm ===
         x = self.final_norm(x)
