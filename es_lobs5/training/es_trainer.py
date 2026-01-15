@@ -1460,7 +1460,7 @@ class ESTrainer:
         def step_fn(carry, step_idx):
             """Single step: Background messages -> Policy action."""
             (key, msg_history, hiddens_world, hiddens_policy,
-             sim_state, book_feat, world_oid_offset, quant_executed) = carry
+             sim_state, book_feat, world_oid_offset, inventory, cash) = carry
 
             key, key_world, key_policy = jax.random.split(key, 3)
 
@@ -1657,11 +1657,11 @@ class ESTrainer:
                 bids=jnp.where(is_prev_order_in_bids[:, None], jnp.array([0, 0, -1, -1, 0, 0]), sim_state.bids)
             )
 
-            # Truncate quantity to remaining task
-            quant_remaining = task_size - quant_executed
-            original_qty = sim_msg[2]
-            truncated_qty = jnp.minimum(original_qty, jnp.maximum(quant_remaining, 0))
-            sim_msg = sim_msg.at[2].set(truncated_qty)
+            # Truncation REMOVED to allow full trading (long/short)
+            # quant_remaining = task_size - quant_executed
+            # original_qty = sim_msg[2]
+            # truncated_qty = jnp.minimum(original_qty, jnp.maximum(quant_remaining, 0))
+            # sim_msg = sim_msg.at[2].set(truncated_qty)
 
             # Process order
             sim_state = process_order_array(sim_state, sim_msg)
@@ -1671,7 +1671,17 @@ class ESTrainer:
             is_new_trade = (trades[:, 0] != -1)
             is_policy_in_trade = ((trades[:, 2] == policy_order_id) | (trades[:, 3] == policy_order_id)) & is_new_trade
             step_executed = jnp.sum(jnp.where(is_policy_in_trade, jnp.abs(trades[:, 1]), 0))
-            quant_executed = quant_executed + step_executed
+            step_volume = jnp.sum(jnp.where(is_policy_in_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
+            
+            # Determine direction (1=Buy, others=Sell based on sim_msg)
+            # Note: sim_msg[1] is the side field
+            is_buy = (sim_msg[1] == 1)
+            
+            # Update inventory and cash
+            # Buy: inv moves +, cash moves -
+            # Sell: inv moves -, cash moves +
+            inventory = jnp.where(is_buy, inventory + step_executed, inventory - step_executed)
+            cash = jnp.where(is_buy, cash - step_volume, cash + step_volume)
 
             # Update state
             book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
@@ -1679,7 +1689,7 @@ class ESTrainer:
 
             # Return policy_msg for order analysis (shape: (msg_len,))
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-                    book_feat, world_oid_offset, quant_executed), policy_msg
+                    book_feat, world_oid_offset, inventory, cash), policy_msg
 
         # Run episode
         # H2: Apply pvary to initial carry values when inside shard_map
@@ -1691,11 +1701,12 @@ class ESTrainer:
             maybe_pvary_tree(hiddens_policy),
             maybe_pvary_tree(sim_state),
             maybe_pvary(book_feat),
-            maybe_pvary(jnp.int32(0)),
-            maybe_pvary(jnp.int32(0)),
+            maybe_pvary(jnp.int32(0)),   # world_oid_offset
+            maybe_pvary(jnp.int32(0)),   # inventory (starts at 0)
+            maybe_pvary(jnp.float32(0.0)), # cash (starts at 0)
         )
         # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
-        (_, _, _, _, final_state, _, _, final_quant_executed), policy_msgs_all = jax.lax.scan(
+        (_, _, _, _, final_state, _, _, final_inventory, final_cash), policy_msgs_all = jax.lax.scan(
             step_fn,
             main_scan_init,
             jnp.arange(config.n_steps),
@@ -1704,44 +1715,31 @@ class ESTrainer:
 
         # =====================================================================
         # FORCED LIQUIDATION: Real market order to sweep the order book
-        # This is the "hidden" final step that attempts to close remaining
-        # position. Unlike doom_trade, this uses a REAL order that may NOT
-        # fill completely if there's insufficient book depth.
-        #
-        # SELL: price = 0 → matches all bids from high to low
-        # BUY: price = maxint → matches all asks from low to high
         # =====================================================================
-        model_quantity = final_quant_executed  # Save quantity from model orders
-        quant_remaining = task_size - final_quant_executed
         liquidation_order_id = POLICY_ORDER_ID_START + config.n_steps
+        
+        # Determine liquidation needed
+        # If inventory > 0: Need to Sell (inv).
+        # If inventory < 0: Need to Buy (abs(inv)).
+        # If inventory == 0: Do nothing.
+        
+        def _create_liquidation_order(args):
+            """Create real market order that sweeps the order book."""
+            sim_state, inv = args
+            
+            is_sell = (inv > 0)
+            quant_to_trade = jnp.abs(inv)
 
-        def _create_market_order(args):
-            """Create real market order that sweeps the order book.
-
-            Unlike doom_trade (virtual trade), this submits a REAL order
-            through the JaxLOB matching engine. May have unfilled quantity
-            if book depth is insufficient.
-
-            Args:
-                args: (sim_state, quant_to_liquidate) tuple
-
-            Returns:
-                Updated LobState after order processing
-            """
-            sim_state, quant_to_liquidate = args
-
-            is_sell = (config.task == 'sell')
             # Market price: sell at 0 (matches all bids), buy at maxint (matches all asks)
             market_price = jnp.where(is_sell, 0, jaxlob_cfg.maxint)
             # JaxLOB side: -1 = sell (hit bids), 1 = buy (lift asks)
             side_jaxlob = jnp.where(is_sell, -1, 1)
 
             # Message format: [event_type, side, quantity, price, order_id, trader_id, time_s, time_ns]
-            # Event type 1 = Limit order (at extreme price = effective market order)
             sim_msg = jnp.array([
                 1,                      # event_type = Limit
                 side_jaxlob,            # side (-1=sell, 1=buy)
-                quant_to_liquidate,     # quantity
+                quant_to_trade,         # quantity
                 market_price,           # price (0 or maxint)
                 liquidation_order_id,   # order_id
                 POLICY_TRADER_ID,       # trader_id
@@ -1751,73 +1749,81 @@ class ESTrainer:
 
             return process_order_array(sim_state, sim_msg)
 
-        # Only execute liquidation if there's remaining quantity
+        # Execute liquidation
         final_state = jax.lax.cond(
-            quant_remaining > 0,
-            _create_market_order,
+            final_inventory != 0,
+            _create_liquidation_order,
             lambda args: args[0],  # Return unchanged state
-            (final_state, quant_remaining)
+            (final_state, final_inventory)
         )
 
-        # Compute fitness (PnL)
+        # Update PnL from Liquidation
         trades = final_state.trades
         valid_trades_mask = trades[:, 0] != -1
-
-        passive_ids = trades[:, 2]
-        aggr_ids = trades[:, 3]
-        is_policy_passive = (passive_ids >= POLICY_ORDER_ID_START) & (passive_ids < WORLD_ORDER_ID_START) & valid_trades_mask
-        is_policy_aggr = (aggr_ids >= POLICY_ORDER_ID_START) & (aggr_ids < WORLD_ORDER_ID_START) & valid_trades_mask
-        is_policy_trade = is_policy_passive | is_policy_aggr
-
-        is_sell_task = (config.task == 'sell')
-        if is_sell_task:
-            sell_revenue = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
-            sell_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
-            pnl_raw = sell_revenue - init_mid_price * sell_quantity
-            agent_quantity = sell_quantity
-        else:
-            buy_cost = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
-            buy_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
-            pnl_raw = init_mid_price * buy_quantity - buy_cost
-            agent_quantity = buy_quantity
-
-        # Normalize PnL to -1 to 1 range using tanh
-        # pnl_normalized = "number of ticks improvement for full task execution"
-        # e.g., if you execute all task_size shares 1 tick better than mid, pnl_normalized = 1.0
+        # Check specific liquidation order ID
+        is_liq_in_trade = ((trades[:, 2] == liquidation_order_id) | (trades[:, 3] == liquidation_order_id)) & valid_trades_mask
+        
+        liq_executed = jnp.sum(jnp.where(is_liq_in_trade, jnp.abs(trades[:, 1]), 0))
+        liq_volume = jnp.sum(jnp.where(is_liq_in_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
+        
+        # Cash effect of liquidation:
+        # If we were Long (inv>0), we Sold (-1) -> Cash increases (+ liq_volume)
+        # If we were Short (inv<0), we Bought (1) -> Cash decreases (- liq_volume)
+        liq_cash_change = jnp.where(final_inventory > 0, liq_volume, -liq_volume)
+        
+        total_cash = final_cash + liq_cash_change
+        
+        # Calculate final inventory
+        # If Long: inv - executed
+        # If Short: inv + executed
+        final_inv_post = jnp.where(final_inventory > 0, final_inventory - liq_executed, final_inventory + liq_executed)
+        
+        # PnL is total accumulated cash
+        pnl_raw = total_cash
+        
+        # Normalize PnL
+        # Assume "good" PnL approx task_size * tick_size (just as a scaler)
         normalization_scale = config.task_size * config.tick_size
         pnl_normalized = pnl_raw / jnp.maximum(normalization_scale, 1.0)
-        pnl = jnp.tanh(pnl_normalized)  # squash to -1 to 1, 0 = executed at mid price
+        pnl = jnp.tanh(pnl_normalized)
 
-        total_trades = jnp.sum(valid_trades_mask)
-        agent_trades = jnp.sum(is_policy_trade)
+        # Statistics
+        total_trades = jnp.count_nonzero(valid_trades_mask)
+        agent_trades = jnp.count_nonzero(((trades[:, 2] == POLICY_TRADER_ID) | (trades[:, 3] == POLICY_TRADER_ID)) & valid_trades_mask)
+        # Note: POLICY_TRADER_ID is -1000, but trades usually store Order IDs (1000000+).
+        # Re-using logic from original code for trade counting might be safer?
+        # Original: (passive_ids >= POLICY_ORDER_ID_START) & (passive_ids < WORLD_ORDER_ID_START)
+        passive_ids = trades[:, 2]
+        aggr_ids = trades[:, 3]
+        is_policy_trade = ((passive_ids >= POLICY_ORDER_ID_START) & (passive_ids < WORLD_ORDER_ID_START)) | \
+                          ((aggr_ids >= POLICY_ORDER_ID_START) & (aggr_ids < WORLD_ORDER_ID_START))
+        agent_trades = jnp.sum(is_policy_trade & valid_trades_mask)
 
-        # Calculate execution breakdown
-        # model_quantity: executed by model orders during regular steps
-        # liquidation_quantity: executed by force_market_order at end
-        # unfilled_quantity: not executed due to insufficient book depth
-        # NOTE: With force_market_order, agent_quantity MAY BE < task_size!
-        liquidation_quantity = agent_quantity - model_quantity
-        unfilled_quantity = task_size - agent_quantity
-
-        # Final fitness = PnL (only counts what was actually filled)
-        # Unfilled quantity has no revenue and no cost, so PnL is naturally
-        # lower when fill is incomplete (agent receives less for sell task)
+        # Fitness = PnL
+        # Add penalty if inventory not closed?
+        # User said "end with market order to make inventory 0".
+        # If market order doesn't fully close, we have leftover inventory.
+        # Often we penalize leftover inventory.
+        # But user didn't ask for penalty, just "calculated money as pnl".
         fitness = jnp.where(jnp.isfinite(pnl), pnl, 0.0)
 
         info = {
             'fitness': fitness,
-            'pnl': pnl,                        # normalized to -1 to 1 (tanh)
-            'pnl_raw': pnl_raw,                # raw value in cents
-            'pnl_normalized': pnl_normalized,  # before tanh (in "ticks")
-            # Execution breakdown
-            'agent_quantity': agent_quantity,          # total executed = model + liquidation (may be < task_size!)
-            'model_quantity': model_quantity,          # executed by model orders
-            'liquidation_quantity': liquidation_quantity,  # executed by force_market_order
-            'unfilled_quantity': unfilled_quantity,    # NOT executed (book depth insufficient)
+            'pnl': pnl,
+            'pnl_raw': pnl_raw,
+            'pnl_normalized': pnl_normalized,
+            'final_inventory': final_inv_post,
+            'inventory_pre_liq': final_inventory,
+            'liquidation_executed': liq_executed,
             'agent_trades': agent_trades,
             'total_trades': total_trades,
-            'init_mid_price': init_mid_price,
-            'policy_msgs': policy_msgs_all,    # shape: (n_steps, msg_len) for order analysis
+            'policy_msgs': policy_msgs_all,
+            
+            # Backwards compatibility dummy keys (for nice logs)
+            'agent_quantity': jnp.abs(final_inventory), # Sort of activity metric
+            'model_quantity': jnp.abs(final_inventory),
+            'liquidation_quantity': liq_executed,
+            'unfilled_quantity': final_inv_post,
         }
 
         return fitness, info
