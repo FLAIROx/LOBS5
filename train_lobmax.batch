@@ -31,7 +31,7 @@ echo "============================================"
 #   MODEL_PRESET=125M sbatch train_lobmax.batch
 #   MODEL_PRESET=360M sbatch train_lobmax.batch
 # ============================================
-MODEL_PRESET=${MODEL_PRESET:-125M}
+MODEL_PRESET=${MODEL_PRESET:-30M}
 echo "[*] LOBMAX Model preset: $MODEL_PRESET"
 export MODEL_PRESET
 
@@ -132,7 +132,14 @@ python --version
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
 
 # Use model preset or explicit parameters
-if [ "$MODEL_PRESET" = "125M" ]; then
+if [ "$MODEL_PRESET" = "30M" ]; then
+    # Tiny model for seq_len=12000 with limited memory
+    D_MODEL=512
+    N_LAYERS=6
+    NUM_HEADS=8
+    MLP_DIM=2048
+    LR_BASE=0.0008
+elif [ "$MODEL_PRESET" = "125M" ]; then
     D_MODEL=768
     N_LAYERS=12
     NUM_HEADS=12
