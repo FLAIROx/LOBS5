@@ -17,6 +17,14 @@ Usage:
 import os
 import sys
 
+if __name__ == "__main__":
+    pass
+else:
+    # Forces all generated worker processes to not run on GPU.
+    #  Required because the worker spawn interface happens after CUDA init.
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+    os.environ["JAX_PLATFORMS"] = "cpu"
+
 # Add MaxText to path
 MAXTEXT_PATH = os.path.join(os.path.dirname(__file__), '..', 'maxtext', 'src')
 if MAXTEXT_PATH not in sys.path:
