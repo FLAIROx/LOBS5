@@ -108,6 +108,36 @@ class LOBMAXConfig:
     chunk_attn_window_size: int = 0
     expert_shard_attention_option: str = "off"
     
+    # === kv cache quantization ===
+    quantize_kvcache: bool = False
+    
+    # === RoPE Advanced ===
+    max_position_embeddings: int = 12288
+    original_max_position_embeddings: int = 12288
+    rope_factor: float = 1.0
+    beta_fast: float = 32.0
+    beta_slow: float = 1.0
+    rope_attention_scaling: float = 1.0
+    rope_interleave: bool = False
+    rope_truncate: bool = False
+    partial_rotary_factor: float = 1.0
+    
+    # === Paged Attention (Unused) ===
+    pagedattn_num_pages: int = 0
+    pagedattn_pages_per_compute_block: int = 0
+    pagedattn_tokens_per_page: int = 0
+    
+    # === ViT (Unused) ===
+    hidden_size_for_vit: int = 0
+    image_size_for_vit: int = 0
+    num_attention_heads_for_vit: int = 0
+    patch_size_for_vit: int = 0
+    rope_theta_for_vit: int = 0
+    spatial_merge_size_for_vit: int = 0
+    
+    # === Misc MaxText ===
+    use_chunked_prefill: bool = False
+    
     # === MoBA (Mixture of Block Attention) ===
     moba_chunk_size: int = 1024
     moba_topk: int = 2
@@ -181,6 +211,8 @@ class LOBMAXConfig:
             vocab_size=getattr(args, 'vocab_size', 128),
             n_classes=getattr(args, 'n_classes', 128),
             max_target_length=getattr(args, 'max_target_length', 12288),
+            max_position_embeddings=getattr(args, 'max_target_length', 12288),
+            original_max_position_embeddings=getattr(args, 'max_target_length', 12288),
             attention=getattr(args, 'attention_kernel', 'flash'),
             rope_type=getattr(args, 'rope_type', 'llama3.1'),
             dropout_rate=getattr(args, 'p_dropout', 0.0),
