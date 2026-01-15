@@ -314,7 +314,7 @@ class StackedTransformerEncoder(nn.Module):
             x = layer(x, positions=positions)
         
         # Restore original shape
-        if original_ndim == 2:
+        if not self.use_embed_layer and original_ndim == 2:
             x = x[0]
         
         return x
