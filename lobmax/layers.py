@@ -343,13 +343,13 @@ class TransformerBookEncoder(nn.Module):
         cfg = self.config
         dtype = cfg.get_dtype()
         
-        # Pre-processing layers (operate on d_book)
+        # Pre-processing layers (operate on d_model after projection)
         self.pre_layers = [
             TransformerLayer(
                 config=cfg,
                 mesh=self.mesh,
                 layer_idx=i,
-                d_model=self.d_book,  # Use book dimension
+                d_model=cfg.d_model,  # Use model dimension (aligned for Attention)
                 training=self.training,
                 name=f"pre_layer_{i}",
             )
@@ -399,14 +399,14 @@ class TransformerBookEncoder(nn.Module):
         if positions is None:
             positions = jnp.arange(L)[None, :].repeat(B, axis=0)
         
-        # Pre-layers (d_book dimension)
+        # Project to d_model first to match Attention config (needed for Flash Attention)
+        x = self.projection(x)
+        
+        # Pre-layers (now operate on d_model)
         for layer in self.pre_layers:
             x = layer(x, positions=positions)
         
-        # Project to d_model
-        x = self.projection(x)
-        
-        # Post-layers (d_model dimension)
+        # Post-layers (operate on d_model)
         for layer in self.post_layers:
             x = layer(x, positions=positions)
         
