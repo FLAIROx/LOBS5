@@ -151,8 +151,8 @@ class TransformerLayer(nn.Module):
         if self.training and cfg.dropout_rate > 0:
             self.dropout = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))
     
-    @nn.compact
     @nn.remat
+    @nn.compact
     def __call__(self, x, positions=None):
         """
         Apply transformer layer.
