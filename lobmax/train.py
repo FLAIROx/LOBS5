@@ -237,7 +237,9 @@ def train_lobmax(args):
             num_layers=args.n_layers,
             num_heads=args.num_heads,
             d_model=args.d_model,
+            monitor_step_loss=getattr(args, 'monitor_step_loss', False),
         )
+
 
         epoch_time = time.time() - epoch_start
         

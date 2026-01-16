@@ -1001,30 +1001,23 @@ def train_epoch(
         job_start_time=None,  # Job start time for time-aware checkpointing
         max_job_hours=24.0,  # Maximum job duration in hours
         save_before_timeout_minutes=30,  # Save checkpoint this many minutes before timeout
+        checkpoint_every_n_steps=1000,  # Save every N steps, or "auto" for ~1 hour intervals
+        job_start_time=None,  # Job start time for time-aware checkpointing
+        max_job_hours=24.0,  # Maximum job duration in hours
+        save_before_timeout_minutes=30,  # Save checkpoint this many minutes before timeout
         mesh=None,  # JAX Mesh for multi-GPU sharding - CRITICAL for data parallelism
+        monitor_step_loss=False,  # If True, block and print loss every step (slow)
     ):
 
     """
-    Training function for an epoch that loops over batches.
-
-    With optax schedules:
-    - Learning rate is automatically computed from state.step by the optimizer
-    - No manual lr_params needed
-    - No update_learning_rate_per_step() calls needed
-    - No buffer copying needed (eliminates donate_argnums aliasing)
-
-    Step-level checkpointing:
-    - checkpoint_callback: Called at intervals and before timeout
-    - checkpoint_every_n_steps: Save every N steps (default: 1000)
-    - job_start_time: For time-aware checkpointing (detect 24hr limit)
-    - max_job_hours: Maximum job duration (default: 24.0)
-    - save_before_timeout_minutes: Save this many minutes before timeout (default: 30)
+     ... (existing docstring) ...
     """
+    
+    # ... (existing setup code until loop) ...
     # Store Metrics
     batch_losses = []
     cross_entropies= [] #list of 1xNTok losses
 
-    # Initialize MFU tracker if parameters provided
     # Initialize MFU tracker if parameters provided
     mfu_tracker = None
     if model_params is not None and batch_size is not None:
@@ -1035,110 +1028,60 @@ def train_epoch(
 
     # =========================================================================
     # AUTO MODE TIMING (WALL CLOCK):
-    #   - WANDB LOSS LOGGING: EVERY 10 MINUTES
-    #   - CHECKPOINT SAVING:  EVERY 30 MINUTES
     # =========================================================================
     auto_checkpoint_mode = checkpoint_every_n_steps == "auto"
     if auto_checkpoint_mode:
-        checkpoint_every_n_steps = 0  # Disable step-based, use time-based instead
-        last_checkpoint_time = time.time()  # Track when last checkpoint was saved
-        last_wandb_log_time = time.time()   # Track when last wandb log happened
-        auto_checkpoint_interval_seconds = 1800  # 30 MINUTES FOR CHECKPOINT
-        auto_wandb_log_interval_seconds = 600    # 10 MINUTES FOR WANDB LOGGING
+        checkpoint_every_n_steps = 0
+        last_checkpoint_time = time.time()
+        last_wandb_log_time = time.time()
+        auto_checkpoint_interval_seconds = 1800
+        auto_wandb_log_interval_seconds = 600
 
-    # No more lr_params unpacking - optax handles LR scheduling internally
-    # Step tracking is done via state.step (maintained by optax)
-    #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     pbar = tqdm(trainloader)
     for batch_idx, batch in enumerate(pbar):
-        # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
-        # print(f"train_epoch: Batch input shape: {batch[0].shape}, batch target shape: {batch[1].shape}")
         if not debug_loading:
             if (state.step>1) & (state.step<3) & debug_profiler:
                 jax.profiler.start_trace("/tmp/tensorboard")
 
-            # Monitor prep_batch time if goodput_monitor provided
             if goodput_monitor:
                 with goodput_monitor.record('prep_batch'):
                     inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
             else:
                 inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
             
-            # CRITICAL: Pre-shard data to GPU to avoid CPU->GPU transfer every step
-            # Without this, NumPy arrays are copied to each GPU (redundant and slow)
             if mesh is not None:
                 inputs_sharding, labels_sharding, timesteps_sharding = get_data_shardings_for_batch(
                     mesh, has_book_data=(len(inputs) > 1)
                 )
-                # Shard inputs tuple
-                inputs = tuple(
-                    jax.device_put(inp, sh) for inp, sh in zip(inputs, inputs_sharding)
-                )
-                # Shard labels
+                inputs = tuple(jax.device_put(inp, sh) for inp, sh in zip(inputs, inputs_sharding))
                 labels = jax.device_put(labels, labels_sharding)
-                # Shard integration_times tuple
-                integration_times = tuple(
-                    jax.device_put(ts, sh) for ts, sh in zip(integration_times, timesteps_sharding)
-                )
+                integration_times = tuple(jax.device_put(ts, sh) for ts, sh in zip(integration_times, timesteps_sharding))
             
             rng, drop_rng = jax.random.split(rng)
-            # Print memory every 1000 steps
             if batch_idx % 1000 == 0:
                 print(f"\n=== Epoch {epoch}, Batch {batch_idx} ===")
                 print_memory_usage()
             
-            # Use JIT-compiled train_step if provided
             train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
 
-            # Monitor train_step time if goodput_monitor provided
             if goodput_monitor:
                 with goodput_monitor.record('train_step'):
                     state, loss, ce, logits = train_fn(
-                        state,
-                        drop_rng,
-                        inputs,
-                        labels,
-                        integration_times,
-                        batchnorm,
-                        ignore_times,
+                        state, drop_rng, inputs, labels, integration_times, batchnorm, ignore_times
                     )
             else:
-                # CRITICAL: Use jax.set_mesh() context so JAX knows how to shard inputs
-                # Without this, each GPU may receive full data copies instead of shards!
                 if mesh is not None:
                     with jax.set_mesh(mesh):
                         state, loss, ce, logits = train_fn(
-                            state,
-                            drop_rng,
-                            inputs,
-                            labels,
-                            integration_times,
-                            batchnorm,
-                            ignore_times,
+                            state, drop_rng, inputs, labels, integration_times, batchnorm, ignore_times
                         )
                 else:
                     state, loss, ce, logits = train_fn(
-                        state,
-                        drop_rng,
-                        inputs,
-                        labels,
-                        integration_times,
-                        batchnorm,
-                        ignore_times,
+                        state, drop_rng, inputs, labels, integration_times, batchnorm, ignore_times
                     )
+
             if debug_profiler:
                 loss.block_until_ready()
-
-            # print("completes train step")
-            # if (batch_idx==0) & (epoch%100==0):
-            #     np.set_printoptions(threshold=sys.maxsize)
-            #     with open(f'/data1/sascha/data/losses/losses_batch_{batch_idx}_training.txt', 'w') as f:
-            #         print( ce, file=f)
-            #     print("Printing logits of shape ", logits.shape, " to file")
-            #     with open(f'/data1/sascha/data/losses/logits_batch_{batch_idx}_training.txt', 'w') as f:
-            #         print( logits[0,0,0:44,:], file=f)
-            #     np.set_printoptions()
-            #     print('Done Printing')
 
             # Old (pmap): loss had device dimension, needed loss[0]
             # New (jit+shardings): loss is already a scalar, no indexing needed
@@ -1147,9 +1090,31 @@ def train_epoch(
                 cross_entropies.append(ce)
 
             # Update tqdm with MFU and goodput metrics
-            # NOTE: Loss is NOT shown here to avoid GPU sync overhead
-            # Loss is accumulated in batch_losses and averaged at epoch end
             postfix = {}
+
+            # PERFORMANCE NOTE: Loss Synchronization Control
+            # ---------------------------------------------
+            # Fetching the loss value (e.g., loss.item() or computing str(loss)) requires transferring 
+            # data from the accelerator (GPU/TPU) to the host CPU. This operation acts as a 
+            # SYNCHRONIZATION BARRIER, forcing the host to wait for the device to finish the current 
+            # step's computation before proceeding. 
+            #
+            # When monitor_step_loss is False (recommended for speed), we skip this fetch, allowing 
+            # JAX to dispatch operations asynchronously. The device can process instructions ahead 
+            # of the host ("compute overlap"), preventing device starvation and significantly 
+            # improving training throughput (steps/sec).
+            if monitor_step_loss:
+                try:
+                    postfix['loss'] = f'{loss:.4f}'
+                except:
+                    postfix['loss'] = "nan"
+            
+            # Periodically force sync for logging (every 100 steps) if not monitoring every step
+            elif batch_idx % 100 == 0:
+                 try:
+                    postfix['loss'] = f'{loss:.4f}'
+                 except:
+                    pass
 
             if mfu_tracker is not None:
                 mfu = mfu_tracker.tick()
@@ -1166,6 +1131,7 @@ def train_epoch(
 
             if postfix:
                 pbar.set_postfix(postfix)
+
 
             # No more manual LR updates - optax schedules handle this automatically!
             # No more buffer copying needed - eliminates donate_argnums aliasing
