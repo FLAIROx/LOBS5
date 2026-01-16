@@ -148,10 +148,11 @@ def init_lobmax_train_state(
     train_size: int,
     mesh: Mesh,
     print_shapes: bool = False,
+    use_fsdp_init: bool = False,
 ) -> Tuple[TrainState, LOBMAXModel, int]:
     """
     Initialize LOBMAX training state.
-    
+
     Args:
         args: Training arguments
         n_classes: Number of output classes
@@ -161,38 +162,52 @@ def init_lobmax_train_state(
         train_size: Training set size (for schedule calculation)
         mesh: JAX device mesh
         print_shapes: Whether to print shape information
-        
+        use_fsdp_init: If True, use FSDP sharded initialization for large models.
+                       This distributes parameters across GPUs during init to avoid OOM.
+
     Returns:
         Tuple of (TrainState, model, total_params)
     """
     # Create config
     config = create_lobmax_config(args, n_classes, book_dim)
-    
+
     # Create model
     model = LOBMAXModel(
         config=config,
         mesh=mesh,
         training=True,
     )
-    
+
     # Initialize with dummy inputs
     key = random.PRNGKey(getattr(args, 'jax_seed', 42))
     init_rng, _ = random.split(key)
-    
+
     # Create dummy inputs for initialization
     batch_size = 1
     dummy_msg = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
     dummy_book = jnp.zeros((batch_size, seq_len, book_dim), dtype=jnp.float32)
     dummy_timesteps = jnp.ones((batch_size, seq_len))
-    
+
+    # Define init function (used for both standard and FSDP init)
+    def init_fn():
+        return model.init(
+            init_rng,
+            x_m=dummy_msg,
+            x_b=dummy_book,
+            message_integration_timesteps=dummy_timesteps,
+            book_integration_timesteps=dummy_timesteps,
+        )
+
     # Initialize parameters
-    variables = model.init(
-        init_rng,
-        x_m=dummy_msg,
-        x_b=dummy_book,
-        message_integration_timesteps=dummy_timesteps,
-        book_integration_timesteps=dummy_timesteps,
-    )
+    if use_fsdp_init and 'fsdp' in mesh.axis_names:
+        # FSDP sharded initialization for large models
+        from lob.sharding_utils import sharded_init
+        print("[LOBMAX] Using FSDP sharded initialization...")
+        variables = sharded_init(init_fn, mesh)
+    else:
+        # Standard initialization (works for small models)
+        variables = init_fn()
+
     params = variables['params']
     
     # Count parameters
