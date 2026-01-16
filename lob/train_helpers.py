@@ -1001,13 +1001,10 @@ def train_epoch(
         job_start_time=None,  # Job start time for time-aware checkpointing
         max_job_hours=24.0,  # Maximum job duration in hours
         save_before_timeout_minutes=30,  # Save checkpoint this many minutes before timeout
-        checkpoint_every_n_steps=1000,  # Save every N steps, or "auto" for ~1 hour intervals
-        job_start_time=None,  # Job start time for time-aware checkpointing
-        max_job_hours=24.0,  # Maximum job duration in hours
-        save_before_timeout_minutes=30,  # Save checkpoint this many minutes before timeout
         mesh=None,  # JAX Mesh for multi-GPU sharding - CRITICAL for data parallelism
         monitor_step_loss=False,  # If True, block and print loss every step (slow)
     ):
+
 
     """
      ... (existing docstring) ...
