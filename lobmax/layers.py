@@ -213,8 +213,8 @@ class TransformerLayer(nn.Module):
             x = x[0]  # (1, L, d_model) -> (L, d_model)
 
         # Return (carry, output) for nn.scan compatibility
-        # Use dummy scalar output (will be discarded) since out_axes=(0, 0) requires stackable outputs
-        return x, jnp.zeros((), dtype=x.dtype)
+        # Output is None since we only need carry (out_axes=0)
+        return x, None
 
 
 class StackedTransformerEncoder(nn.Module):
@@ -283,7 +283,7 @@ class StackedTransformerEncoder(nn.Module):
             variable_axes={"params": params_spec, "intermediates": 0},
             split_rngs={"params": True, "dropout": cfg.enable_dropout},
             in_axes=(nn.broadcast,),  # positions broadcast to all layers
-            out_axes=(0, 0),  # carry and output both have scan axis
+            out_axes=0,  # Only carry has scan axis (output is discarded)
             length=self.n_layers,
         )(
             config=cfg,
@@ -388,7 +388,7 @@ class TransformerBookEncoder(nn.Module):
             variable_axes={"params": params_spec, "intermediates": 0},
             split_rngs={"params": True, "dropout": cfg.enable_dropout},
             in_axes=(nn.broadcast,),
-            out_axes=(0, 0),
+            out_axes=0,  # Only carry has scan axis (output is discarded)
             length=n_layers,
         )(
             config=cfg,
