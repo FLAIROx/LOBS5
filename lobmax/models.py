@@ -352,11 +352,27 @@ def get_model_summary(config: LOBMAXConfig, total_params: Optional[int] = None) 
     n_fused = config.n_layers
     
     # Per transformer layer: QKV + O + FFN
-    params_per_layer = (
-        3 * d * d +  # QKV
-        d * d +      # O
-        3 * d * mlp  # SwiGLU FFN (gate, up, down)
-    )
+    # FFN params (SwiGLU: gate + up + down)
+    ffn_base = 3 * d * mlp
+    
+    if config.num_experts > 1:
+        # MoE Model
+        ffn_total = ffn_base * config.num_experts
+        ffn_active = ffn_base * config.num_experts_per_tok
+        # Router: d_model -> num_experts
+        router_params = d * config.num_experts
+    else:
+        # Dense Model
+        ffn_total = ffn_base
+        ffn_active = ffn_base
+        router_params = 0
+
+    # Per transformer layer: QKV + O + FFN + (Router)
+    # Non-FFN params: QKV (3*d*d) + O (d*d)
+    non_ffn_params = 4 * d * d
+    
+    params_per_layer_total = non_ffn_params + ffn_total + router_params
+    params_per_layer_active = non_ffn_params + ffn_active + router_params
     
     # Embedding
     embed_params = config.vocab_size * d
@@ -371,23 +387,39 @@ def get_model_summary(config: LOBMAXConfig, total_params: Optional[int] = None) 
     output_params = d * config.n_classes
     
     total_layers = n_msg + n_book + n_fused
-    estimated_params = (
+    
+    # Calculate estimations
+    estimated_total = (
         embed_params +
         book_proj_params +
         fusion_params +
         output_params +
-        total_layers * params_per_layer
+        total_layers * params_per_layer_total
+    )
+    
+    estimated_active = (
+        embed_params +
+        book_proj_params +
+        fusion_params +
+        output_params +
+        total_layers * params_per_layer_active
     )
 
+
     if total_params is None:
-        param_line = f"Estimated Parameters: ~{estimated_params / 1e9:.2f}B"
+        param_msg = f"Estimated Total Params:  ~{estimated_total / 1e9:.2f}B"
     else:
-        param_line = f"Measured Parameters: {total_params / 1e9:.2f}B ({total_params:,})"
+        param_msg = f"Measured Total Params:   {total_params / 1e9:.2f}B ({total_params:,})"
+        
+    if config.num_experts > 1:
+        param_msg += f"\nActive Params (per tok): ~{estimated_active / 1e9:.2f}B"
+        param_msg += f"\n  - Experts: {config.num_experts}"
+        param_msg += f"\n  - Top-k:   {config.num_experts_per_tok}"
     
     summary = f"""
 LOBMAX Model Summary
 ====================
-Architecture: LLaMA-2 Style Transformer
+Architecture: LLaMA-2 Style Transformer {"(MoE)" if config.num_experts > 1 else "(Dense)"}
 
 Dimensions:
   - d_model: {d}
@@ -409,6 +441,6 @@ Attention:
   - RoPE: {config.rope_type}
   - Max Length: {config.max_target_length}
 
-{param_line}
+{param_msg}
 """
     return summary
