@@ -52,12 +52,28 @@ _linears = _import_maxtext_module(
 )
 linears = _linears
 
+
 # Import attentions
 _attentions = _import_maxtext_module(
     'MaxText.layers.attentions',
     os.path.join(MAXTEXT_LAYERS_PATH, 'attentions.py')
 )
 attention_as_linen = _attentions.attention_as_linen
+
+# Import MoE
+_moe = _import_maxtext_module(
+    'MaxText.layers.moe',
+    os.path.join(MAXTEXT_LAYERS_PATH, 'moe.py')
+)
+get_routed_moe = _moe.get_routed_moe
+
+# Import initializers
+_initializers = _import_maxtext_module(
+    'MaxText.layers.initializers',
+    os.path.join(MAXTEXT_LAYERS_PATH, 'initializers.py')
+)
+nd_dense_init = _initializers.nd_dense_init
+
 
 from lobmax.config import LOBMAXConfig
 
@@ -167,19 +183,39 @@ class TransformerLayer(nn.Module):
             kernel_axes=("norm",),
         )
         
-        self.mlp = linears.mlp_block(
-            in_features=d_model,
-            intermediate_dim=cfg.mlp_dim,
-            activations=cfg.mlp_activations,
-            intermediate_dropout_rate=cfg.dropout_rate if self.training else 0.0,
-            dtype=dtype,
-            weight_dtype=weight_dtype,
-            name=f"mlp",
-            model_mode=MODEL_MODE_TRAIN if self.training else "prefill",
-            config=cfg,
-            quant=None,
-            mesh=self.mesh,
-        )
+        if cfg.num_experts > 1:
+            # Use MoE Layer
+            # Use nd_dense_init(1.0, 'fan_in', 'truncated_normal') as default like in MoE module
+            kernel_init = nd_dense_init(1.0, 'fan_in', 'truncated_normal')
+            
+            self.mlp = get_routed_moe(
+                config=cfg,
+                num_experts=cfg.num_experts,
+                num_experts_per_tok=cfg.num_experts_per_tok,
+                mesh=self.mesh,
+                kernel_init=kernel_init,
+                kernel_axes=('embed', None), # Standard axes
+                intermediate_dim=cfg.mlp_dim,
+                weight_dtype=weight_dtype,
+                dtype=dtype,
+                quant=None,
+                name=f"moe_mlp",
+            )
+        else:
+            # Use Dense MLP Layer
+            self.mlp = linears.mlp_block(
+                in_features=d_model,
+                intermediate_dim=cfg.mlp_dim,
+                activations=cfg.mlp_activations,
+                intermediate_dropout_rate=cfg.dropout_rate if self.training else 0.0,
+                dtype=dtype,
+                weight_dtype=weight_dtype,
+                name=f"mlp",
+                model_mode=MODEL_MODE_TRAIN if self.training else "prefill",
+                config=cfg,
+                quant=None,
+                mesh=self.mesh,
+            )
         
         if self.training and cfg.dropout_rate > 0:
             self.dropout = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))
@@ -232,7 +268,20 @@ class TransformerLayer(nn.Module):
         residual = x
         x = self.pre_ffn_norm(x)
         
-        ffn_out = self.mlp(x, deterministic=not self.training)
+        if self.config.num_experts > 1:
+            # MoE returns (output, load_balance_loss)
+            ffn_out, lb_loss = self.mlp(x)
+            # We currently ignore load balance loss in the forward pass return here
+            # Ideally, this should be added to the total loss.
+            # However, TransformerLayer return signature is (x, ())
+            # For now, we rely on the auxiliary loss being handled if we can propagate it,
+            # or just use the gradient from the routing decisions if it's differentiable.
+            # MaxText adds it to the loss.
+            # But the 'aux' output of scan is empty tuple.
+            # TODO: Propagate load balance loss.
+            pass 
+        else:
+            ffn_out = self.mlp(x, deterministic=not self.training)
         
         x = residual + ffn_out
         
