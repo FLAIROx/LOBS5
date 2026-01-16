@@ -987,25 +987,30 @@ def train_epoch(
                     inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
             else:
                 inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
-            # print("train_epoch: Prepared batch inputs shape:", inputs[0].shape)
-            # print("train_epoch: Prepared batch labels shape:", labels.shape)
-            # print("train_epoch: Inputs 0:5:", inputs[0][0,0:5,:])
+            
+            # CRITICAL: Pre-shard data to GPU to avoid CPU->GPU transfer every step
+            # Without this, NumPy arrays are copied to each GPU (redundant and slow)
+            if mesh is not None:
+                inputs_sharding, labels_sharding, timesteps_sharding = get_data_shardings_for_batch(
+                    mesh, has_book_data=(len(inputs) > 1)
+                )
+                # Shard inputs tuple
+                inputs = tuple(
+                    jax.device_put(inp, sh) for inp, sh in zip(inputs, inputs_sharding)
+                )
+                # Shard labels
+                labels = jax.device_put(labels, labels_sharding)
+                # Shard integration_times tuple
+                integration_times = tuple(
+                    jax.device_put(ts, sh) for ts, sh in zip(integration_times, timesteps_sharding)
+                )
+            
             rng, drop_rng = jax.random.split(rng)
             # Print memory every 1000 steps
             if batch_idx % 1000 == 0:
                 print(f"\n=== Epoch {epoch}, Batch {batch_idx} ===")
                 print_memory_usage()
             
-            # state,loss=train_step_rnn(                
-            #     state,
-            #     drop_rng,
-            #     inputs,
-            #     labels,
-            #     integration_times,
-            #     batchnorm,
-            #     init_hiddens)
-
-            # print("Gets to train")
             # Use JIT-compiled train_step if provided
             train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
 
