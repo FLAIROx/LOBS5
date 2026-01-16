@@ -355,13 +355,6 @@ def count_active_parameters(params, num_experts: int, num_experts_per_tok: int) 
     total_active = 0
     found_moe = False
     
-    # DEBUG: Print parameter shapes to debug MoE detection
-    print(f"DEBUG: Checking {len(flat_with_path)} parameters for MoE logic (num_experts={num_experts})")
-    for i, (path, leaf) in enumerate(flat_with_path):
-        p_str = "/".join(str(p) for p in path)
-        if i < 20 or 'experts' in p_str or leaf.shape[0] == num_experts:
-            print(f"DEBUG Param: {p_str} Shape: {leaf.shape}")
-
     
     for path, leaf in flat_with_path:
         path_str = "/".join(str(p) for p in path)
