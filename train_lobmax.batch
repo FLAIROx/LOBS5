@@ -142,7 +142,11 @@ echo "============================================"
 # Note: Some flags are version-specific; only use validated ones
 export XLA_FLAGS="${XLA_FLAGS} \
   --xla_gpu_enable_cudnn_fmha=true \
-  --xla_gpu_enable_latency_hiding_scheduler=true"
+  --xla_gpu_enable_triton_gemm=false \
+  --xla_gpu_graph_level=0 \
+  --xla_gpu_enable_async_collectives=true \
+  --xla_gpu_enable_latency_hiding_scheduler=true \
+  --xla_gpu_enable_highest_priority_async_stream=true"
 
 # NCCL Optimization
 export NCCL_DEBUG=WARN
@@ -231,7 +235,7 @@ python -u -B run_lobmax.py \
     --book_transform=True \
     --masking=none \
     --num_devices='"$GPUS_PER_NODE"' \
-    --n_data_workers=12 \
+    --n_data_workers=4 \
     --pin_memory=True \
     --prefetch_factor=6 \
     --persistent_workers=True \
