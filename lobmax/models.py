@@ -367,31 +367,27 @@ def count_active_parameters(params, num_experts: int, num_experts_per_tok: int) 
         path_str = "/".join(str(p) for p in path)
         is_moe_param = False
         
-        # Criterion 1: Shape-based (Standard Flax MoE: [Experts, In, Out])
+        # Criterion 1: Shape-based (Strict: Experts, In, Out)
+        # Only if shape[0] == num_experts. (Failed previously as layers are stacked first)
         if leaf.ndim > 1 and leaf.shape[0] == num_experts:
             is_moe_param = True
             
-        # Criterion 2: Name-based (MaxText/Megablox often use 'experts' in path)
-        # Even if shape doesn't match [NumExperts, ...], it might be [In, NumExperts * Out] or similar?
-        # But usually standard MoE keeps experts separated.
-        elif 'experts' in path_str:
-            # Fallback: If name says experts but shape doesn't start with num_experts,
-            # we need to be careful. Check if any dimension is num_experts.
+        # Criterion 2: Name-based (Reliable for MaxText/LOBMAX)
+        # Paths look like: .../moe_mlp/wi_0/.value or .../moe_mlp/experts/wi/...
+        elif 'moe' in path_str and ('wi' in path_str or 'wo' in path_str):
+            # Check if num_experts is actually a dimension (to avoid false positives)
             if num_experts in leaf.shape:
                 is_moe_param = True
-                # print(f"DEBUG: Identified MoE param by name: {path_str} {leaf.shape}")
 
         if is_moe_param:
             found_moe = True
             # Active count = Size of one expert * num_experts_per_tok
-            # Careful: If shape is [In, Experts * Out], direct division works assuming balanced.
-            # Best is to divide by num_experts.
+            # Divide by num_experts to get size of one expert
             expert_size = leaf.size // num_experts
             total_active += expert_size * num_experts_per_tok
         else:
             total_active += leaf.size
-            if 'experts' in path_str:
-                 print(f"WARNING: Param has 'experts' in name but shape {leaf.shape} does not match num_experts={num_experts}. Path: {path_str}")
+
 
     if not found_moe:
         print(f"WARNING: No MoE parameters identified! (num_experts={num_experts})")
