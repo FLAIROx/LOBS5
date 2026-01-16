@@ -42,6 +42,7 @@ from lobmax.layers import (
     StackedTransformerEncoder,
     TransformerBookEncoder,
     TransformerLayer,
+    get_remat_policy,
 )
 
 
@@ -121,12 +122,11 @@ class LOBMAXModel(nn.Module):
         initializing = self.is_mutable_collection("params")
         params_spec = cfg.param_scan_axis if initializing else nn_partitioning.ScanIn(cfg.param_scan_axis)
 
+        # Apply remat based on policy (uses MaxText's built-in checkpoint_name markers)
         layer_cls = TransformerLayer
-        if cfg.remat_policy != "none":
-            layer_cls = nn.remat(
-                TransformerLayer,
-                policy=jax.checkpoint_policies.nothing_saveable if cfg.remat_policy == "full" else jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
-            )
+        policy = get_remat_policy(cfg.remat_policy)
+        if policy is not None:
+            layer_cls = nn.remat(TransformerLayer, policy=policy)
 
         return nn.scan(
             layer_cls,

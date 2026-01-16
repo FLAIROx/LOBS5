@@ -62,6 +62,38 @@ attention_as_linen = _attentions.attention_as_linen
 from lobmax.config import LOBMAXConfig
 
 
+def get_remat_policy(policy_name: str):
+    """
+    Get JAX checkpoint policy by name.
+
+    Uses MaxText's built-in checkpoint_name markers in attention/linears layers.
+
+    Policies:
+        - "none": No rematerialization (save all activations)
+        - "full": Recompute everything (nothing_saveable)
+        - "save_dot_except_mlp": Save attention context + out_proj only (~50% memory savings)
+        - "minimal": Save all MaxText-marked tensors (~30% memory savings)
+        - default: Fallback to checkpoint_dots_with_no_batch_dims
+    """
+    if policy_name == "none":
+        return None
+    elif policy_name == "full":
+        return jax.checkpoint_policies.nothing_saveable
+    elif policy_name == "save_dot_except_mlp":
+        # Only save attention context and output projection
+        return jax.checkpoint_policies.save_only_these_names('context', 'out_proj')
+    elif policy_name == "minimal":
+        # Save all MaxText-marked tensors
+        return jax.checkpoint_policies.save_only_these_names(
+            'context', 'out_proj', 'qkv_proj',
+            'query_proj', 'key_proj', 'value_proj',
+            'mlpwi', 'mlpwi_0', 'mlpwi_1', 'mlpwo'
+        )
+    else:
+        # Backward compatibility fallback
+        return jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+
+
 class TransformerLayer(nn.Module):
     """
     Single Transformer layer (LLaMA-style) to replace S5 SequenceLayer.
@@ -270,13 +302,11 @@ class StackedTransformerEncoder(nn.Module):
         initializing = self.is_mutable_collection("params")
         params_spec = cfg.param_scan_axis if initializing else nn_partitioning.ScanIn(cfg.param_scan_axis)
 
-        # Apply remat based on policy
+        # Apply remat based on policy (uses MaxText's built-in checkpoint_name markers)
         layer_cls = TransformerLayer
-        if cfg.remat_policy != "none":
-            layer_cls = nn.remat(
-                TransformerLayer,
-                policy=jax.checkpoint_policies.nothing_saveable if cfg.remat_policy == "full" else jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
-            )
+        policy = get_remat_policy(cfg.remat_policy)
+        if policy is not None:
+            layer_cls = nn.remat(TransformerLayer, policy=policy)
 
         return nn.scan(
             layer_cls,
@@ -377,12 +407,11 @@ class TransformerBookEncoder(nn.Module):
         initializing = self.is_mutable_collection("params")
         params_spec = cfg.param_scan_axis if initializing else nn_partitioning.ScanIn(cfg.param_scan_axis)
 
+        # Apply remat based on policy (uses MaxText's built-in checkpoint_name markers)
         layer_cls = TransformerLayer
-        if cfg.remat_policy != "none":
-            layer_cls = nn.remat(
-                TransformerLayer,
-                policy=jax.checkpoint_policies.nothing_saveable if cfg.remat_policy == "full" else jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
-            )
+        policy = get_remat_policy(cfg.remat_policy)
+        if policy is not None:
+            layer_cls = nn.remat(TransformerLayer, policy=policy)
 
         return nn.scan(
             layer_cls,

@@ -84,7 +84,7 @@ class LOBMAXConfig:
     # === MaxText Compatibility / Scan Configuration ===
     scan_layers: bool = True            # Always use nn.scan for layer iteration
     param_scan_axis: int = 0            # Parameter stacking axis for nn.scan
-    remat_policy: str = "minimal"       # Remat policy: "none", "minimal", "full"
+    remat_policy: str = "save_dot_except_mlp"  # Remat policy: "none", "minimal", "save_dot_except_mlp", "full"
     record_internal_nn_metrics: bool = False
     matmul_precision: str = "default"
     use_iota_embed: bool = False
