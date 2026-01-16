@@ -268,10 +268,19 @@ elif [ "$MODEL_PRESET" = "13B-A1.3B" ]; then
     LR_BASE=0.00015
     NUM_EXPERTS=16
     NUM_EXPERTS_PER_TOK=1
+elif [ "$MODEL_PRESET" = "30B-A3.4B" ]; then
+    # 30B total MoE, ~3.4B activated per token (Qwen3 style)
+    D_MODEL=4096
+    N_LAYERS=10
+    NUM_HEADS=32
+    MLP_DIM=14336
+    LR_BASE=0.00005
+    NUM_EXPERTS=16
+    NUM_EXPERTS_PER_TOK=1
 else
     echo "[Error] Unknown preset: $MODEL_PRESET"
     echo "[Info] Dense presets: 30M, 125M, 360M, 1.3B, 3B"
-    echo "[Info] MoE presets: 1.25B-A125M, 3.6B-A360M, 13B-A1.3B"
+    echo "[Info] MoE presets: 1.25B-A125M, 3.6B-A360M, 13B-A1.3B, 30B-A3.4B"
     exit 1
 fi
 
