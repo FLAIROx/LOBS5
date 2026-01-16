@@ -107,6 +107,14 @@ if __name__ == "__main__":
                         choices=["dot_product", "flash", "cudnn_flash_te"])
     parser.add_argument("--rope_type", type=str, default="llama3.1",
                         choices=["default", "llama3.1", "yarn"])
+    parser.add_argument("--fused_qkv", type=str2bool, default=False,
+                        help="Fuse QKV projections for faster attention.")
+    parser.add_argument("--fused_mlp", type=str2bool, default=False,
+                        help="Fuse MLP projections for faster FFN.")
+    parser.add_argument("--float32_qk_product", type=str2bool, default=True,
+                        help="Compute QK product in float32 for stability.")
+    parser.add_argument("--float32_logits", type=str2bool, default=True,
+                        help="Cast attention logits to float32 before softmax.")
 
     # === Data Configuration ===
     parser.add_argument("--use_book_data", type=str2bool, default=True)
@@ -217,6 +225,8 @@ if __name__ == "__main__":
     print(f"    num_heads={args.num_heads}, num_kv_heads={args.num_kv_heads}, head_dim={args.head_dim}")
     print(f"    mlp_dim={args.mlp_dim}")
     print(f"    attention_kernel={args.attention_kernel}, rope_type={args.rope_type}")
+    print(f"    fused_qkv={args.fused_qkv}, fused_mlp={args.fused_mlp}")
+    print(f"    float32_qk_product={args.float32_qk_product}, float32_logits={args.float32_logits}")
     print(f"    Message layers={args.n_message_layers}, Book pre/post={args.n_book_pre_layers}/{args.n_book_post_layers}")
 
     # ============================================

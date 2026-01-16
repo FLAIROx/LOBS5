@@ -12,7 +12,7 @@
 
 # === Test config: small model ===
 # Increased from 4 to 8 for better MFU (larger batches = better GPU utilization)
-export PER_GPU_BSZ=${PER_GPU_BSZ:-8}
+export PER_GPU_BSZ=${PER_GPU_BSZ:-22}
 
 echo "============================================"
 echo "LOBMAX Training Job"
@@ -109,6 +109,13 @@ export JAX_COORDINATOR_TIMEOUT_MS=600000
 export JAX_PLATFORMS="cuda"
 export TF_GPU_ALLOCATOR=cuda_malloc_async
 
+# MaxText perf toggles (override via env)
+export ATTN_KERNEL="${ATTN_KERNEL:-flash}"
+export FUSED_QKV="${FUSED_QKV:-True}"
+export FUSED_MLP="${FUSED_MLP:-True}"
+export FLOAT32_QK_PRODUCT="${FLOAT32_QK_PRODUCT:-False}"
+export FLOAT32_LOGITS="${FLOAT32_LOGITS:-False}"
+
 # Multi-node JAX config
 if [ -n "$JAX_COORDINATOR_ADDRESS" ]; then
     echo "[Wrapper] Multi-node coordinator: $JAX_COORDINATOR_ADDRESS"
@@ -163,7 +170,7 @@ export NCCL_IB_DISABLE=0
 echo "[Wrapper] XLA_FLAGS: $XLA_FLAGS"
 
 # Run Flash Attention check
-python -u -B lobmax/check_flash_attention.py --attention_kernel=flash
+python -u -B lobmax/check_flash_attention.py --attention_kernel="$ATTN_KERNEL"
 FA_CHECK_RESULT=$?
 
 if [ $FA_CHECK_RESULT -ne 0 ]; then
@@ -224,8 +231,12 @@ python -u -B run_lobmax.py \
     --mlp_dim=$MLP_DIM \
     --lr_base=$LR_BASE \
     --lr_factor=1 \
-    --attention_kernel=flash \
+    --attention_kernel="$ATTN_KERNEL" \
     --rope_type=llama3.1 \
+    --fused_qkv="$FUSED_QKV" \
+    --fused_mlp="$FUSED_MLP" \
+    --float32_qk_product="$FLOAT32_QK_PRODUCT" \
+    --float32_logits="$FLOAT32_LOGITS" \
     --prenorm=True \
     --batchnorm=False \
     --dataset=lobster-prediction \
@@ -243,7 +254,7 @@ python -u -B run_lobmax.py \
     --book_transform=True \
     --masking=none \
     --num_devices='"$GPUS_PER_NODE"' \
-    --n_data_workers=4 \
+    --n_data_workers=12 \
     --pin_memory=True \
     --prefetch_factor=6 \
     --persistent_workers=True \

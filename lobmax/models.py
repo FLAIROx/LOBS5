@@ -323,7 +323,7 @@ def count_parameters(params) -> int:
     return sum(x.size for x in jax.tree_util.tree_leaves(params))
 
 
-def get_model_summary(config: LOBMAXConfig) -> str:
+def get_model_summary(config: LOBMAXConfig, total_params: Optional[int] = None) -> str:
     """Get human-readable model summary."""
     # Approximate parameter count
     d = config.d_model
@@ -353,13 +353,18 @@ def get_model_summary(config: LOBMAXConfig) -> str:
     output_params = d * config.n_classes
     
     total_layers = n_msg + n_book + n_fused
-    total_params = (
+    estimated_params = (
         embed_params +
         book_proj_params +
         fusion_params +
         output_params +
         total_layers * params_per_layer
     )
+
+    if total_params is None:
+        param_line = f"Estimated Parameters: ~{estimated_params / 1e9:.2f}B"
+    else:
+        param_line = f"Measured Parameters: {total_params / 1e9:.2f}B ({total_params:,})"
     
     summary = f"""
 LOBMAX Model Summary
@@ -386,6 +391,6 @@ Attention:
   - RoPE: {config.rope_type}
   - Max Length: {config.max_target_length}
 
-Estimated Parameters: ~{total_params / 1e9:.2f}B
+{param_line}
 """
     return summary

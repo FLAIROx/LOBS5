@@ -73,8 +73,10 @@ def create_lobmax_config(args: Namespace, n_classes: int, book_dim: int) -> LOBM
         
         # Attention configuration
         attention=getattr(args, 'attention_kernel', 'flash'),
-        float32_qk_product=True,
-        float32_logits=True,
+        float32_qk_product=getattr(args, 'float32_qk_product', True),
+        float32_logits=getattr(args, 'float32_logits', True),
+        fused_qkv=getattr(args, 'fused_qkv', False),
+        fused_mlp=getattr(args, 'fused_mlp', False),
         
         # RoPE configuration
         rope_type=getattr(args, 'rope_type', 'llama3.1'),
@@ -94,6 +96,9 @@ def create_lobmax_config(args: Namespace, n_classes: int, book_dim: int) -> LOBM
         
         # FFN activation (SwiGLU)
         mlp_activations=("silu", "linear"),
+
+        # Matmul precision (default/high/highest)
+        matmul_precision=getattr(args, 'matmul_precision', 'default'),
     )
 
 
@@ -155,9 +160,6 @@ def init_lobmax_train_state(
     # Create config
     config = create_lobmax_config(args, n_classes, book_dim)
     
-    if print_shapes:
-        print(get_model_summary(config))
-    
     # Create model
     model = LOBMAXModel(
         config=config,
@@ -188,6 +190,7 @@ def init_lobmax_train_state(
     # Count parameters
     total_params = count_parameters(params)
     if print_shapes:
+        print(get_model_summary(config, total_params=total_params))
         print(f"Total parameters: {total_params:,} ({total_params / 1e9:.2f}B)")
     
     # Create learning rate schedule
