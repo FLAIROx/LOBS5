@@ -151,6 +151,7 @@ class LOBMAXConfig:
     using_pipeline_parallelism: bool = False
     
     # === MoBA (Mixture of Block Attention) ===
+    moba: bool = False                    # Enable MoBA attention
     moba_chunk_size: int = 1024
     moba_topk: int = 2
     

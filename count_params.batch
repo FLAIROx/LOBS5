@@ -1,0 +1,61 @@
+#!/bin/bash
+#SBATCH --job-name=count_params
+#SBATCH --output=logs_lobmax/count_params_%j.out
+#SBATCH --error=logs_lobmax/count_params_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH --time=0:30:00
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
+
+# ============================================
+# Count LOBMAX Model Parameters
+# ============================================
+# This job initializes each model configuration and counts
+# the actual parameters using count_parameters() and
+# count_active_parameters().
+#
+# Expected runtime: ~5-10 minutes
+# ============================================
+
+echo "============================================"
+echo "LOBMAX Parameter Counter"
+echo "Job started at: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Running on node: $SLURM_JOB_NODELIST"
+echo "============================================"
+
+# Create logs directory
+mkdir -p logs_lobmax
+
+# Change to working directory
+cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+
+# Source conda and activate lobmax environment
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate lobmax
+
+# Load CUDA module
+module load cuda/12.6
+
+# Set LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+
+# JAX environment (minimal for param counting)
+export JAX_PLATFORMS="cuda"
+
+echo ""
+echo "Environment:"
+echo "  Python: $(python --version)"
+echo "  JAX version: $(python -c 'import jax; print(jax.__version__)')"
+echo "  CUDA: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
+echo ""
+
+# Run parameter counter
+python -u -B count_model_params.py
+
+echo ""
+echo "============================================"
+echo "Parameter counting completed at: $(date)"
+echo "============================================"
