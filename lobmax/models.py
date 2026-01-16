@@ -14,6 +14,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from flax import linen as nn
+from flax.linen import partitioning as nn_partitioning
 
 # Add MaxText layers to path (avoid importing MaxText __init__.py which has orbax version conflicts)
 MAXTEXT_LAYERS_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'maxtext', 'src', 'MaxText', 'layers')
@@ -67,7 +68,7 @@ class LOBMAXModel(nn.Module):
     def setup(self):
         cfg = self.config
         dtype = cfg.get_dtype()
-        
+
         # Message Encoder: Embed + Transformer layers
         self.message_encoder = StackedTransformerEncoder(
             config=cfg,
@@ -79,7 +80,7 @@ class LOBMAXModel(nn.Module):
             training=self.training,
             name="message_encoder",
         )
-        
+
         # Book Encoder: Pre-layers + Projection + Post-layers
         self.book_encoder = TransformerBookEncoder(
             config=cfg,
@@ -88,28 +89,14 @@ class LOBMAXModel(nn.Module):
             training=self.training,
             name="book_encoder",
         )
-        
+
         # Fusion projection: 2*d_model -> d_model
         self.fusion_projection = nn.Dense(
             features=cfg.d_model,
             dtype=dtype,
             name="fusion_projection",
         )
-        
-        # Fused Transformer
-        self.fused_layers = [
-            TransformerLayer(
-                config=cfg,
-                mesh=self.mesh,
-                layer_idx=i,
-                d_model=cfg.d_model,
-                training=self.training,
-                name=f"fused_layer_{i}",
-            )
-            for i in range(cfg.n_layers)
-        ]
-        
-        # Final normalization
+
         # Final normalization
         self.final_norm = rms_norm(
             num_features=cfg.d_model,
@@ -119,12 +106,41 @@ class LOBMAXModel(nn.Module):
             kernel_axes=("norm",),
             name="final_norm",
         )
-        
+
         # Output decoder
         self.decoder = nn.Dense(
             features=cfg.n_classes,
             dtype=jnp.float32,  # Keep output in FP32 for stability
             name="output_decoder",
+        )
+
+    def _create_scanned_fused_layers(self):
+        """Create nn.scan wrapped fused transformer layers."""
+        cfg = self.config
+
+        initializing = self.is_mutable_collection("params")
+        params_spec = cfg.param_scan_axis if initializing else nn_partitioning.ScanIn(cfg.param_scan_axis)
+
+        layer_cls = TransformerLayer
+        if cfg.remat_policy != "none":
+            layer_cls = nn.remat(
+                TransformerLayer,
+                policy=jax.checkpoint_policies.nothing_saveable if cfg.remat_policy == "full" else jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
+            )
+
+        return nn.scan(
+            layer_cls,
+            variable_axes={"params": params_spec, "intermediates": 0},
+            split_rngs={"params": True, "dropout": cfg.enable_dropout},
+            in_axes=(nn.broadcast,),
+            out_axes=(0, 0),
+            length=cfg.n_layers,
+        )(
+            config=cfg,
+            mesh=self.mesh,
+            d_model=cfg.d_model,
+            training=self.training,
+            name="fused_layers",
         )
     
     def __call__(
@@ -197,9 +213,9 @@ class LOBMAXModel(nn.Module):
         x = jnp.concatenate([x_m_enc, x_b_enc], axis=-1)  # (B, L, 2*d_model)
         x = self.fusion_projection(x)                      # (B, L, d_model)
         
-        # === Fused Transformer ===
-        for layer in self.fused_layers:
-            x = layer(x, positions=positions)
+        # === Fused Transformer via nn.scan ===
+        fused_layers = self._create_scanned_fused_layers()
+        x, _ = fused_layers(x, positions)
         
         # === Final Norm ===
         x = self.final_norm(x)

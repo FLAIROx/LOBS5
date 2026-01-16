@@ -81,8 +81,10 @@ class LOBMAXConfig:
     # === Pooling Mode ===
     mode: str = "none"            # "pool", "last", "none", "ema"
     
-    # === MaxText Compatibility ===
-    scan_layers: bool = False
+    # === MaxText Compatibility / Scan Configuration ===
+    scan_layers: bool = True            # Always use nn.scan for layer iteration
+    param_scan_axis: int = 0            # Parameter stacking axis for nn.scan
+    remat_policy: str = "minimal"       # Remat policy: "none", "minimal", "full"
     record_internal_nn_metrics: bool = False
     matmul_precision: str = "default"
     use_iota_embed: bool = False

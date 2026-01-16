@@ -14,6 +14,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from flax import linen as nn
+from flax.linen import partitioning as nn_partitioning
 
 # Add MaxText layers to path (avoid importing MaxText __init__.py which has orbax version conflicts)
 MAXTEXT_LAYERS_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'maxtext', 'src', 'MaxText', 'layers')
@@ -150,8 +151,7 @@ class TransformerLayer(nn.Module):
         
         if self.training and cfg.dropout_rate > 0:
             self.dropout = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))
-    
-    @nn.remat
+
     @nn.compact
     def __call__(self, x, positions=None):
         """
@@ -211,17 +211,18 @@ class TransformerLayer(nn.Module):
         # Restore original shape if needed
         if len(original_shape) == 2:
             x = x[0]  # (1, L, d_model) -> (L, d_model)
-        
-        return x
+
+        # Return (carry, output) for nn.scan compatibility
+        return x, None
 
 
 class StackedTransformerEncoder(nn.Module):
     """
-    Stack of Transformer layers to replace S5's StackedEncoderModel.
-    
+    Stack of Transformer layers using nn.scan for efficient XLA compilation.
+
     Maintains same interface:
         __call__(x, integration_timesteps) -> x
-    
+
     Args:
         config: LOBMAXConfig
         mesh: JAX device mesh
@@ -238,12 +239,12 @@ class StackedTransformerEncoder(nn.Module):
     use_embed_layer: bool = False
     vocab_size: int = -1
     training: bool = True
-    
+
     def setup(self):
         cfg = self.config
         d_model = self.d_model or cfg.d_model
         dtype = cfg.get_dtype()
-        
+
         # Encoder (embedding or projection)
         if self.use_embed_layer:
             self.encoder = nn.Embed(
@@ -258,80 +259,92 @@ class StackedTransformerEncoder(nn.Module):
                 dtype=dtype,
                 name="input_projection",
             )
-        
-        # Stack of transformer layers
-        self.layers = [
-            TransformerLayer(
-                config=cfg,
-                mesh=self.mesh,
-                layer_idx=i,
-                d_model=d_model,
-                training=self.training,
-                name=f"layer_{i}",
+
+    def _create_scanned_layers(self):
+        """Create nn.scan wrapped transformer layers."""
+        cfg = self.config
+        d_model = self.d_model or cfg.d_model
+
+        # ScanIn for proper parameter handling during init vs apply
+        initializing = self.is_mutable_collection("params")
+        params_spec = cfg.param_scan_axis if initializing else nn_partitioning.ScanIn(cfg.param_scan_axis)
+
+        # Apply remat based on policy
+        layer_cls = TransformerLayer
+        if cfg.remat_policy != "none":
+            layer_cls = nn.remat(
+                TransformerLayer,
+                policy=jax.checkpoint_policies.nothing_saveable if cfg.remat_policy == "full" else jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
             )
-            for i in range(self.n_layers)
-        ]
-    
+
+        return nn.scan(
+            layer_cls,
+            variable_axes={"params": params_spec, "intermediates": 0},
+            split_rngs={"params": True, "dropout": cfg.enable_dropout},
+            in_axes=(nn.broadcast,),  # positions broadcast to all layers
+            out_axes=(0, 0),  # carry and output both have scan axis
+            length=self.n_layers,
+        )(
+            config=cfg,
+            mesh=self.mesh,
+            d_model=d_model,
+            training=self.training,
+            name="layers",
+        )
+
     def __call__(self, x, integration_timesteps=None, positions=None):
         """
-        Forward pass through stacked transformer.
-        
+        Forward pass through stacked transformer using nn.scan.
+
         Args:
             x: Input (L, d_input) or (B, L, d_input)
             integration_timesteps: Unused (compatibility with S5 interface)
             positions: Optional position indices for RoPE
-            
+
         Returns:
             Output (L, d_model) or (B, L, d_model)
         """
-        # Handle 2D input
-        # Handle inputs
         original_ndim = x.ndim
-        
+
         if self.use_embed_layer:
-            # x is indices: (L,) -> (1, L), (B, L) -> (B, L)
             if x.ndim == 1:
                 x = x[None, :]
-            # B, L = x.shape  <- Don't unpack yet, we need 3D after embedding
         else:
-            # x is features: (L, D) -> (1, L, D), (B, L, D) -> (B, L, D)
             if x.ndim == 2:
                 x = x[None, :, :]
-        
-        # We need B and L for positions
+
         if x.ndim == 2:
             B, L = x.shape
         elif x.ndim == 3:
             B, L, _ = x.shape
         else:
             raise ValueError(f"Unexpected input shape: {x.shape}")
-        
-        # Default positions
+
         if positions is None:
             positions = jnp.arange(L)[None, :].repeat(B, axis=0)
-        
+
         # Encode input
         x = self.encoder(x)
-        
-        # Apply transformer layers
-        for layer in self.layers:
-            x = layer(x, positions=positions)
-        
+
+        # Apply transformer layers via nn.scan
+        scanned_layers = self._create_scanned_layers()
+        x, _ = scanned_layers(x, positions)
+
         # Restore original shape
         if not self.use_embed_layer and original_ndim == 2:
             x = x[0]
-        
+
         return x
 
 
 class TransformerBookEncoder(nn.Module):
     """
-    Book Encoder with Transformer layers.
+    Book Encoder with Transformer layers using nn.scan.
     Replaces S5's LobBookModel.
-    
+
     Architecture:
-        x -> Pre-layers -> Dense projection -> Post-layers
-    
+        x -> Dense projection -> Pre-layers -> Post-layers
+
     Args:
         config: LOBMAXConfig
         mesh: JAX device mesh
@@ -342,80 +355,84 @@ class TransformerBookEncoder(nn.Module):
     mesh: Mesh
     d_book: int
     training: bool = True
-    
+
     def setup(self):
         cfg = self.config
         dtype = cfg.get_dtype()
-        
-        # Pre-processing layers (operate on d_model after projection)
-        self.pre_layers = [
-            TransformerLayer(
-                config=cfg,
-                mesh=self.mesh,
-                layer_idx=i,
-                d_model=cfg.d_model,  # Use model dimension (aligned for Attention)
-                training=self.training,
-                name=f"pre_layer_{i}",
-            )
-            for i in range(cfg.n_book_pre_layers)
-        ]
-        
+
         # Projection to d_model
         self.projection = nn.Dense(
             features=cfg.d_model,
             dtype=dtype,
             name="book_projection",
         )
-        
-        # Post-processing layers (operate on d_model)
-        self.post_layers = [
-            TransformerLayer(
-                config=cfg,
-                mesh=self.mesh,
-                layer_idx=i,
-                d_model=cfg.d_model,
-                training=self.training,
-                name=f"post_layer_{i}",
+
+    def _create_scanned_layers(self, n_layers: int, name: str):
+        """Create nn.scan wrapped transformer layers."""
+        cfg = self.config
+
+        initializing = self.is_mutable_collection("params")
+        params_spec = cfg.param_scan_axis if initializing else nn_partitioning.ScanIn(cfg.param_scan_axis)
+
+        layer_cls = TransformerLayer
+        if cfg.remat_policy != "none":
+            layer_cls = nn.remat(
+                TransformerLayer,
+                policy=jax.checkpoint_policies.nothing_saveable if cfg.remat_policy == "full" else jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
             )
-            for i in range(cfg.n_book_post_layers)
-        ]
-    
+
+        return nn.scan(
+            layer_cls,
+            variable_axes={"params": params_spec, "intermediates": 0},
+            split_rngs={"params": True, "dropout": cfg.enable_dropout},
+            in_axes=(nn.broadcast,),
+            out_axes=(0, 0),
+            length=n_layers,
+        )(
+            config=cfg,
+            mesh=self.mesh,
+            d_model=cfg.d_model,
+            training=self.training,
+            name=name,
+        )
+
     def __call__(self, x, integration_timesteps=None, positions=None):
         """
-        Forward pass through book encoder.
-        
+        Forward pass through book encoder using nn.scan.
+
         Args:
             x: Book state (L, d_book) or (B, L, d_book)
             integration_timesteps: Unused (S5 compatibility)
             positions: Position indices for RoPE
-            
+
         Returns:
             Encoded book (L, d_model) or (B, L, d_model)
         """
-        # Handle 2D input
+        cfg = self.config
         original_ndim = x.ndim
         if x.ndim == 2:
             x = x[None, :, :]
-        
+
         B, L, _ = x.shape
-        
-        # Default positions
+
         if positions is None:
             positions = jnp.arange(L)[None, :].repeat(B, axis=0)
-        
-        # Project to d_model first to match Attention config (needed for Flash Attention)
+
+        # Project to d_model first
         x = self.projection(x)
-        
-        # Pre-layers (now operate on d_model)
-        for layer in self.pre_layers:
-            x = layer(x, positions=positions)
-        
-        # Post-layers (operate on d_model)
-        for layer in self.post_layers:
-            x = layer(x, positions=positions)
-        
+
+        # Pre-layers via nn.scan
+        if cfg.n_book_pre_layers > 0:
+            pre_layers = self._create_scanned_layers(cfg.n_book_pre_layers, "pre_layers")
+            x, _ = pre_layers(x, positions)
+
+        # Post-layers via nn.scan
+        if cfg.n_book_post_layers > 0:
+            post_layers = self._create_scanned_layers(cfg.n_book_post_layers, "post_layers")
+            x, _ = post_layers(x, positions)
+
         # Restore original shape
         if original_ndim == 2:
             x = x[0]
-        
+
         return x
