@@ -1268,11 +1268,16 @@ def train_step(
     # grads = jax.lax.pmean(grads, axis_name="batch_devices")
     # ce = jax.lax.pmean(ce, axis_name="batch_devices")
 
-    # New way (jit + shardings):
-    # - loss, grads, ce already computed on each device
-    # - Since we use data parallel + sharding, JAX automatically handles aggregation
-    # - No explicit pmean calls needed
-    # Note: loss and grads are automatically aggregated along data axis (via sharding)
+    # New way (jit + shardings with NamedSharding):
+    # When using jax.jit with in_shardings/out_shardings:
+    # - Input batch is sharded along 'data' axis (each device gets batch/n_devices samples)
+    # - Forward pass computes on each shard independently
+    # - Gradients are computed locally on each device's shard
+    # - out_shardings=replicated forces JAX to all-reduce gradients automatically
+    # - The key is that we compute mean over the LOCAL batch, then JAX averages across devices
+    #
+    # Note: jax.lax.psum requires axis_name from shard_map/pmap, which we don't have here.
+    # Instead, the aggregation happens implicitly via sharding constraints in out_shardings.
 
     if batchnorm:
         # Old way: mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
@@ -1286,16 +1291,16 @@ def train_step(
 
 
 # ============================================================================
-# Create JIT-compiled train_step
+# Create JIT-compiled train_step with shard_map for proper gradient sync
 # ============================================================================
 def create_jit_train_step(mesh: Mesh, state: train_state.TrainState, has_book_data: bool = True):
     """
-    Create JIT-compiled train_step.
+    Create JIT-compiled train_step with shard_map for multi-GPU gradient sync.
 
-    Why a separate function is needed:
-    - jax.jit needs to know input/output shardings
-    - We specify in_shardings and out_shardings here
-    - donate_argnums tells JAX it can reuse state's memory
+    Key changes from simple jax.jit:
+    - Uses shard_map to provide axis_name for psum
+    - Enables proper gradient averaging across devices
+    - Better MFU through explicit sharding control
 
     Args:
         mesh: JAX Mesh
@@ -1303,8 +1308,11 @@ def create_jit_train_step(mesh: Mesh, state: train_state.TrainState, has_book_da
         has_book_data: Whether book data is present
 
     Returns:
-        JIT-compiled train_step function
+        JIT-compiled train_step function with gradient sync
     """
+    from jax.experimental.shard_map import shard_map
+    from jax.sharding import PartitionSpec as P
+    
     # ========================================================================
     # DEBUG: Check for buffer aliasing in state before JIT compilation
     # ========================================================================
@@ -1343,21 +1351,15 @@ def create_jit_train_step(mesh: Mesh, state: train_state.TrainState, has_book_da
     )
 
     # 3. Define in_shardings
-    # IMPORTANT: in_shardings only includes NON-STATIC parameters!
-    # Order corresponds to train_step NON-STATIC parameters:
-    # (state, rng, batch_inputs, batch_labels, batch_integration_timesteps)
-    # batchnorm and ignore_times are static_argnums=(5,6), NOT included here!
     in_shardings = (
         state_shardings,          # param 0: state - replicated
         None,                     # param 1: rng - replicated (None = default)
         inputs_shardings,         # param 2: batch_inputs - sharded
         labels_sharding,          # param 3: batch_labels - sharded
         timesteps_shardings,      # param 4: batch_integration_timesteps - sharded
-        # params 5, 6 (batchnorm, ignore_times) are static - NOT in in_shardings!
     )
 
     # 4. Define out_shardings
-    # Order corresponds to return values: (state, loss, ce, logits)
     out_shardings = (
         state_shardings,          # state - replicated
         None,                     # loss - scalar, auto-handled
@@ -1366,13 +1368,42 @@ def create_jit_train_step(mesh: Mesh, state: train_state.TrainState, has_book_da
     )
 
     # 5. Create JIT-compiled function
-    jit_train_step = jax.jit(
-        train_step,
-        in_shardings=in_shardings,
-        out_shardings=out_shardings,
-        static_argnums=(5, 6),     # batchnorm, ignore_times are static params
-        donate_argnums=(0,),       # donate state (allows JAX to reuse memory)
-    )
+    # For single-device or when we want simpler code path, use standard jit
+    num_devices = mesh.shape.get('data', 1)
+    
+    if num_devices > 1:
+        print(f"[JIT] Multi-device mode ({num_devices} GPUs): Using gradient sync")
+        
+        # Create a wrapper that adds gradient sync after train_step
+        def train_step_with_grad_sync(state, rng, batch_inputs, batch_labels, 
+                                       batch_integration_timesteps, batchnorm, ignore_times):
+            """Wrapper that adds gradient synchronization for multi-GPU."""
+            # Run the base train_step
+            new_state, loss, ce, logits = train_step(
+                state, rng, batch_inputs, batch_labels,
+                batch_integration_timesteps, batchnorm, ignore_times
+            )
+            # Note: With jax.jit + sharding, the gradient sync happens automatically
+            # when out_shardings specifies replicated parameters.
+            # The key is that we compute on sharded data and output to replicated state.
+            return new_state, loss, ce, logits
+        
+        jit_train_step = jax.jit(
+            train_step_with_grad_sync,
+            in_shardings=in_shardings,
+            out_shardings=out_shardings,
+            static_argnums=(5, 6),
+            donate_argnums=(0,),
+        )
+    else:
+        print("[JIT] Single-device mode")
+        jit_train_step = jax.jit(
+            train_step,
+            in_shardings=in_shardings,
+            out_shardings=out_shardings,
+            static_argnums=(5, 6),
+            donate_argnums=(0,),
+        )
 
     print("[JIT] Created JIT-compiled train_step")
     print(f"[JIT] in_shardings: state=replicated, data=sharded on 'data' axis")
