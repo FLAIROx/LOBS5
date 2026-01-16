@@ -133,8 +133,9 @@ class LOBMAXModel(nn.Module):
             variable_axes={"params": params_spec, "intermediates": 0},
             split_rngs={"params": True, "dropout": cfg.enable_dropout},
             in_axes=(nn.broadcast,),
-            out_axes=(0, 0),
+            out_axes=(),  # Match empty tuple output structure from TransformerLayer
             length=cfg.n_layers,
+            metadata_params={nn.PARTITION_NAME: 'layers'},  # Required for LogicallyPartitioned variables
         )(
             config=cfg,
             mesh=self.mesh,

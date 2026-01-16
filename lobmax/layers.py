@@ -213,8 +213,8 @@ class TransformerLayer(nn.Module):
             x = x[0]  # (1, L, d_model) -> (L, d_model)
 
         # Return (carry, output) for nn.scan compatibility
-        # Output is a dummy scalar (must be stackable, unlike None)
-        return x, jnp.zeros(())
+        # Output is an empty tuple (Flax axes_scan requires tuple structure)
+        return x, ()
 
 
 class StackedTransformerEncoder(nn.Module):
@@ -283,7 +283,7 @@ class StackedTransformerEncoder(nn.Module):
             variable_axes={"params": params_spec, "intermediates": 0},
             split_rngs={"params": True, "dropout": cfg.enable_dropout},
             in_axes=(nn.broadcast,),  # positions broadcast to all layers
-            out_axes=0,  # Only carry has scan axis (output is discarded)
+            out_axes=(),  # Match empty tuple output structure
             length=self.n_layers,
             metadata_params={nn.PARTITION_NAME: 'layers'},  # Required for LogicallyPartitioned variables
         )(
@@ -389,7 +389,7 @@ class TransformerBookEncoder(nn.Module):
             variable_axes={"params": params_spec, "intermediates": 0},
             split_rngs={"params": True, "dropout": cfg.enable_dropout},
             in_axes=(nn.broadcast,),
-            out_axes=0,  # Only carry has scan axis (output is discarded)
+            out_axes=(),  # Match empty tuple output structure
             length=n_layers,
             metadata_params={nn.PARTITION_NAME: 'layers'},  # Required for LogicallyPartitioned variables
         )(
