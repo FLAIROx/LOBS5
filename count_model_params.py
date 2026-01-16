@@ -56,15 +56,15 @@ PRESETS: List[ModelPreset] = [
     ModelPreset("1.3B", d_model=2048, n_layers=24, num_heads=16, mlp_dim=8192),
     ModelPreset("3B", d_model=2560, n_layers=32, num_heads=20, mlp_dim=10240),
 
-    # MoE presets (16 experts, top-1 routing) - names match measured values
+    # MoE presets (16 experts, top-1 routing) - based on Dense counterparts
     ModelPreset("1.9B-A153M", d_model=768, n_layers=12, num_heads=12, mlp_dim=3072,
-                num_experts=16, num_experts_per_tok=1),
+                num_experts=16, num_experts_per_tok=1),  # based on 125M Dense
     ModelPreset("5.8B-A473M", d_model=1024, n_layers=24, num_heads=16, mlp_dim=4096,
-                num_experts=16, num_experts_per_tok=1),
-    ModelPreset("20B-A1.9B", d_model=2048, n_layers=24, num_heads=16, mlp_dim=8192,
-                num_experts=16, num_experts_per_tok=1),
-    ModelPreset("30B-A3.6B", d_model=4096, n_layers=10, num_heads=32, mlp_dim=14336,
-                num_experts=16, num_experts_per_tok=1),
+                num_experts=16, num_experts_per_tok=1),  # based on 360M Dense
+    ModelPreset("23B-A1.9B", d_model=2048, n_layers=24, num_heads=16, mlp_dim=8192,
+                num_experts=16, num_experts_per_tok=1),  # based on 1.3B Dense
+    ModelPreset("44B-A3.8B", d_model=2560, n_layers=32, num_heads=20, mlp_dim=10240,
+                num_experts=16, num_experts_per_tok=1),  # based on 3B Dense
 ]
 
 

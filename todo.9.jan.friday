@@ -1,0 +1,527 @@
+Skip to main content
+Connect your Zoom account so Notetaker can join meetings you host
+
+
+
+
+Invite Teammates
+Pro
+Upgrade
+
+Ask or search
+
+⌘K
+
+
+Share
+
+
+Generative Models Presentation
+More options
+
+kang
+Jan 9 at 10:58 am
+1 hr 14 min
+
+copy summary
+Summary
+Transcript
+
+Edit Transcript
+Keywords
+Generative models, market impact, order book, reinforcement learning, policy agent, execution tasks, fitness score, historical replay, world models, distribution matching, training loss, computational budget, high-dimensional data, market making, reinforcement learning.
+Speakers
+Speaker 1 (30%), Speaker 2 (15%), Speaker 3 (15%), Speaker 4 (12%), Speaker 5 (10%), Speaker 6 (8%), Speaker 7 (3%), Speaker 8 (3%), Speaker 9 (2%), Speaker 10 (2%), Speaker 11 (1%)
+You You Thank You Kang You You You You I You Thank You. Thank the. You Kang And then
+cool, so we have some
+officially visiting professor. Wow,
+congratulations. That's big news.
+Hi Stephan, cool. Let's do a quick round of interest, because I think we have over still active.
+Did you bikinis here
+actually? Let's wait for Annie. Have you
+over with Annie yet? Okay, let's, let's maybe start with the people who are not visitors. So I'll start quickly, because I need knows. Yeah, Jacob, we introduced myself already, so I'm done. Yeah, please.
+Hi everyone. I'm George. George. Yes, I'm working on Junior CPI right now, checking market properties or they want to generate.
+So just context with our previous discussion. Right as I said, we've done these token level build structure models, and I'll go to testing. To what extent do you get higher order properties such as automarket impact score loss? To what extent are these just properties if you train with enough data, with enough weights, and the answer for is looking pretty good.
+I have something great for you. So the guys in Japan, my old team, built an impact model, obviously, like all these banks do, and actually got them to green light me writing a paper on it, and they gave me the permit, excellent. So they can ask them actually, to ask again, whether you can actually use the actual production model, which
+excellent, and you can see to what extent you can just replicate that, what
+they usually kind of decay models. So again, we're not
+building any of the structure, but we're asking as a postdoc analysis, if we just train enough data, can we recover these kinds of known actually,
+actually, what you really want to do? You want to estimate such a model and see whether the estimation is different for your for your model and a little marketing. Excellent.
+Hello. I'm Blanca. Nice to meet everyone. I'm associate professor in the maths Institute. I know quite a few of you here. So very, very happy to be in touch.
+Hello. My name is Kang, and I'm the fourth year PhD here. I've been working with Jacob since 2022 so we have been working on the bigger project of the Jackson lab and foundation models, and also to fine tune into downstream tasks such as audio execution, about market making.
+And as your collaboration started when you were your masters,
+yeah, masters at the mathematical Institute, exactly.
+So there was math at the very beginning of this collaboration. Excellent. Yeah. I worked on a bunch of
+things, but my main focus now has been on evolution, also state space model. Kang,
+just joined Oxford, so I'm now
+December, just before I'm actually formerly the cos TX. Before this, I heard Jake Morgan, but in JP, I think he wrote a paper called The hedging.
+Anyway, I also run the electronic trading team in JP, so I definitely know. And we actually, we really like this report. Yeah, and did it work? Not as good as the actual didn't get quite good. Fine.
+This is something that we reach into our ears, because Sasha can speak to that. You know, cool. We have a couple more people who joined live. Let's, let's do it online. Sasha, your top left corner. Do you want
+to start? Is that me? Yeah, yeah.
+I was with, together with Kang, and Kang, one of
+the original sort of
+collaborators in this collaboration. I'm a fifth year PhD student. Now, I'm kind of on the cusp of handing in my thesis, but keep on getting drawn back in with little things I want to fix. I I implemented kind of GPU order book at the time, and then with Kang, we made it into into like the first RL environments that now turned into this, like multi agent RL stuff. And then I spent a lot of time with pair, looking at the sort of generative models, and helped to kind of make the model aggressive, which is what we're doing, what
+we're working with now.
+But still finance. And yeah, I think been in this book since pear started the collaboration with you guys earlier in 2018 and of course, given that I worked previously in HFT, like this, whole microstructure research is quite close to my heart, as well as all the impact modeling, having worked some time in execution as well before excellent Valentin,
+Hi, I'm managing. I'm a second year science. Also worked on the motivation environment for high frequency trading. And now we have focused more on like, can we use generative models as an actor, not just as an old model? Together with Kang, we work on using, like, the evolution idea of we did God to kind of update an actor model that is generative. Kang,
+Annie. Hello, I'm Annie. I think I most, most people know me. So I'm based in the computer science department. I wish the finance research via the agent based methodology and the fact that we used to be able to get data. So I started by supervising large number of the VC dissertations on finance, and now I'm also focusing on, I mean, enjoying this collaboration greatly. This is an understatement. And we've also had theoretical, theoretical results on agent based validation, calibration and arrangement. So
+lovely to meet again. Thank you. Excellent. I've been working on quant finance for more than a decade now. I was used to be quant in New York in the previous slide, where I was quite a bit with the methodological data and especially statistical arbitrage. And again, this group, I've been working for several years now with Kang and Maurice and Valentin joint with Army and spending on all sorts of market microstructure projects. Excellent. Hi there. I'm Satyam. I'm a fourth year undergrad and doing engineering science at Oxford, and I'm doing my fourth year project with this group, and I've been working mainly on the internal optimizations and improving the efficiency of the log spy model I have an interest in, like coding and finance in general. So I've been working mostly on the model itself, but I've just been helping out with other tasks the team has, and the interesting ideas we have, I try to run experiments and see what we can get up to.
+Cool, yes, that's the group again. There's previous contributors who are not here, because we always we have master students with PhD students, and it's been going on for some time. And you can see the title of the group, arrow for order book, million trillion project, bottomless wheel of the equipment, yeah, of course. I mean, that's what, that's what AI is about, right? If you're not ambitious enough, you're just going to be irrelevant.
+Well, you didn't state the currency. So there's, there's chance to dollars.
+I forget where it is cool. Do we have slides? Let's go, yeah, there should be $1 management, dollar updates. Yes, there we go. And usually we have a slide deck. Let me just go through where people make updates. And if anything doesn't make sense, because this is. You first. Yeah. Welcome to crazy. Just ask questions.
+So in the past week, I'm working with Valentin to make you make the orb.
+I've been working with Valentin to make the egg girl to finally, yeah.
+In the past week, I've been working with Valentin to make the egg girl with log s5 to finally run. So in case it doesn't know what's error is, it is the evolution strategies to run in half a parallel, in half a scale, and we use low rank approximations to fit in as much as per the patients as possible, so that we can have a better explorations of how the weights of our models evolves over the over this effort.
+Yeah. So here we
+make it working on the execution tasks. But I remember in the past, in the last year, you mentioned to do not specify not the execution of market making is not specify whether it is a sale or buy task, right? I work in this execution task for sale because I want to start from the very beginning.
+Yeah, this was discussed yesterday, right? The meeting, like, start with the task for debugging, where we expect that it is possible to make progress. Yeah, right. I think in market make you had an issue where, you know our doesn't get off the ground because there's not much money left on the table. Yeah?
+So we so here in our model, we use our pre trained foundation models that generate the next token. It is the next order. We treat this order as actions. We do not specify or predetermine the action space, and our pre trained models of lobby as five. It is lobby is the limit order book s5. Is our model architecture. It can understand the transition of the order books and all the flaws. So that is not just start from training from the from the beneath that do not submit some random orders, but some meaningful others. And we use aggro to
+supply tuning to the
+excellent This is the first, I think this the first result we have on using the backbone of our order flow model as initialization for the policy, which now is acting not in some high level action space, but in messages. By choosing what messages to write. Okay, you have the order book. And now optimizing all of this using a back prop, free, scalable. It's called a group, but, yeah, excellent. And this works.
+So we it was in the simple situations, actually. So we specify the dead window, and it works. So in the in the next week we, I will working with Valentine to dead window is like if we given some, some historic, historical orders. And, yeah, we use historical orders rather than word models.
+Yeah, I see that backward mode is historical replay, yeah, yeah, right. So they're eating it with the current, current market history, yeah? And then you're not modeling high order responses, Yeah, but you're just doing first order impact, yeah, basically audible.
+We have two, two different but the historical repair and also the world models. So if this works, then we move to and then
+what happens next? What do you do?
+Yeah, compute the impact of those orders, yeah, compared to sort of replay, but we don't change the third replay otherwise. So imagine the historical orders just come in into the order book on top of our agency. So that's what this currently is. The next step here is to replace the historical replay with the world model I see, with the order book model,
+which then gives here, you should actually make money, because essentially, you don't change the market.
+You have no impact. Yeah, sure. So that's really okay now is you first want to impact on the prices
+you into the order book, because you still trade, and we're still trading, and we're still completing the order book correctly, yeah, right, but we're not changing people's ordering behavior.
+So you clear a level, yes, and then somebody else wants to hit that level the next order in the actual market price. I mean, there's all sorts of weird stuff going stuff going right, exactly. So when you sent an order, do you assume you you feel get filled, but don't change the level. Or you see, when you have top of book, yeah, your order is take on top of book, yeah. But then the actual historic next order is take on top of book, which now is gone, so then just sits there, yeah? So you just leave it, right? Yeah, we just leave it Yeah. So that's what I mean, yeah.
+So there's no correct I'm just saying this. The words can execute. The book changes, right? But other other actors don't, yeah.
+It doesn't change Absolutely, yeah. And our, our generating model, the policy model here, will observe the past all the orders and. The updated order book as an input to generate in the next order as their actions. And we will use the finally, the fitness score, to which is the pin now, to tell whether you perform good or not. Then use this as a kind of in the right to tell them how you adjust their
+buying you, buying you buying your trading actively.
+You're not currently selling? Yes, right now, we're just trying to sell it. Sell money off. It looks like your mean?
+No, the mean is not. The mean is actually we have already do some kind of nominal normalization to the pin now to be used as a fitness spot. We're not just to use the Okay, now rocks.
+What is your best like performance curve? Because fitness best ever is a very biased estimate of true performance. If you, if you have a noisy estimate of fitness, and you take the arc max of the entire training run, yeah, that's quite noisy. Do you have an unbiased fitness
+scores? Yeah,
+yeah. We should track that, yeah. We should unbiased estimate of the current best fitness, yeah,
+yeah, correct. We should check that, yeah. And in the middle, I just meant it for debugging, like, because I fit the error with some noises, it annoys the positive. But we just to make sure the generated
+in the orange or in
+the red is the same, like, same distribution with the cheese,
+so that we we just want to roll out these. There's facts in the in the Policy model, they generate some insane models or invalid, invalid orders. It's just a useful for validating whether our model is correct or not. It's annoying the policy so I haven't recorded it noisy.
+So this is just, this is just debugging information for you, yeah,
+debugging information, just to make sure our our generation model with the angle of architecture, it works. There's no
+What do you mean with the egg roll
+up because, because we put the angle noiser find size, if
+you set that to zero, that's still then reproduced.
+Yeah, yeah, yeah, right, right, because we change the codes how to make sure the
+test for you that like end to end. If you just unrolling the backbone, yeah, you're still getting back violent distributions
+of orders, yeah, just to make to check, yeah.
+Well, champagne, this is cool. This has been like a long term dream for the team to use the word model as the backbone for an execution policy. So you have all the pre trained information in that backbone, and you have a flexible action space. It's just you can trade whatever you want right, whatever orders you want, right, and then we can do fine tuning of that backbone using egg roll or RL to make this better. So this follows, again, the LLM paradigm with the pre training phase, and then you do some type of RL based post training for the actual task executions that you care about, right? So this is very much the sort of LLM playbook here playing out.
+One question I have, did you have to do any like additional like inference, time, like infrastructure, I guess, to make sure the originators are valid.
+Yeah, hi, Sasha, perhaps you can say something like the error correction,
+but that's really neither. Love is five,
+yeah, there is no, there is no error correction by default.
+But like valid others, you just drop it, right? You just drop the orders
+ignored Exactly. They just got ignored, like an exchange. But there's no like in this, I presume. There's no constraint on like. I mean, so is this orange policy, the agent s5 model, and am I correct in assuming that there's no like, there's no world as five model running here.
+Yeah, yeah. Okay, so we only have three type of trailer ID, the historical and the policy model and the role model three trade IDs.
+Okay, so, so this is just
+like Am I correct in assuming that despite this being set up as an execution problem, like, where you're trying to sell something, if you if you buy something, this is going to also be, go, put, get put into the P and L, right? Because, like, we've still got roughly 50% of all the orders are buying back what we're trying to sell, right? But by looking at the graph on the bottom right here, yeah, yeah,
+yeah, okay,
+but the sorry, the graph on the bottom right, yeah,
+I thought that was your like debugging
+unit test, yeah, debugging test, and now that
+the actual optimized model behaves like an order book model, like. Like a water flow.
+Yeah, fine. So that's what
+I'm right. Is unoptimized. So this is before egg roll. Yes, before I go, what does this look like after egg roll? Do you have the graph?
+Yeah, because I only check something for
+debugging, which is, like, it's nice to check. Is it one on board? Does this make sense for the visitors, for the new business, new joiners.
+And how is the copyright?
+Yeah. So because we have new visitors, we just sorry the gianters, the gianters, we have new members, I guess, yes. So we have have we revisit what happens in the past in the last meeting, and we moved from the original log s by log s
+prime, which is the slide window pattern. And here the blue
+one is actually the autoregressive things. So things.
+So just by once, quick recap, 2512 24 nine. Those are the date stamps.
+Yeah, yeah, the debt, net year and the debt, yeah,
+of the two models, like, damn, their models. It's the original pair model, like a version thereof?
+No, no, it's the ICML model, so it's the same, already updated one, yeah, but still,
+that's original, sliding us the mean versus the actual
+mean, or what? No. So these are, these are two different with the law finished, but we build through distribution comparison basically assesses two different metrics, the one distance between the true distribution from the historical data and our generated data for various axes, and the wasserse distance. And then we're showing for two for these two different metrics, for Google, the mean, median, iqm, inter contact mean for the one and the Wasserstein,
+the difference between
+zero being the
+zero is perfect, recovering exactly the distribution and l1 I think, is bounded at probably 0.5
+and you can't go above,
+so it's just the two histograms. You normalize the histograms, you look at the distribution difference, just the absolute difference between two distributions, and then what changes?
+So lower is better. And lo
+and behold, we have a huge gain in another one and more mixed picture in Wasserstein,
+but the newer model is also going to be faster.
+Which, yeah, hundreds of times, hundreds of times faster. So that's good. Sorry. Which was the time metric? Is it? Which P,
+the first order p1, or Yeah. And you can
+look at some of the distributions on the right from these histograms that we're computing. So in the log bench, we're computing sort of, we have this call this, like aggregate functions that select one dimensional features out you care about, compute condition and condition distributions and then take by such line distances. So we actually, and the idea for the log bench was most that we could look at how errors accumulate this as time goes on. Uh,
+yeah. This is the speed testing done by Sasha. Sasha, can you explain? Yeah.
+So, like the blue on the bottom left is the old model, so that was what was in orange on the previous slide. And then the other ones are the the new like, auto regressive version on the bottom is just the batch side. And then the difference between the red and the green is like, the green is still doing the conditioning with 500 messages, and the red is doing like from just an order book snapshot onward. And obviously like because you've got to process double the amount of messages. The green one slower, because that's this is just on a per generated rather than a per like process.
+Which, which option were they?
+Which? Which of these like here? How did you compute the UN rules? Were you still catch the fake sliding window, or were you just doing longer unrolls?
+No, no. We are actually doing like the same with the log, the log bench settings using five panelized input and generate.
+Okay, so this is the slow you're conditioning here. Kang, right,
+yeah, I believe I should have conditioned. I.
+Okay, this is interesting because mine, yeah, I use
+the default setting in the log bench. So I'm not sure, but it should be like this condition on the past 500 I just use the default setting in the log bench. You have
+some conditioning, and will generate
+more future when you do inference and generate the sequences, or the blue on here, are you, are you giving it a context of 500 messages, or are you just giving it the orange book that's generating?
+That's my point. That's my point. So remember that we have updated for several times, but I Yeah. I use the inference no error correction. I would believe
+I feel good to just get the same numbers for both options, ideally,
+yeah, yeah. So yeah on the next slide, yeah. Because I did find this. I found something a bit weird, which I think I can explain this one. Yeah. Here we go. So the red here is, is the red line on the previous curve, and that's with conditioning. So we're just giving it the order book and say, Okay, go off and generate and remark complete does better than if you condition which is the green and the orange here, which way they have a slight difference. I was checking some unroll. So the 100
+is the number of the conditional, yeah, yeah, this.
+But no, no, the n1 100, sorry. The reason is so if you go back on the previous slide to understand this, the n is this N sub, which is basically, if you increase the batch size, you run out of memory when you do conditioning. Because it's remember, you've got, like, a long sequence of tokens, types of vocabulary and stuff that you're trying to output. So when you do the conditioning in one batch, without doing it, like auto regressively, it runs out of memory as you increase the batch size. So what you can do is you chunk it up right like so for n equals five, instead of putting 500 messages through at a time, you do five batches of 100 messages and then propagate the hidden state. And that improves your memory sort of use. And that's what the next thing is. Is just this N sub five or 400 because I wanted to make sure that that doesn't induce any errors, and it like they're pretty much right on top of each other. So that's fine, but, but yeah, so in both cases, for the green and orange, you've got 500 messages of conditioning.
+Let's actually have a question be I mean, just the right one is it's less, but it kind of because, in principle, from information content you receive, if you have more, if you have all the conditioning, you know more, you should do better. But of course, you have a very limited window which can introduce some potential buyers, short term buyers, which maybe we had a longer window would be averaged out, so you might be skewing your distribution somehow by having maybe a too short window, because you don't have, I haven't like and it might be doing better with no contact than maybe too short contact. So it's not
+unreasonable. Sasha
+theory was the hidden state that you've never seen it. I have a different theory at training time, we always do 500 sequence messages. So we only ever like have a hidden state that's that's supposed to encompass a sequence of 500 messages, kind of at worst.
+But yeah, Jacob quickly.
+So the only reason histories become relevant is if you look at conditional distributions, right if you're comparing, and I forget in log bench, how many of our measures are conditional of like a joint histogram of P of X, given y, so p of phi of x given phi of y only then. Otherwise, if I just sample some unconditional state of the world order flow, I can match the distribution unconditionally. And it would be interesting to see if you just look at the conditional metrics. We said that we have them in block bench, which has been a while, does the answer change? Because obviously, for the unconditional distribution matching, you don't need history, and history will hurt you.
+CO two breached 1200 Yeah.
+Fantastic. Three, yeah,
+yeah, but the conditional things in log bench, they only doing conditional distributions on the generated sequence. They don't do any sort of conditional metric. Is on, like, based on the previous ungenerated sequence from data. I thought, what we,
+I hope we've done at some point, is to do to the distribution histogram,
+maybe drop this from the paper. That would have been bad.
+Yeah, I don't think that was ever done. No, then that's
+that would be a distribution, yeah, let me go back and paper quickly, because that's then it's obvious that we don't like we're back, we have the wrong tree, right? If that's the case, why
+I'm still surprised that it would like negatively impact it, though, right? Because you're giving it more information content,
+but it's limited.
+Yeah, no, like, think about it. Has seen the unconditional sequence, the unconditional modeling is a much easier modeling problem, right? Because P of X, given Y is just longer the sequence, the harder modeling, modeling problem, so the more like variance and noise going to have in it, right? It's the least specified.
+Can I just ask one question, of course. So the unconditional is, you have a bunch of characteristics you look at from your from your model, whatever order, book shape, yeah, distribution of orders, and some spread unconditionally. Mean you virtually, let's
+say, log into arrival times
+of the middle, top of the book. So that's what your comment is here, that if, if, if I don't have any conditional, all I'm trying to do is to build a very high dimensional distribution of something. But we're trying that. We're trying to build the token, but in the end, I'm trying to get your arguments exactly if this, if I, if I only look at Terminal, all I'm
+trying to do is building a distribution somewhere.
+And what I'm trying to say is we had, at some point in the discussions of plans for this lot bench. Because of this, we had these conditional distributions that want
+to compare, and we need to say conditional. So to I think it was Sasha, what are we conditioning?
+Two things? Yeah, we're using the same word for two for two different concepts here, like we've got the conditional of when we do the evaluation on the distributions, which is, like, we've got two one dimensional metrics, and we condition, like, the distribution of one of those metrics on some other metric. Yeah, and then there's the conditioning, like terminal.
+You mean terminal, as in, when you say, you condition one metric on another. You say, my average order, book size, condition on
+time of day, momentum going up, or whatever.
+Okay, yeah,
+yeah, yeah. And then, and then this conditional that we're kind of talking about here in unconditional is like whether we see the model, or whether we basically just update the hidden state, or see the hidden state with some previous messages that we take from data, but
+such, let me connect this. Let me correct this. And that is, we can have the same conditional metric you describing of how based based on past and future, or past and present, and that connects the two, because only when you have, only when you have that like time conditioning in your evaluation does it give you a benefit. To have time conditioning in your model. You don't need a hidden state if your model never compares conditionals in terms of different time windows. And I thought we had an open and what I'm hearing is we only have the conditional for a given time step, which is quite bad.
+We only have a conditional kind of intra, intra, or given inter, generated data. We never talk like we never touch the conditioning data, if you will. The other thing that's worth mentioning is that with the old log bench, so the blue one here, it was, by definition conditional, like, you had to seed it with a sequence of 500 messages. There was no like, alternative, yeah. Okay, so that's why I'm thinking, that's why I'm still like, a little bit like weird, because what the blue is doing is it's the blue is basically the green and the orange in kind of the old architecture, yeah.
+But unless you randomly sample your order books, the other one is also still conditional,
+yeah, yeah. So yeah, even the red one is still conditional on the initial order book state Correct? Yeah. So, like, there's plenty of information in there, right? You've got time of day, you've got you've got, like, the mid prices at the beginning, and all those things. But, yeah, Satya, I feel
+like the easiest way to debug this. Would be to messages
+and not like, there's no reason why we have to log in all 500
+generate and generate, yeah, I'm arguing. So you like reduce the whole sequence length to 500 instead of,
+can I just train that TPP, TT model, and then sure, but just
+to, just to debug like this specific issue and see if Sasha's point is like the main issue, then we can just do this. I think there's also potential. If you, if you get a list of order book messages, would you be able to identify this problem, like, a later year than the current one? Or do, like, for instance, does the timestamp? Does the timestamp reset every day?
+Yes. Okay, so it's like,
+the reason why I brought that up is because, like, for instance, in the time, or, like, some metric that doesn't reset, then maybe, like the leader, like, since we're conditioning on like future messages, or like messages kind of our distribution in terms of like data, or you're testing the 2020, yeah, that sequences suggest wouldn't make sense in 2022 so that's why I just kind of behave slightly weirdly, like, not quite kind of probably bad, but like, just bad enough that, like doing it, yeah.
+Other question, is this the blue one does it too,
+right? It's not the biggest thing. I think
+the blue model does have, might have this tissue, but the unconditioned model does not see any message data that would be or wait my
+unconditional. What does the unconditional means
+you don't do any forecasting over the
+previous data, yeah, but it's
+just the order book, okay, okay, we're not doing a conditional on the previous sequence.
+Yeah. It's been a while. I don't know how this happened. I guess life is busy, but we should fix that capital bench, because the entire project is about conditional distributions,
+and we're not measuring that properly.
+So that's something we shouldn't forget. Okay? Secondly, I think would be great to test our best and biggest models, yeah. So these are now slightly broken methods.
+So for considering the best and biggest model,
+I have a policy. So
+below the 500 megabytes, I just trained several models to bear to verify is moving like the test loss is better or not. But if it is over what 500 that is the largest is largely wrong. So I only use one node or two nodes to run it, and if there is really a bigger training that I have, get the confirmation from you, then we start the training. And here is the results. So if we have the same computational budgets, we verify again with the updated architecture, the test loss is better with bigger model.
+Okay, what is the best test loss you have achieved so far? It's point eight, five. Best test loss
+to be should be better, but I haven't tested yet, fine. So that's I think,
+to this for people like this, is going from 75 million parameters to 2 billion months now at the biggest one hundreds of GPUs. This all great fun, but we have to evaluate them properly. And, yeah, cool. And this is obviously like, we're making these models hundreds of times faster. We can use them as word models for learning, right? So we can optimize agents in them. That's the goal.
+Am I right in understanding that in one case, when you speak about conditioning, you're actually projecting on some subspaces
+in the it. Because the issue is, if you want to do distribution matching in high dimensions, good luck, right? Like from historical data. If you don't, if I don't give you sampling access, but if you give me sampling access easy, then I can do the conditioning exactly, and I can compare distributions. But if I only have samples from both distributions, so if I only have samples from one and generate one from the other, then matching those distributions in a way that is subtracted or meaningful isn't obvious. So high. How high dimensional is this right now, I mean, it's the order book. So it's 500 500 orders times whatever, 20 messages per order times whatever,
+24 messages per order. And the sequence lens would be 5k and the vocabulary size ranging from 2k to 12. So it's,
+you know, it's. It's a very, very large category, distribution 1000 to the power of up to a million or something, right? So distribution matching is not obvious. What we've done in the log bench paper is, well, there's certain axes we know ismatically meaningful, so we do projections on the low dimensional axes, and then we do distribution matching in those spaces by projecting down, taking histograms and comparing, and we can do that unconditionally, unconditionally to look at correlations and codependencies. And we can do something else, which we can ask, what's the worst case projection for the given distribution, which is then an adversarial classifier that was most of them, right?
+So that's like, if you give me the thing, actually, what happened there?
+It's basically, you come to me and you say, Here's
+my No, I know what you what the idea, but yeah, so what does
+it what does it do? It gives you this certain score of, like, how much overlay distribution to show
+you something like a real deficiencies, or is it more like a friend, random kinks, which you don't care about
+because I'm analyzed, I think that's a great question. You said the
+problem is a bit as you say, it's very high dimensional, right? So you don't know whether mismatch out in the attackers.
+And to be clear, like in all of this, we're usually looking at, sort of specifically, how does the distribution mismatch differ as you keep trading. And we have parties on this, on this, in this collaboration as well. That didn't quite pan out. I'd say that if we're trying to directly optimize distribution match now we have egg roll, we could revisit those, because now we can, we can optimize non differential objectives such as distribution match. There's a lot of stuff now that becomes easier in scope, but that's and then these what we're looking at here one and what's the start? One and Wasserstein, that are the distribution match metrics on these low dimensional projections, where you can then just compute histograms and say that's a distribution. What does the other historic
+look like? It seems still quite computationally expensive to compare high dimensional Waste
+Time Matrix. So we go low dimensional. So he says, that's where we go, low dimensional. Usually it's a 1d projection. Okay, these five is usually 1d and then you can just take this to plan and just compute it directly. So that's why we took that approach of taking legible axes in combination with that adversary.
+It's worthwhile to also mention that, I mean, we go, we kind of generate message by message, but you also generate the timestamps of the messages. And I think the timestamps are the ones which are generated worse all. But for some applications, the timestamps aren't necessarily relevant. If you think about some enforcement, you really care about the next message, the one after along, as long as you fast enough, the exact timing isn't really necessary in the generation. That's that's one of the worst performing part.
+Why is this? Do you think? Why?
+I mean it has because they're generating them as like, nanoseconds integers. They have lots of tokens in it, which also makes it worse. So the I think the other part of the message, like the size is just one token, that price is relative to mid, so we don't have absolute encoding of the price, but the price is just how many ticks it is above or below the current mid which again, something stationary with few tokens. But then the nanosecond times are just too many tokens.
+If you predict the time until the next message, presumably it's a similar problem. Yeah, if you were to do that, if you were to do it time to next message for a Google presumably that's a bounded number. Yeah, we have satisfied.
+Yeah. Here you can see a plot. So this is we have the ask for your block time to cancel log into writer time.
+And you can see where the
+I see, because you take a log, which don't do so poorly, on that front with a log is five,
+I guess. I don't know if we should probably do this. If we haven't done this, I don't know how much measurement noise there is, because everything is estimated from Final samples. So you can imagine, you have a lot of noise in distribution, then your sampling error is larger, right? Because you estimate the distribution from finite samples. So we should also maybe revisit that at some point, ah or lower. Like, what's the best achiever number? Like, how good is 0.05 what is actually optimal given the finite samples? Because if you're sampling twice, IID, you will get sampling noise even in the low dimensional representation. And that's okay.
+Can I ask a nuanced question? Of course, Stefan, that's what really for, for the timing, so you have noise and the time for the next message, in the sense you don't care. What you do care, though, is for the next 100 message, the total time is somewhat sensible. Yeah, no, if you if you want to do vivo three. In you don't care how long or how fast the next message is, but you do care how many, how much volume is traded in some sense. Yeah. So if and is the aggregate
+actually, okay, volume time you get, because avoiding the size you're given basic so you generate the size of the trade, so you get the volume time, you just wouldn't get the wall clock execution. All you really care about the time interval. Is it too fast for me to react on or is it slow enough for me to react on something else?
+Right? You're right. I totally understand that part of the next message. But if you think about vivo, which is, in a sense, volume over time,
+yeah, I give you a game horizon
+is uniform in volume time and volume time I get from the trade sizes.
+But there's still a question, which is, if you aggregate events, do the aggregate statistics, like, are errors, IID, basically, and do they average out over time?
+V work, let's say training fund 10 to five minute revolves. Yeah, that's kind of very classic strategy. So you don't care about what you care about is that you get the volume in five minutes Correct. Yes, that's what I meant. So it's not so much the next order, but it's in the bucket of five minutes the volume is roughly correct. That's what I'm trying to so that's actually it could be that you average religious out right, you're right, yes, yes. You have an error when you don't care. Because on that
+five principle, we should be happy with some cost, grain, time interval that doesn't have to be that precise. And then this average out there. So we should be able to do with much less tokens, basically. But you agree with that as well, and then you will still get, I mean, on a sun will still give you the right total amount that you don't need to know every intervention because, I mean, you
+probably notice it's a relatively common strategy for all of those strat funds, yeah, who don't have high frequency signals, but they kind of want to trade within a certain period. So the same five minute view.
+I mean, we could easily add that metric,
+actually, is it?
+Well, I think so. I think we have a volume, a volume per time metric.
+We have volume per minute here. But I
+was, I was thinking that you're saying something different, which is, when you look at longer time horizons,
+when I understand this graph correctly, that's actually pretty good, small or less better, right?
+Okay, that's fine. That's pretty good. So this minus one is
+CO zero. So then I understand Stefan's point saying that actually the main issue is that it's knowing whether you can hit
+it. That's basically what
+just Yeah, can I also, just to double check, could you not
+learn that particular part? You give yourself your execution time. Learning is the next, you know, is this fast? Am I fast enough so you virtually decouple the problem, meaning you don't need, you know, you take the time. Can I react to that order kind of thing?
+If that makes sense, yeah. Think you can phrase it entirely on volume time, then you don't need.
+But I guess what you were saying, what you're saying earlier, is there's an order, but what can happen is, I've tried to get it, and then it's basically it gets canceled before I can react.
+Yeah, yes. So what we could do is try to estimate,
+is it actionable flag? Yeah, no. This is basically the only thing you want, like, Finally, like, so basically, basically, it's time bigger than
+you want to learn this. This
+right now, it's like microscopic. Whatever try to do. We're trying to learn the best fast enough models that we could use to train whatever policies, because we know how you can make things faster if we need to. At the end. As I said, you always distillation. So we're trying to keep right now actually relatively slow models, because we know how to make things fast afterwards, as I said. So distillation works, right, but we want to be optimizing like pretty expensive models at best fidelity and highest accuracy. I think here we didn't
+talk, we didn't stop. We didn't mean fastness and training or execution of tomorrow morning, if you have an order book simulator where the time of the order, the real problem is this kind of signal you're building is going to be that when you try to hit the market, it's gone. That is going to be the issue. You have a signal, and you send your order, and by the time you all arrive, somebody else's already, already did it. Okay? That is, realistically, the problem we want to face with this type of, yeah, if you think about if you have infinite if you have five classes on the planet, you hit everyone. Bishop, but what I'm saying is,
+we, can we get the intellect our world model gives us the correct next timing, and we can now train a real time trading bot.
+I think. Stefan was saying is that that next timing is actually not that accurate. Yeah, it's meaning that the risk of that being the thing which kills the strategy,
+even if you do stoic playback, the hit something which
+is totally because I never mind you played it before. Manipulated before. It's going to
+be so you're saying, if you get to deployment, the good news is, affiliate is really okay. And we discussed, we had discussion about this, how do we deal with time, air environments, event driven versus step driven as well, absolutely relevant. But the good news is, we're not making money in simulation, so we're not yet at the risk of speed, of time. I think we're running out of time for this presentation. So let's keep let's not shut Yeah,
+I'll be very quick. I'll be very quick. So I talked to blank Kang yesterday about this new computational badges. So it is, I have proposed all the book, the ID model. So it is a video. Models to the to do the pre training. Is a kind of war, models like autonomous driving the world models how to know what's the next frame, what happens in the future? Yeah, but if we already missed the ISM bar deadline, perhaps we can apply for some other content. I think Israel will also
+have repeated codes.
+So my suggestion was to incorporate a very tiny piece of whatever you want to do in the current application that we're preparing. Because the magic fits and I mean, or we can also separately, put a different one.
+All I think makes sense, underutilized. We should put in as many applications
+as we can. At the current moment, at least half of the notes are idle,
+which is it, right? If I don't get upset easily, but this makes me upset.
+Yeah, well, I mean happily, happily putting in more because, yeah, we have a lot of high computation in terms of
+projects. So we've been, we've been writing
+this book is about a basketball top up on the Kang grand based on the results, we've put in other applications for the project, such like road I think we should just
+maximize number of computers.
+Yeah, so I'm very happy to just, well, I don't want to put the exact same thing with what you were doing so far, because, you know, but yeah, so if it's something that's related to an old project, right, but genuinely new, that's the perfect combination.
+But I don't think we even have right now, to be clear, like, we don't have a large application for this project on New Zealand right now, so that could be that large application. Okay? Does that make sense? Because so far it's been under this like flare, exploratory projects, ad hoc grant that we've had that's expiring into Feb. We don't have a medium term solution here, so be good to put something in.
+Okay, that's amazing. So next deadline is
+next week. What is, what is that called? This time, I forgot, but, but I'll look it up. The reason it replied last time was because was AI for science, and this is the one part that doesn't really quite fit. And they are for science.
+I mean, the issue is usually with finance, that they don't really like finance. None of the funders like finance, because there's this issue of everybody saying, oh, so in the industry, should fund it. In some way, there's this dislike against finance, not understanding, yeah,
+it's actually essential, which I think is for us. Like we've always sold it as, like, fundamental machine learning development, and this is just our, our testing ground.
+Cool. I think I we can together, prepare the song proposals, correct everything.
+Fantastic. I think getting is about hours for this project, dedicated because a lot more than
+what we currently have an end of February. Awesome. Already done.
+Yeah, this is just a few there's just a few more details on the s5 equal approach that Kang and I have been doing. I think we talked about most of the things already. So, yeah, one thing we also did is, like we did the European L is fitness. So like we also did just like, keeping track of the trades you're doing, getting the P and L and using this, this as a fitness and, yeah. Then also this thing we quickly talked about is, like, this thing of, like, how do we deal with the Asian model is generating orders not valid. So we thought about, like, how we can punish this, so maybe kind of incorporated this into the fitness. So we want to kind of learn that it shouldn't do this, because, like, right now in Jackson, basically, if you put in an invalid order, just there's nothing, right?
+Yeah, Valentina spend a lot of time debugging our.
+Could Good, excellent. Thank you, Valentin, and this is including all the fixes that Sasha had found, right?
+Yeah, a lot of those fixes
+necessarily as high.
+Yeah, cool. What is, what does Twilight sound?
+So like we did, like a small one on flat 12, like the frozen gold model and then a policy model. And I used to put, we used to try like sound as a starting point, but there was some weird messages happening. So I think it might be because of different organization. So maybe, I mean for sure, if there's more tokens or Yeah, so was this was, was this one train between two or 24 tokens, 2222 Yeah.
+Okay, okay, okay. So I think this the, this is the reason I
+think we should use the best fastballs we have now, right for all of this,
+we plan to use now the best that Kang has so far is, like a backbone, basically starting from this as a first model, and then also starting using this best backbone as a starting point for the policy agent. And then either, like, we could use the pure PL, or, like, just execution reward. I think execution right might be a bit easier, but I think PL is a bit cooler, like just from really first principles, you know, like, just give back the profit that we make at the end, and then see
+that's good. It would might make sense is like, see what happens. I would expect, if optimization works, you'll start exploiting the world models, right? Once you go away from back like a frozen background to learning inside a world model, and then you might have to put, like, some type of chaos penalty, or what happens, just regularize the you know, again,
+have to go for another meeting. I think Sasha, do you have something to say? Yeah, I
+think George also has things to say. Do
+Kang, sorry, bye, bye. So about market impact, my work is on January, based on like 500 messages, and we want to generate So previously, in our in my research, we're like taking 202,500 messages ahead, which is like five times more than 500 messages behind,
+and all simulated. So basically you replay, yes.
+So the concern was probably it's not enough context to generate such a long sequences ahead. And in my research, I can see the beta is close to 0.5 which is like power, power law, function, impact, just like should be close to 0.5 have a very reasonable number, 0.6 and even less. But the idea was, we can't see parallel decay.
+You cannot,
+cannot, because that timeline. Now, if you think about it, the sequences were modeling during training, like 500 messages, 500 context, and now suddenly, for the power load. DK, you're simulating our to what 4000 messages here
+is 250 250
+500 750 messages. So the state baseball doesn't generalize
+so radically out of the instantaneous effect you get kind of right? But then what happened? It doesn't revert.
+The reversion to the mean doesn't happen. And I think the answer is, because the sequence length we're using for training, for truncate back propagation through time is so short, so we're now asking for phenomena that happens at a timescale vastly outside the timescale of histories we're training for in this model. And there's different ways of addressing this. One is, you know, you do longer chunks, which means you can bring down your back size, which we discussed. The other option is, can we carry over hidden states across longer sequences during training that we also discussed? But I think this will require architecture changes, like training part time changes.
+I mean, it's just about to point out the hands that in the lock bench paper, which we discussed earlier, we do already look at microscopic impact, which I like the correlators between if I make a placement, how much? How likely is it that, say, the probability of people canceling? On the other side increases. So we look at all these correlated functions which push over, introduced already in the log bench paper, and we get those quite right. So this project now sees that the kind of accumulation of those reproduces microscopic impact, which is a kind of emerging phenomena, because there's nowhere in the loss function or anything. The loss function is just next token entropy, basically. But of course, the decay is yet one other order of magnitude. To some extent, the impact itself is already at scales, larger to what we trade. But then for the decay, I think we're asking a little bit too much. So we are quite happy to see the impact that in the first instance, which I think is a nice, I think the first like emergence of power law, because other people put that in their generative model as a condition that you Get this right, but expensive.
+JP, they did this. They cancel this. JP, they did this. They basically had a market order book simulator for the next order, but had exactly that problem, that essentially, long term behavior was off. And then they put some conditioning in.
+Stefan said, We didn't build any of that conditioning in and square part or just emerges from the
+next token. No, that's the same it's the promise. The decay doesn't happen.
+The decay doesn't happen because, think our secret, the way that we're doing sequence training, isn't set up to succeed here, which was believed as original project for the summer that we didn't quite crack. But I think we can crack.
+We want to do it properly. Okay? One thing which I remember, one always will do it proper. Yeah. So I forgot which paper it was, but you can measure these parts of these propagator models, right? You measure your immediate impact and your decay, and you can actually train such, I mean, estimate such more on real market data, which just using actual real you know, basically you're taking actual market data from everybody else to estimate your own propagator model.
+Yes, that's the short paper.
+So I guess what I'm trying to say is, in a sense, that is your performance
+metric. If you want
+your adverse your training, you you could try to train with the same estimator as a metric effect. You could at least try it to see whether the model can do it. You know, I'm not saying it's a good target state, but you know, you wouldn't be. You do your 500 orders, you do your thing, then you do the same estimation will show does. And you test that as a one
+number, sure. So this is, I think what you're saying is interesting, that we should consider, in principle, every metric we can measure we can also add as auxiliary objective to our foundation model.
+Well, you can do it to check whether more Kang has the capacity to question, if I only look at 500 do it? You know, if it can't do it, then you already do right? Then you advocate can do it, and then you can fiddle with us.
+Yeah, I think this is interesting. It's a bit along the lines of, like, other sort of distribution match metrics, which is we've explored before in the team didn't anymore, but I think we've come much further in terms of compute infrastructure.
+Since you have Stefan on the team, I'm sure you tried MMD methods, no Stefan. Have you? Have you tried MMD matching? Maximum mean discrepancy matching?
+No, no, no. Just have the cross entropy. And this was probably wanted to get the distribution of tokens. Why? But we haven't put anything as in there. So regularizer, if you like. So to match
+certain with the caveat that we
+have to say, but yeah, my my intuition generally, is against it. Coming up from statistical physics, I feel like some of these things as a microstructure level, the dynamics might be very simple, but then at long scales, the kind of power law behavior can be quite complex, or rather see that emerging from first principle, than having to put these, these kind of whatever fat tails and anything power law in the loss function, configure
+correct is like a data first, no heuristics approach, with The caveat that we do. We had projects on this accumulation of error along Long along, like long sequence generations, but just we didn't quite crack it. I don't, yeah, we'll have two paper on it. We have two papers. I don't think any of this we've really like folded into our mainstream main line of works, which may what we consider at some point. Yeah, if we find that we can't bring down the sort of error accumulation.
+But I think I mean at least from this idea of using some metric you're interested in to train your model, just to test capacity, and then when it's when you know it's okay, I can do it, then you turn it off effectively and fiddle the rest. Because I think that's. Quite a bit for that hedging stuff, right? Because it's a similar problem, in a sense, super high dimensional space. And then you realize it doesn't do something.
+So if we just optimize for certain those two behavior, can it do it at all? And then if it can't, then we have a problem.
+And then, you know, effectively, your 500 data, whatever it is in your architecture, doesn't fix it. For example, s3 s5 exponential decay, right? Exponential decay.
+S5 doesn't have any no price code in here. There's no decay, yeah, something which
+you really update when you can does do some type of decay, right? Like, in terms of, like, to the
+extent that you that they have, like, many multiplications of matrices. But there's noise, there's a detail that you have Eigen value of one, no, but
+sorry, what I mean is, I put the data point here and beginning of your 500 sequence. And and the, if you want to compute a derivative of that data, point to my output state. Do I remember right? That doesn't sort of e to the minus in there.
+T, they said there's a major fortification of many weight matrices. Yeah.
+So that gives you that exponential decay. Well, they do a bunch
+of shenanigans to make the conditioning work well,
+but it's a linear stages. And also to marry to the students
+so quickly, I think we also,
+we have this every Friday, at 11am
+and there's a Slack channel.
+Join our channels, of course.
+I come back on Monday, yeah, of course. And then
+Sasha, you have long results, yeah, very good results. The results have changed.
+We're out of time. What do we do? Yeah, we're out of time weekend, yeah,
+yeah. What I can do is I can tell my next meeting I'm going to be 10 minutes, 10 minutes late. I mean, five more minutes, yeah.
+Where are you? Okay? So I need to check I call him back to see where he's been, but we're gonna go, can I just give like a one minute? Yes? Please, yes. Basically, I managed to get into contact with Tom Spooner, who's the author of, well, this other market making paper that we've been looking at, and he was, he basically like he kind of subscribes to my theory that the data would have evolved from 2010 to even 2017 making the problem tractable now and intractable then. What he suggested was to just kind of start adding some rebates, as is done on exchanges for market makers, and see how that changes. And I've done that crudely. It starts to learn things nicely when you give it excessive rebates. I don't yet know why it doesn't. It still doesn't do very well on his and on our implementation as you make the rebate smaller, and I've got a whole bunch of investigations in the bottom slides where I've been looking at kind of like our data from Amazon, with all of who shows like empirical analysis of like the response functions and how that gives You, like a theoretical bound, or like your expected profit with market making, that's at the bottom. And I can go into that in detail, but I'm able to reproduce that experimentally, which is nice, but if, but still like we, even though, like now theoretically with rebate, the problem becomes tractable. My early things on the reinforcement learning is that we still can't make money with market making and reinforcement learning despite making the problem tractable.
+Yeah, that's kind of the headline is that making no money. I
+need to see which account I'm you can send me so.
+How accurate was this transcription?
+
+0:00:001:14:42
+
+
+
+1x
+
+
+
+
+AI Chat
+Outline
+Comments
+
+
+
+
+kang
+31 minutes ago
+lobbench具体怎么修改 conditional generation
+
+
+
+
+
+
+Otter
+31 minutes ago
+Thought for 5 seconds
+
+下面给出实操性建议和要点，说明在 lobbench 中如何把“conditional generation”从目前的（或无条件的）设置改成正确的时间条件化 / 带历史上下文的生成与评估。若你希望我可以把其中某些片段写成具体代码（PyTorch / JAX / repo-specific），告诉我你们用的 repo 路径和框架。
+
+主要目标
+
+训练/推理时模型能以历史消息序列（例如过去 N=500 messages 或按 chunk 的方式）作为条件输入，然后在该条件下生成未来消息序列（autogressive generation）。
+评估时对“基于历史条件的”分布做对比（conditional metrics），而不是只用无条件分布对比。
+修改要点（按模块）
+
+数据加载与采样（data loader）
+确保数据集能输出两部分：conditioning sequence（过去 M 条消息）和 target sequence（未来 K 条消息）。格式可以是 (cond_tokens, target_tokens) 或 (cond_messages, gen_length)。
+支持 chunked conditioning（n_sub）：当 M 很大导致显存超限时，data loader 返回多个 chunk，并携带 chunk 边界信息以便在模型端正确维护 hidden state。
+在训练/验证 split 中保留连续性：评估时用与训练同分布的 seed 和时间段，避免 timestamp 跨日/跨分布混淆（或在预处理阶段归一化时间戳）。
+模型前向（model.forward / encode）
+接口改为接收一个 conditioning context（tokens 或消息向量）并返回用于后续生成的初始 hidden_state / cache（KV 层缓存，RNN/SSM 的隐态等）。
+如果模型是 transformer/SSM，支持两种 conditioning 策略： a) Full conditioning（一次性）：将 entire cond_tokens 一次性送入 encoder，得到上下文表示，再在 decoder/autoregressive 中生成。 b) Stateful/chunked conditioning：逐 chunk 喂入并保留隐状态（或持久 KV cache），以节省内存并能处理超长上下文。实现时需把隐藏态 carry-over 到下一 chunk，并在最终生成时使用该隐藏态。
+对于 logS5 / S5 类结构，需提供 hidden-state 保存/恢复 API（例如 model.init_state(), model.update_state(chunk), model.generate_from_state(...)）。
+推理/生成流程（generation loop）
+生成流程应区分两类场景： a) conditioned generation (given cond -> generate K tokens/messages) b) unconditional sampling (直接从空上下文生成)
+在 conditioned 模式下，流程为： load cond -> model.encode/roll_hiddenstate(cond or chunks) -> autoregressive generate next token(s) -> 若生成多步，保持并更新 caches/hidden state。
+如果用 beam/temperature/top-k 等 sampling，确保这些设置只在生成阶段生效，不影响条件编码阶段。
+对 invalid orders 的处理：在生成阶段加验证层（validator）；对无效 token 直接丢弃或用替代 token（或在训练时通过罚分教模型避免产生无效 token）。
+训练目标与批处理（training）
+训练时明确输入为 (cond, target) 并计算 cross-entropy（或其他 loss）仅在 target 上。也可以把条件部分作为 teacher-forcing 的前缀并一起输入模型，然后只把 target 的 loss 累加。
+如果采用 chunked conditioning，训练中重现 chunked hidden-state carryover：先通过前 M chunk 得到 final hidden_state，然后用 final hidden_state 并 teacher-forcing 生成 target，计算 loss。
+为避免“best-ever”偏差（训练监控），每隔固定 interval 计算无偏评估（holdout），并记录 moving-average / bootstrap 的置信区间。
+评估（logbench 的 conditional metrics）
+增加基于条件的分布匹配度量：对每一个选定的轴（例如 mid-price move, volume per bucket, cancel prob 等），计算 P_model(feature | cond_feature_bin) 与 P_data(feature | cond_feature_bin) 的距离（L1、Wasserstein 等）。
+在实现上：对每个样本 i 用 cond_i 作为条件，从模型生成样本并收集 feature，形成 conditional histograms；然后与真实数据在相同 cond bin 下的 histogram 比较。
+注意采样方差：每个 cond bin 里要有足够样本数；采用重复采样（multiple draws per cond）来估计采样误差并报告置信区间。
+把这些 conditional metrics 加入常规评估 pipeline（并和 unconditional metrics 一并输出），方便比较“是否条件化评估被正确开启”。
+内存/速度优化（实践技巧）
+用 n_sub chunking：把长 conditioning 序列分成 n_sub 块（例如 5 块），每块长度 M/n_sub，顺序传入并 carry hidden_state，能显著降低 peak memory。
+KV-cache：Transformer 的生成使用 KV cache 可以避免重复前向。
+Mixed precision + gradient checkpointing（训练）以加载更大模型。
+对评估时的重复生成使用并行化采样（batch sampling）以获得足够统计量。
+单元测试与验证（debug）
+单元测试：用极短序列验证 conditioned vs unconditional 的生成差异；例如对一个已知小数据集，带上固定 cond，检查生成是否与期望统计一致。
+回放验证（replay）：把模型 conditioned 在某历史序列上生成，并将生成的行为插入一个历史 replay 环境，观察是否按预期改变订单簿（用于检查接口正确性）。
+可视化：画出 conditional histogram（真数据 vs model）与时间演化曲线来直观检查偏差。
+常见问题与对策
+问题：给更多历史反而变差（你们会议里出现的情况）。可能原因： a) 训练时总是以固定长度 M 训练，但运行时用不同 conditioning 方式（例如有些评测没有真正把历史输入到模型）——要保证训练、验证、评估中的 conditioning 协议一致。 b) 模型 capacity / hidden-state 未能充分编码长序列（需要更长的训练 unroll 或 carry-over hidden-state）。 c) 条件化评估本身被错误实现（metrics 是无条件的）——修复评估代码，确保 metric 是 conditional。
+对策：统一训练/推理协议；用 carry-over hidden state 或更长 unroll；在评估中做 ablation（cond=0 vs cond=full vs cond=partial）。
+实际修改清单（优先级）
+高优先：
+data loader: 输出 (cond, target)；支持 chunking。
+model: 增加 encode/restore hidden_state API；支持 chunked conditioning。
+generation loop: 新增 conditioned_generate 接口（用 encode 输出的 state 继续生成）。
+evaluation: 新增 conditional metrics（histogram conditional, L1/Wasserstein）。
+中优先： 5. 批处理 chunking 实现（n_sub）并验证无误差引入。 6. validator 层：在生成时过滤/处罚无效 orders（或在 fitness 中惩罚）。
+低优先： 7. 对 timestamps/tokenization 改进（如果时间 token 是问题，考虑用 time-to-next-message 或 volume-time 代替精细 nanosecond token）。 8. 将 conditional metrics 纳入训练辅助 loss（只作 capacity 测试时使用，然后再去掉）。
+如果你想要我把上面某个步骤做成具体代码片段（例如：
+
+PyTorch 的 chunked conditioning 模式示例；
+evaluation 里如何把 conditional histogram/Wasserstein 实现成向量化批量计算；
+或者给出 data loader 样例返回格式），告诉我你们用的语言/框架和你们 lobbench repo 的关键文件（data loader、eval scripts、model wrapper），我可以直接产出示例代码。
+
+
+
+
+kang
+28 minutes ago
+好像还有一个任务是说他，我我那个训练 context autogressive window 的窗口不是 500 吗？他想让不要做外推，就是用 250 作为 conditional，然后生成 250。
+
+
+
+
+
+
+Otter
+28 minutes ago
+Thought for 5 seconds
+
+明白。下面是把训练/评估改为“conditioning 用 250，生成 250（不做外推）”的具体可执行步骤与注意点——含配置修改、数据流、训练与评估流程、以及常见坑与验证方法。按优先级执行即可。
+
+配置与数据层
+修改全局序列长度参数：
+seq_len_total = 500 -> 改为 250 (conditioning) + 250 (target) = 500 但明确划分为两段。
+在 config 中加入两个字段：cond_len = 250, gen_len = 250。
+DataLoader 输出改为 (cond_tokens, target_tokens)：
+cond_tokens 长度 = cond_len（250）；target_tokens 长度 = gen_len（250）。
+不要把 500 当成单一无缝序列送入模型做无条件预测（否则会被视为外推）。
+如果当前采样是 sliding window（例如每个样本取过去 500），改为固定 split：取历史 250 作为条件，接下来的 250 作为训练目标。
+模型输入与训练前向
+前向接口：
+encode(cond_tokens) -> 返回 context state / KV cache（或把 cond + target 串联输入但只计算 target 的 loss，见下）。
+两种训练实现任选其一（推荐 A 更明确）： A) Prefix encode + target-only loss（推荐）
+先把 cond 送入 encoder / model（或逐 chunk 更新 hidden_state），得到 final state。
+在生成阶段用 teacher-forcing 的方式对 target 进行逐步预测并计算 loss（仅对 target token 计算 loss）。 B) 直接把 cond||target 串联输入并 mask 掉 cond 的 loss
+串联输入长度 = 500；loss mask 只对后半部分（index >= cond_len）计算。
+关键点：训练过程中确保模型“只用 250 条历史作为条件”并只在 250 条 target 上学习预测，不要在训练时偶然看到比 cond_len 更长的上下文。
+Chunking 与 memory（若 cond_len 导致内存问题）
+cond_len=250 一般不算太长，但如果出现内存压力可以：
+使用 n_sub chunking 例如把 250 分成 5 个 chunk 每个 50，依次 feed 并 carry hidden state。
+确保 carry 时保持顺序一致且不会混入 target 的信息。
+不要在条件阶段做任何未来数据的 peek 或提前预加载。
+训练目标与避免“外推”
+明确禁止模型在训练时看到 target 以外的未来信息（例如不要把未来 more-than-250 带入）。
+在训练日志里记录：cond_len、gen_len、是否启用 chunking，以及 loss mask 配置，便于事后审查。
+如果曾经训练过“500 无区分”模型，重新训练/微调时要从头或确保训练脚本使用新的 mask。
+推理/评估（保证不外推）
+评估（generation）流程：
+仅用真实历史 cond（250）作为输入，调用 conditioned_generate(gen_len=250) 得到模型输出。
+不做任何额外上下文扩展或把生成结果再作为未来的真实历史来累计（除非你想做滚动生成的实验，那是不同的设定）。
+在 logbench 的评估里，要把 conditional metrics 明确绑定到 cond_len=250 的情形：对每个 cond bin，从模型中生成多次样本（每次 gen_len=250），然后与真实数据在相同 cond 下比较。
+训练/评估脚本修改要点（具体文件）
+data loader (例如 data.py):
+改为 yield {"cond": ..., "target": ...}
+model wrapper / train loop:
+新增 encode_cond(cond) 与 generate_from_state(gen_len)
+如果用串联输入方式，确保 loss_mask = [0]*cond_len + [1]*gen_len
+eval script (例如 eval.py / logbench integration):
+将 evaluation sampling 改为：给定 cond -> 生成 gen_len，收集 feature -> 计算 conditional histograms。
+不要在 evaluation 中用 longer unroll 超过 gen_len（除非做专门的外推对比实验）。
+验证步骤（必做）
+单元验证：
+用极短序列（cond_len=4, gen_len=4）跑一轮，手工检查模型是否只在 target 区域有 loss。
+ablation / sanity check：
+比较两种模式的生成结果： (a) 使用 cond_len=250 -> gen 250； (b) 使用无cond的 500 长无条件生成。观察分布差异，确保 cond 模式确实使用了历史信息。
+评估一致性检查：
+在 logbench 的 conditional metric 上，确保同一 cond bin 的 model-sampled distribution 与数据分布比较是基于相同的 cond 定义（250 条）。
+重现会议中出现的问题：用旧脚本（若存在）跑一次并对比结果，确认“更多历史反而变差”的问题是否源于训练/评估协议不一致。
+额外注意事项（基于你们会议讨论的常见坑）
+时间戳问题：如果时间 token 包含绝对时间（跨日/跨年），cond 需要和 target 使用相同时间编码方案（或用 time-to-next-message），避免训练/评估分布漂移。
+采样方差：每个 cond bin 做多次采样来降低估计噪声（尤其在 conditional histogram 里）。
+监控指标：除了训练 loss，记录 conditional metric（例如 cond-bin-wise L1/Wasserstein）和无偏估计的 P&L（如你们用作 fitness）。
+对 invalid orders 的处理：生成阶段加 validator 并把无效生成视为特殊 token 或用 penalty，在评估时也把它计入 error rate。
+快速执行清单（可贴到 PR 描述）
+ 配置：新增 cond_len/gen_len 字段并设为 250/250
+ DataLoader：输出 (cond, target)
+ Train loop：实现 encode_cond + generate_target 或串联+loss_mask
+ Eval：实现 conditioned_generate(gen_len=250) 并把 conditional metrics 固定在 cond_len=250
+ Unit tests：短序列正确性、loss masking 测试
+ Run：小规模试验（例如 1k batch）验证结果后再大规模训练
+如果你要我直接改某个文件或写出具体代码片段，把你们的 repo 路径和使用框架（PyTorch / JAX / Flax / S5 实现细节）告诉我，我可以生成对应的 patch/代码示例（data loader、train loop、loss mask、eval sampling）。
+
+
+
+﻿
+
+
+
+Advanced
+
