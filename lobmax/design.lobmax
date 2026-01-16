@@ -1,0 +1,404 @@
+LOBMAX 最终实施方案
+设计确认汇总
+项目	决定
+框架	NNX (MaxText 原生)
+硬件	GH200 + ARM
+Flash Attention	✅ 启用
+序列长度	L = 12,000
+分布式策略	简单数据并行
+因果 Mask	✅ 全部使用
+RoPE	LLaMA 风格，共享
+融合方式	Concat (axis=-1)
+独立编码器	✅ 保留
+最终架构图
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              LOBMAX Final Architecture                           │
+│                                                                                  │
+│  ┌─────────────────────────────┐    ┌─────────────────────────────┐             │
+│  │   x_m: Message Tokens       │    │   x_b: Book State           │             │
+│  │   (B, L) int32              │    │   (B, L, d_book) float      │             │
+│  │   L = 12,000                │    │   L = 12,000                │             │
+│  └──────────┬──────────────────┘    └──────────┬──────────────────┘             │
+│             │                                   │                               │
+│             ▼                                   ▼                               │
+│  ┌──────────────────────────┐       ┌──────────────────────────┐               │
+│  │    Message Encoder       │       │     Book Encoder         │               │
+│  │                          │       │                          │               │
+│  │  ┌────────────────────┐  │       │  ┌────────────────────┐  │               │
+│  │  │ Embed(vocab→d_model)│  │       │  │Dense(d_book→d_book)│  │               │
+│  │  │ + RoPE (LLaMA)     │  │       │  │ + RoPE (共享)       │  │               │
+│  │  └─────────┬──────────┘  │       │  └─────────┬──────────┘  │               │
+│  │            ▼             │       │            ▼             │               │
+│  │  ┌────────────────────┐  │       │  ┌────────────────────┐  │               │
+│  │  │ TransformerLayer   │  │       │  │ TransformerLayer   │  │               │
+│  │  │ × 2 layers         │  │       │  │ × 1 (pre)          │  │               │
+│  │  │ (Flash Attn+FFN)   │  │       │  │ (Flash Attn+FFN)   │  │               │
+│  │  │ (Causal Mask)      │  │       │  │ (Causal Mask)      │  │               │
+│  │  └─────────┬──────────┘  │       │  └─────────┬──────────┘  │               │
+│  │            │             │       │            ▼             │               │
+│  └────────────┼─────────────┘       │  ┌────────────────────┐  │               │
+│               │                     │  │Dense(d_book→d_model)│  │               │
+│               │                     │  └─────────┬──────────┘  │               │
+│               │                     │            ▼             │               │
+│               │                     │  ┌────────────────────┐  │               │
+│               │                     │  │ TransformerLayer   │  │               │
+│               │                     │  │ × 1 (post)         │  │               │
+│               │                     │  └─────────┬──────────┘  │               │
+│               │                     └────────────┼─────────────┘               │
+│               │                                  │                             │
+│               │  (B, L, d_model)                 │  (B, L, d_model)            │
+│               │                                  │                             │
+│               └─────────────┬────────────────────┘                             │
+│                             │                                                  │
+│                             ▼                                                  │
+│                  ┌──────────────────────┐                                      │
+│                  │  Concatenate         │                                      │
+│                  │  (B, L, 2*d_model)   │                                      │
+│                  └──────────┬───────────┘                                      │
+│                             │                                                  │
+│                             ▼                                                  │
+│                  ┌───────────────────────────────────────┐                     │
+│                  │         Fused Transformer             │                     │
+│                  │  ┌─────────────────────────────────┐  │                     │
+│                  │  │ Dense(2*d_model → d_model)      │  │  ← 投影层            │
+│                  │  │ + RoPE (共享)                   │  │                     │
+│                  │  └─────────────────────────────────┘  │                     │
+│                  │  ┌─────────────────────────────────┐  │                     │
+│                  │  │ TransformerLayer × 24 layers   │  │                     │
+│                  │  │ (Flash Attention + FFN)        │  │                     │
+│                  │  │ (Causal Mask)                  │  │                     │
+│                  │  └─────────────────────────────────┘  │                     │
+│                  └──────────┬────────────────────────────┘                     │
+│                             │                                                  │
+│                             ▼                                                  │
+│                  ┌──────────────────────┐                                      │
+│                  │ Pooling / Last / EMA  │                                     │
+│                  │ (B,L,d_model)→(B,d_model)                                   │
+│                  └──────────┬───────────┘                                      │
+│                             │                                                  │
+│                             ▼                                                  │
+│                  ┌──────────────────────┐                                      │
+│                  │  Output Head         │                                      │
+│                  │  Dense(d_model→n_classes)                                   │
+│                  │  log_softmax         │                                      │
+│                  └──────────────────────┘                                      │
+└─────────────────────────────────────────────────────────────────────────────────┘
+文件结构
+LOBS5/
+├── lob/
+│   ├── lob_seq_model.py      # 修改：添加 LOBMAX 模型类
+│   ├── init_train.py         # 修改：支持 LOBMAX 初始化
+│   └── train.py              # 微调
+├── s5/                        # 保留（不动）
+│   └── ...
+├── lobmax/                    # 新建
+│   ├── __init__.py
+│   ├── config.py             # LOBMAX 配置
+│   ├── layers.py             # TransformerLayer 包装
+│   ├── attention.py          # MaxText Attention 适配
+│   ├── embeddings.py         # RoPE 相关
+│   └── models.py             # LOBMAXModel 主模型
+└── run_train.py              # 微调：添加 --backend 参数
+
+
+
+准备好开始实施了吗？我将从 Step 1 开始创建文件。
+
+我平常主要用这个参数 其他情况一般也不咋用 python -u -B run_train.py \
+    --USE_WANDB=True \
+    --d_model=2048 \
+    --n_layers=24 \
+    --blocks=32 \
+    --ssm_size_base=2048 \
+    --ssm_lr_base=0.0005 \
+    --lr_factor=1 \
+    --wandb_project=lobs5-360M-25node \
+    --wandb_entity=kang-oxford \
+    --C_init=trunc_standard_normal \
+    --prenorm=True \
+    --batchnorm=False \
+    --bidirectional=False \
+    --dataset=lobster-prediction \
+    --merging=padded \
+    --dir_name="'"$DATA_DIR"'" \
+    --test_dir_name="'"$TEST_DIR"'" \
+    --clip_eigs=True \
+    --activation_fn=half_glu1 \
+    --dt_global=False \
+    --epochs=20 \
+    --jax_seed=42 \
+    --opt_config=standard \
+    --p_dropout=0.0 \
+    --warmup_end=1 \
+    --weight_decay=0.05 \
+    --msg_seq_len=500 \
+    --use_book_data=True \
+    --use_simple_book=False \
+    --book_transform=True \
+    --masking=none \
+    --num_devices='"$GPUS_PER_NODE"' \
+    --n_data_workers=12 \
+    --pin_memory=True \
+    --prefetch_factor=6 \
+    --persistent_workers=True \
+    --enable_goodput_monitor=True \
+    --debug_loading=False \
+    --enable_profiler=False \
+    --random_offsets_train=True \
+    --shuffle_train=True \
+    --debug_overfit=False \
+    --lr_patience=2 \
+    --use_bf16=True \
+    --token_mode=24 \
+    ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS} \
+'
+    # NOTE: The following parameters are now controlled by --model_preset:
+    #   --blocks (preset controls)
+    #   --bsz (preset controls)
+    #   --d_model (preset controls)
+    #   --n_layers (preset controls)
+    #   --ssm_size_base (preset controls)
+    #   --ssm_lr_base (preset controls)
+    #   --lr_factor (preset controls)
+    #   --wandb_project (preset controls)
+    # --restore=/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/likely-aardvark-15_p4k79dtn \
+    # --restore_step=6
+
+Thought for 10s
+
+
+
+
+
+
+感谢你分享参数配置！这让我可以设计更精确的参数映射。
+
+参数映射表
+S5 参数	LOBMAX 参数	说明
+d_model=2048	d_model=2048	✅ 保留
+n_layers=24	n_layers=24	✅ 保留 (Fused Transformer 层数)
+blocks=32	❌ 删除	S5 特有
+ssm_size_base=2048	❌ 删除	S5 特有
+ssm_lr_base=0.0005	lr_base=0.0005	改名 (作为基础学习率)
+C_init=trunc_standard_normal	❌ 删除	S5 特有
+bidirectional=False	❌ 删除	用 causal mask 代替
+clip_eigs=True	❌ 删除	S5 特有
+dt_global=False	❌ 删除	S5 特有
+activation_fn=half_glu1	mlp_activation="silu"	FFN 激活函数
+prenorm=True	prenorm=True	✅ 保留
+p_dropout=0.0	p_dropout=0.0	✅ 保留
+use_bf16=True	use_bf16=True	✅ 保留
+msg_seq_len=500	msg_seq_len=500	✅ 保留
+token_mode=24	token_mode=24	✅ 保留
+新增 Transformer 参数
+新参数	默认值	说明
+num_heads	16	注意力头数
+head_dim	128	每头维度 (d_model / num_heads)
+n_message_layers	2	Message Encoder 层数
+n_book_pre_layers	1	Book Encoder 前置层数
+n_book_post_layers	1	Book Encoder 后置层数
+attention_kernel	"flash"	Flash Attention
+rope_type	"llama3.1"	RoPE 类型
+mlp_dim	8192	FFN 中间层维度 (4 × d_model)
+新的训练命令示例
+bash
+python -u -B run_train.py \
+    --backend=transformer \
+    --USE_WANDB=True \
+    --d_model=2048 \
+    --n_layers=24 \
+    --num_heads=16 \
+    --head_dim=128 \
+    --mlp_dim=8192 \
+    --n_message_layers=2 \
+    --n_book_pre_layers=1 \
+    --n_book_post_layers=1 \
+    --attention_kernel=flash \
+    --rope_type=llama3.1 \
+    --lr_base=0.0005 \
+    --lr_factor=1 \
+    --wandb_project=lobmax-3B \
+    --wandb_entity=kang-oxford \
+    --prenorm=True \
+    --batchnorm=False \
+    --dataset=lobster-prediction \
+    --merging=padded \
+    --dir_name="$DATA_DIR" \
+    --test_dir_name="$TEST_DIR" \
+    --mlp_activation=silu \
+    --epochs=20 \
+    --jax_seed=42 \
+    --p_dropout=0.0 \
+    --warmup_end=1 \
+    --weight_decay=0.05 \
+    --msg_seq_len=500 \
+    --use_book_data=True \
+    --use_simple_book=False \
+    --book_transform=True \
+    --masking=none \
+    --num_devices=$GPUS_PER_NODE \
+    --n_data_workers=12 \
+    --pin_memory=True \
+    --prefetch_factor=6 \
+    --persistent_workers=True \
+    --use_bf16=True \
+    --token_mode=24
+这样的参数设计可以吗？如果没问题我就开始写代码了。
+
+
+
+
+
+推荐：LLaMA 2 风格
+对于你的场景，我推荐 LLaMA 2 风格，因为它是目前最成熟和广泛验证的架构：
+
+LLaMA 2 架构详解
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                          LLaMA 2 Transformer Layer                               │
+│                                                                                  │
+│  Input: x (B, L, d_model)                                                       │
+│         │                                                                       │
+│         ├─────────────────────────────┐                                         │
+│         │                             │                                         │
+│         ▼                             │ (Residual)                              │
+│  ┌──────────────────┐                 │                                         │
+│  │    RMSNorm       │  ← Pre-Norm     │                                         │
+│  └────────┬─────────┘                 │                                         │
+│           │                           │                                         │
+│           ▼                           │                                         │
+│  ┌──────────────────┐                 │                                         │
+│  │  RoPE Embedding  │  ← 应用到 Q, K  │                                         │
+│  │  (LLaMA style)   │                 │                                         │
+│  └────────┬─────────┘                 │                                         │
+│           │                           │                                         │
+│           ▼                           │                                         │
+│  ┌──────────────────────────────────┐ │                                         │
+│  │     Multi-Head Attention         │ │                                         │
+│  │  ┌────────────────────────────┐  │ │                                         │
+│  │  │ Q = x @ W_q  (num_heads)   │  │ │                                         │
+│  │  │ K = x @ W_k  (num_kv_heads)│  │ │  ← GQA (可选, KV头数可不同)              │
+│  │  │ V = x @ W_v  (num_kv_heads)│  │ │                                         │
+│  │  └────────────────────────────┘  │ │                                         │
+│  │  ┌────────────────────────────┐  │ │                                         │
+│  │  │ Attn = softmax(Q @ K^T)@ V │  │ │  ← Flash Attention (Causal Mask)       │
+│  │  └────────────────────────────┘  │ │                                         │
+│  │  ┌────────────────────────────┐  │ │                                         │
+│  │  │ Out = Attn @ W_o           │  │ │                                         │
+│  │  └────────────────────────────┘  │ │                                         │
+│  └────────────────┬─────────────────┘ │                                         │
+│                   │                   │                                         │
+│                   ▼                   │                                         │
+│             x = x + attn_out  ◄───────┘  (Residual Add)                         │
+│                   │                                                             │
+│         ├─────────┴───────────────────┐                                         │
+│         │                             │                                         │
+│         ▼                             │ (Residual)                              │
+│  ┌──────────────────┐                 │                                         │
+│  │    RMSNorm       │  ← Pre-Norm     │                                         │
+│  └────────┬─────────┘                 │                                         │
+│           │                           │                                         │
+│           ▼                           │                                         │
+│  ┌──────────────────────────────────┐ │                                         │
+│  │         SwiGLU FFN               │ │                                         │
+│  │  ┌────────────────────────────┐  │ │                                         │
+│  │  │ gate = x @ W_gate          │  │ │                                         │
+│  │  │ up   = x @ W_up            │  │ │                                         │
+│  │  │ h = SiLU(gate) * up        │  │ │  ← Gated Linear Unit                   │
+│  │  │ out  = h @ W_down          │  │ │                                         │
+│  │  └────────────────────────────┘  │ │                                         │
+│  └────────────────┬─────────────────┘ │                                         │
+│                   │                   │                                         │
+│                   ▼                   │                                         │
+│             x = x + ffn_out   ◄───────┘  (Residual Add)                         │
+│                   │                                                             │
+│                   ▼                                                             │
+│  Output: x (B, L, d_model)                                                      │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+LLaMA 2 风格关键特点
+特性	说明	与你当前 S5 对比
+Pre-Norm	在每个子层之前做归一化	✅ 与 prenorm=True 一致
+RMSNorm	比 LayerNorm 更快 (无 mean)	✅ 与 batchnorm=False 兼容
+SwiGLU FFN	SiLU(x @ W_gate) * (x @ W_up)	✅ 类似你的 activation_fn=half_glu1
+RoPE	旋转位置编码	🆕 替代 S5 隐式位置
+Flash Attention	O(L) 内存, 快速	🆕 适合 L=12000
+Causal Mask	因果遮蔽	✅ 与 bidirectional=False 一致
+其他风格简介 (供参考)
+Gemma 风格
+使用 GeGLU 替代 SwiGLU
+有 embedding 缩放
+Google 优化
+Qwen3 风格
+部分 RoPE (partial_rotary_factor)
+专门的 QK Norm
+DeepSeek 风格
+Multi-head Latent Attention (MLA)
+压缩 KV cache
+适合超长上下文
+最终确认
+我建议使用 LLaMA 2 风格 (decoder_block=llama2)：
+
+成熟稳定，被广泛验证
+MaxText 实现完整，有 Flash Attention 支持
+SwiGLU 与你现有的 half_glu1 类似
+Pre-Norm + RMSNorm 与你当前配置一致
+你同意使用 LLaMA 2 风格吗？
+
+
+
+
+3. 我的实现计划
+python
+# lobmax/models.py
+def __call__(self, x_m, x_b, positions):
+    """
+    Args:
+        x_m: Message tokens (B, L)
+        x_b: Book state (B, L, d_book)
+        positions: Position indices (B, L) - 从 0 到 L-1
+    """
+    # 1. 编码
+    x_m = self.message_encoder(x_m, positions)  # 内部应用 RoPE + Causal Attn
+    x_b = self.book_encoder(x_b, positions)     # 共享相同的 positions
+    
+    # 2. 融合
+    x = jnp.concatenate([x_m, x_b], axis=-1)  # (B, L, 2*d_model)
+    x = self.fusion_projection(x)              # (B, L, d_model)
+    
+    # 3. Fused Transformer (自动 causal mask)
+    x = self.fused_transformer(x, positions)
+    
+    # 4. 输出
+    x = self.pooling(x)  # (B, d_model)
+    logits = self.output_head(x)
+    return nn.log_softmax(logits, axis=-1)
+4. MaxText Attention 的 Mask 参数
+MaxText 的 Attention 
+call
+ 接口：
+
+python
+attention_layer(
+    inputs_q,           # Query 输入
+    inputs_kv,          # Key/Value 输入
+    decoder_positions,  # 位置索引 (B, L) - 用于 RoPE
+    decoder_segment_ids=None,  # 可选：segment mask (用于 packed sequences)
+    deterministic=True,
+    model_mode="train",
+)
+decoder_positions: 必须提供，用于计算 RoPE
+decoder_segment_ids: 可选，用于区分不同 segment（我们暂时不需要）
+5. 具体实现
+python
+# 训练时构造 positions
+B, L = x_m.shape
+positions = jnp.arange(L)[None, :].repeat(B, axis=0)  # (B, L)
+# 例如 L=12000:
+# positions = [[0, 1, 2, ..., 11999],
+#              [0, 1, 2, ..., 11999],
+#              ...]
+总结
+Mask 类型	处理方式
+Causal Mask	MaxText 自动处理 (AttentionType.GLOBAL 默认因果)
+
+
