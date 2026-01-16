@@ -104,7 +104,7 @@ if __name__ == "__main__":
 
     # === Attention Configuration ===
     parser.add_argument("--attention_kernel", type=str, default="flash",
-                        choices=["dot_product", "flash", "cudnn_flash_te"])
+                        choices=["dot_product", "flash", "cudnn_flash_te", "cudnn_flash_jax"])
     parser.add_argument("--rope_type", type=str, default="llama3.1",
                         choices=["default", "llama3.1", "yarn"])
     parser.add_argument("--fused_qkv", type=str2bool, default=False,
