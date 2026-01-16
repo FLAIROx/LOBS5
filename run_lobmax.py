@@ -209,7 +209,7 @@ if __name__ == "__main__":
     parser.add_argument("--log_ce_tables", type=str2bool, default=False)
     parser.add_argument("--enable_goodput_monitor", type=str2bool, default=True)
     parser.add_argument("--ignore_times", type=str2bool, default=False)
-    parser.add_argument("--monitor_step_loss", type=str2bool, default=False,
+    parser.add_argument("--monitor_step_loss", type=str2bool, default=True,
                         help="Enable step-level loss synchronization (slower due to host-device barriers).")
 
 

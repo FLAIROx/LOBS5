@@ -24,7 +24,7 @@ if MAXTEXT_PATH not in sys.path:
     sys.path.insert(0, MAXTEXT_PATH)
 
 from lobmax.config import LOBMAXConfig
-from lobmax.models import LOBMAXModel, BatchLOBMAXModel, get_model_summary, count_parameters
+from lobmax.models import LOBMAXModel, BatchLOBMAXModel, get_model_summary, count_parameters, count_active_parameters
 
 
 def create_lobmax_config(args: Namespace, n_classes: int, book_dim: int) -> LOBMAXConfig:
@@ -197,8 +197,10 @@ def init_lobmax_train_state(
     
     # Count parameters
     total_params = count_parameters(params)
+    active_params = count_active_parameters(params, config.num_experts, config.num_experts_per_tok)
+    
     if print_shapes:
-        print(get_model_summary(config, total_params=total_params))
+        print(get_model_summary(config, total_params=total_params, active_params=active_params))
         print(f"Total parameters: {total_params:,} ({total_params / 1e9:.2f}B)")
     
     # Create learning rate schedule

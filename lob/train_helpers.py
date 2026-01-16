@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 from lob.encoding import Message_Tokenizer
 import sys
 
+import wandb
 import psutil
 import os
 import time
@@ -1102,12 +1103,20 @@ def train_epoch(
             # improving training throughput (steps/sec).
             if monitor_step_loss:
                 try:
-                    postfix['loss'] = f'{loss:.4f}'
+                    loss_val = float(loss)
+                    postfix['loss'] = f'{loss_val:.4f}'
+                    if wandb.run is not None:
+                        wandb.log({
+                            'train_loss_step': loss_val,
+                            'step': int(state.step),
+                            'epoch': epoch
+                        })
                 except:
                     postfix['loss'] = "nan"
             
             # Periodically force sync for logging (every 100 steps) if not monitoring every step
             elif batch_idx % 100 == 0:
+
                  try:
                     postfix['loss'] = f'{loss:.4f}'
                  except:

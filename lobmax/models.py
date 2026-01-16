@@ -341,7 +341,36 @@ def count_parameters(params) -> int:
     return sum(x.size for x in jax.tree_util.tree_leaves(params))
 
 
-def get_model_summary(config: LOBMAXConfig, total_params: Optional[int] = None) -> str:
+def count_active_parameters(params, num_experts: int, num_experts_per_tok: int) -> int:
+    """
+    Count active parameters per token (measured).
+    
+    Identifies MoE parameters by checking if the first dimension matches num_experts.
+    """
+    if num_experts <= 1:
+        return count_parameters(params)
+        
+    leaves = jax.tree_util.tree_leaves(params)
+    total_active = 0
+    
+    for leaf in leaves:
+        # Check if this is a MoE expert parameter
+        # Heuristic: dimension 0 is num_experts
+        # Note: We assume num_experts is distinct from other dimensions (vocab, d_model, etc.)
+        if leaf.ndim > 1 and leaf.shape[0] == num_experts:
+            # This is a MoE parameter (e.g. weights stored as [Experts, In, Out])
+            # Active count = Size of one expert * num_experts_per_tok
+            expert_size = leaf.size // num_experts
+            total_active += expert_size * num_experts_per_tok
+        else:
+            # Standard parameter (Router, Attention, Norm, Embeddings)
+            # Always active
+            total_active += leaf.size
+            
+    return total_active
+
+
+def get_model_summary(config: LOBMAXConfig, total_params: Optional[int] = None, active_params: Optional[int] = None) -> str:
     """Get human-readable model summary."""
     # Approximate parameter count
     d = config.d_model
@@ -405,14 +434,18 @@ def get_model_summary(config: LOBMAXConfig, total_params: Optional[int] = None) 
         total_layers * params_per_layer_active
     )
 
-
     if total_params is None:
         param_msg = f"Estimated Total Params:  ~{estimated_total / 1e9:.2f}B"
     else:
         param_msg = f"Measured Total Params:   {total_params / 1e9:.2f}B ({total_params:,})"
         
     if config.num_experts > 1:
-        param_msg += f"\nActive Params (per tok): ~{estimated_active / 1e9:.2f}B"
+        if active_params is not None:
+            param_msg += f"\nMeasured Active Params:  {active_params / 1e9:.2f}B ({active_params:,})"
+            # param_msg += f"\n  (Estimate was ~{estimated_active / 1e9:.2f}B)"
+        else:
+            param_msg += f"\nActive Params (Inferred): ~{estimated_active / 1e9:.2f}B"
+            
         param_msg += f"\n  - Experts: {config.num_experts}"
         param_msg += f"\n  - Top-k:   {config.num_experts_per_tok}"
     
@@ -444,3 +477,4 @@ Attention:
 {param_msg}
 """
     return summary
+
