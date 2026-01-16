@@ -929,6 +929,7 @@ def train_epoch(
         job_start_time=None,  # Job start time for time-aware checkpointing
         max_job_hours=24.0,  # Maximum job duration in hours
         save_before_timeout_minutes=30,  # Save checkpoint this many minutes before timeout
+        mesh=None,  # JAX Mesh for multi-GPU sharding - CRITICAL for data parallelism
     ):
 
     """
@@ -1021,15 +1022,29 @@ def train_epoch(
                         ignore_times,
                     )
             else:
-                state, loss, ce, logits = train_fn(
-                    state,
-                    drop_rng,
-                    inputs,
-                    labels,
-                    integration_times,
-                    batchnorm,
-                    ignore_times,
-                )
+                # CRITICAL: Use jax.set_mesh() context so JAX knows how to shard inputs
+                # Without this, each GPU may receive full data copies instead of shards!
+                if mesh is not None:
+                    with jax.set_mesh(mesh):
+                        state, loss, ce, logits = train_fn(
+                            state,
+                            drop_rng,
+                            inputs,
+                            labels,
+                            integration_times,
+                            batchnorm,
+                            ignore_times,
+                        )
+                else:
+                    state, loss, ce, logits = train_fn(
+                        state,
+                        drop_rng,
+                        inputs,
+                        labels,
+                        integration_times,
+                        batchnorm,
+                        ignore_times,
+                    )
             if debug_profiler:
                 loss.block_until_ready()
 
