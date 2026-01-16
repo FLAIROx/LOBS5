@@ -123,21 +123,9 @@ Model Configurations:
 +---------------+---------+----------+-----------+---------+---------------------------+
 
 How will we efficiently use the GPU resources?
-Our LOBMAX implementation is built on MaxText (Google's JAX-based LLM framework) with the following optimizations:
-- Flash Attention: O(S) memory complexity for sequence length S=12000, enabling batch size 22 per GPU
-- Megablox Kernel: Sparse matrix multiplication for efficient MoE computation
-- nn.scan: Efficient XLA compilation with gradient checkpointing (remat policy: save_dot_except_mlp)
-- RoPE (llama3.1): Rotary position embedding with scaling for long sequences
-- BFloat16: Mixed precision training for memory efficiency
+Our LOBMAX implementation is built on MaxText, Google's JAX-based LLM framework optimized for TPU and GPU training. We leverage Flash Attention for O(S) memory complexity on our 12,000-token sequences, enabling batch size 22 per GPU on GH200 nodes. For MoE computation, we utilize the Megablox kernel for efficient sparse matrix multiplication, which minimizes the overhead of expert routing. Memory efficiency is further enhanced through nn.scan with gradient checkpointing (remat policy: save_dot_except_mlp), BFloat16 mixed precision training, and RoPE (llama3.1 style) positional encoding optimized for long sequences.
 
-Current achieved performance on GH200 (85GB HBM3):
-- Dense 125M model: BSZ=22 per GPU, ~4.3% MFU, 13.9s/step
-- Sequence length: 12000 tokens (24 tokens/message x 500 messages)
-- Data parallelism: 4 GPUs per node
+Our current dense 125M model achieves 4.3% MFU with 13.9 seconds per step on GH200 (85GB HBM3), processing sequences of 12,000 tokens (24 tokens per message × 500 messages) with data parallelism across 4 GPUs per node. We expect comparable efficiency with MoE given the mature MaxText implementation and Megablox kernel optimizations.
 
-Expected MoE outcomes:
-- 10x capacity scaling (30B effective model capacity with 3B computational cost)
-- Regime specialization where different experts learn different market conditions
-- Interpretable routing where expert activation patterns serve as market regime indicators
-- Validated MoE infrastructure foundation for future expansion to larger scales
+The expected outcomes include 10× capacity scaling (30B effective model capacity with only 3B computational cost per forward pass), regime specialization where different experts learn different market conditions, interpretable routing where expert activation patterns serve as market regime indicators, and a validated MoE infrastructure foundation for future expansion to larger scales.
 
