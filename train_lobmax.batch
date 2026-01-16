@@ -131,6 +131,29 @@ python --version
 # Run LOBMAX training
 cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
 
+# ===== Flash Attention Runtime Check =====
+echo ""
+echo "============================================"
+echo "[Wrapper] Flash Attention Runtime Check"
+echo "============================================"
+
+# Set XLA flags for Flash Attention
+export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_cudnn_fmha=true"
+echo "[Wrapper] XLA_FLAGS: $XLA_FLAGS"
+
+# Run Flash Attention check
+python -u -B lobmax/check_flash_attention.py --attention_kernel=flash
+FA_CHECK_RESULT=$?
+
+if [ $FA_CHECK_RESULT -ne 0 ]; then
+    echo "[WARNING] Flash Attention check reported issues. Training will continue but may be slower."
+fi
+
+echo ""
+echo "============================================"
+echo "[Wrapper] Starting LOBMAX Training"
+echo "============================================"
+
 # Use model preset or explicit parameters
 if [ "$MODEL_PRESET" = "30M" ]; then
     # Tiny model for seq_len=12000 with limited memory
