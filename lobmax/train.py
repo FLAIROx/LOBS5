@@ -29,7 +29,7 @@ os.environ["WANDB_INSECURE_DISABLE_SSL"] = "True"
 import wandb
 
 from lobmax.config import LOBMAXConfig
-from lobmax.models import LOBMAXModel, get_model_summary, count_parameters
+from lobmax.models import LOBMAXModel, get_model_summary, count_parameters, count_active_parameters
 from lobmax.init_train import (
     create_lobmax_config,
     create_lobmax_optimizer,
@@ -154,10 +154,19 @@ def train_lobmax(args):
         print_shapes=True
     )
 
+    # Calculate active parameters for accurate MFU tracking
+    config = create_lobmax_config(args, n_classes, book_dim)
+    active_params = count_active_parameters(state.params, config.num_experts, config.num_experts_per_tok)
     log_with_timestamp(f"Model initialized: {total_params:,} parameters ({total_params/1e9:.2f}B)")
+    log_with_timestamp(f"Active Params for MFU tracking: {active_params:,} ({active_params/1e9:.2f}B)")
 
     if is_main_process and args.USE_WANDB:
-        wandb.log({"total_params": total_params, "total_params_B": total_params / 1e9})
+        wandb.log({
+            "total_params": total_params, 
+            "total_params_B": total_params / 1e9,
+            "active_params": active_params,
+            "active_params_B": active_params / 1e9
+        })
         branch, commit = get_git_info()
         wandb.run.summary["git_branch"] = branch
         wandb.run.summary["git_commit"] = commit
@@ -223,7 +232,7 @@ def train_lobmax(args):
             args.ignore_times,
             args.log_ce_tables,
             jit_train_step_fn=jit_train_step_fn,
-            model_params=total_params,
+            model_params=active_params,
             batch_size=args.global_bsz,
             peak_tflops=1000.0,
             goodput_monitor=None,
@@ -233,8 +242,8 @@ def train_lobmax(args):
             max_job_hours=args.max_job_hours,
             save_before_timeout_minutes=args.save_before_timeout_minutes,
             mesh=mesh,  # CRITICAL: Pass mesh for proper multi-GPU sharding
-            # Transformer params for MFU
-            num_layers=args.n_layers,
+            # Transformer params for MFU (include all layers)
+            num_layers=config.n_layers + config.n_message_layers + config.n_book_pre_layers + config.n_book_post_layers,
             num_heads=args.num_heads,
             d_model=args.d_model,
             monitor_step_loss=getattr(args, 'monitor_step_loss', False),
