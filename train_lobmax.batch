@@ -240,9 +240,9 @@ elif [ "$MODEL_PRESET" = "3B" ]; then
     LR_BASE=0.00008
     NUM_EXPERTS=1
     NUM_EXPERTS_PER_TOK=1
-# MoE presets - ~10x total params, same activated params (Qwen-style naming)
-elif [ "$MODEL_PRESET" = "1.25B-A125M" ]; then
-    # 125M dense → ~1.25B total MoE, ~125M activated per token
+# MoE presets - calculated total/active params (Qwen-style naming)
+elif [ "$MODEL_PRESET" = "1.4B-A153M" ]; then
+    # 1.4B total MoE, ~153M activated per token
     D_MODEL=768
     N_LAYERS=12
     NUM_HEADS=12
@@ -250,8 +250,8 @@ elif [ "$MODEL_PRESET" = "1.25B-A125M" ]; then
     LR_BASE=0.0005
     NUM_EXPERTS=16
     NUM_EXPERTS_PER_TOK=1
-elif [ "$MODEL_PRESET" = "3.6B-A360M" ]; then
-    # 360M dense → ~3.6B total MoE, ~360M activated per token
+elif [ "$MODEL_PRESET" = "5B-A473M" ]; then
+    # 5B total MoE, ~473M activated per token
     D_MODEL=1024
     N_LAYERS=24
     NUM_HEADS=16
@@ -280,7 +280,7 @@ elif [ "$MODEL_PRESET" = "30B-A3.4B" ]; then
 else
     echo "[Error] Unknown preset: $MODEL_PRESET"
     echo "[Info] Dense presets: 30M, 125M, 360M, 1.3B, 3B"
-    echo "[Info] MoE presets: 1.25B-A125M, 3.6B-A360M, 13B-A1.3B, 30B-A3.4B"
+    echo "[Info] MoE presets: 1.4B-A153M, 5B-A473M, 13B-A1.3B, 30B-A3.4B"
     exit 1
 fi
 
