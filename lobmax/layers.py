@@ -285,6 +285,7 @@ class StackedTransformerEncoder(nn.Module):
             in_axes=(nn.broadcast,),  # positions broadcast to all layers
             out_axes=0,  # Only carry has scan axis (output is discarded)
             length=self.n_layers,
+            metadata_params={nn.PARTITION_NAME: 'layers'},  # Required for LogicallyPartitioned variables
         )(
             config=cfg,
             mesh=self.mesh,
@@ -390,6 +391,7 @@ class TransformerBookEncoder(nn.Module):
             in_axes=(nn.broadcast,),
             out_axes=0,  # Only carry has scan axis (output is discarded)
             length=n_layers,
+            metadata_params={nn.PARTITION_NAME: 'layers'},  # Required for LogicallyPartitioned variables
         )(
             config=cfg,
             mesh=self.mesh,
