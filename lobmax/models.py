@@ -336,35 +336,58 @@ def create_lobmax_model(
     )
 
 
+def _get_param_size(x) -> int:
+    """
+    Get size of a parameter, handling both actual arrays and abstract ShapeDtypeStruct.
+
+    This allows count_parameters to work with both:
+    - Real parameters from model.init()
+    - Abstract parameters from jax.eval_shape(model.init, ...)
+    """
+    import numpy as np
+    # ShapeDtypeStruct has .shape but no .size
+    if hasattr(x, 'size'):
+        return x.size
+    elif hasattr(x, 'shape'):
+        return int(np.prod(x.shape))
+    else:
+        raise ValueError(f"Cannot determine size of {type(x)}")
+
+
 def count_parameters(params) -> int:
-    """Count total number of parameters."""
-    return sum(x.size for x in jax.tree_util.tree_leaves(params))
+    """Count total number of parameters (supports both real and abstract params)."""
+    return sum(_get_param_size(x) for x in jax.tree_util.tree_leaves(params))
 
 
 def count_active_parameters(params, num_experts: int, num_experts_per_tok: int) -> int:
     """
     Count active parameters per token (measured).
-    
+
     Identifies MoE parameters by checking if the first dimension matches num_experts
     OR if the parameter path contains 'experts'.
+
+    Supports both real and abstract (ShapeDtypeStruct) parameters.
     """
     if num_experts <= 1:
         return count_parameters(params)
-        
+
     flat_with_path, _ = jax.tree_util.tree_flatten_with_path(params)
     total_active = 0
     found_moe = False
-    
-    
+
     for path, leaf in flat_with_path:
         path_str = "/".join(str(p) for p in path)
         is_moe_param = False
-        
+
+        # Get ndim (works for both real arrays and ShapeDtypeStruct)
+        leaf_ndim = len(leaf.shape) if hasattr(leaf, 'shape') else 0
+        leaf_size = _get_param_size(leaf)
+
         # Criterion 1: Shape-based (Strict: Experts, In, Out)
         # Only if shape[0] == num_experts. (Failed previously as layers are stacked first)
-        if leaf.ndim > 1 and leaf.shape[0] == num_experts:
+        if leaf_ndim > 1 and leaf.shape[0] == num_experts:
             is_moe_param = True
-            
+
         # Criterion 2: Name-based (Reliable for MaxText/LOBMAX)
         # Paths look like: .../moe_mlp/wi_0/.value or .../moe_mlp/experts/wi/...
         elif 'moe' in path_str and ('wi' in path_str or 'wo' in path_str):
@@ -376,17 +399,13 @@ def count_active_parameters(params, num_experts: int, num_experts_per_tok: int) 
             found_moe = True
             # Active count = Size of one expert * num_experts_per_tok
             # Divide by num_experts to get size of one expert
-            expert_size = leaf.size // num_experts
+            expert_size = leaf_size // num_experts
             total_active += expert_size * num_experts_per_tok
         else:
-            total_active += leaf.size
-
+            total_active += leaf_size
 
     if not found_moe:
         print(f"WARNING: No MoE parameters identified! (num_experts={num_experts})")
-        # debug: print first few layers
-        # for path, leaf in flat_with_path[:5]:
-        #    print(f"  {'/'.join(str(p.key) for p in path)}: {leaf.shape}")
 
     return total_active
 
