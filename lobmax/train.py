@@ -242,17 +242,15 @@ def train_lobmax(args):
         epoch_time = time.time() - epoch_start
         
         # Validation
-        # NOTE: validate signature: (state, apply_fn, testloader, seq_len, in_dim, batchnorm, num_devices, epoch, ...)
-        val_loss, val_acc = validate(
+        val_loss, val_acc, _, _ = validate(
             state,
-            state.apply_fn,  # Pass apply_fn!
+            state.apply_fn,
             valloader,
             seq_len,
-            book_dim, # in_dim
+            book_dim,
             args.batchnorm,
             args.num_devices,
             epoch,
-            # Kwargs
             eval_step_fn=jit_eval_step_fn,
         )
 
@@ -301,7 +299,7 @@ def train_lobmax(args):
     # =========================================================================
     if testloader is not None:
         log_with_timestamp("Running final test evaluation...")
-        test_loss, test_acc = validate(
+        test_loss, test_acc, _, _ = validate(
             state,
             testloader,
             seq_len,
