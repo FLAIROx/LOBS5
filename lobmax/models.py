@@ -356,7 +356,7 @@ def count_active_parameters(params, num_experts: int, num_experts_per_tok: int) 
     found_moe = False
     
     for path, leaf in flat_with_path:
-        path_str = "/".join(str(p.key) for p in path)
+        path_str = "/".join(str(p) for p in path)
         is_moe_param = False
         
         # Criterion 1: Shape-based (Standard Flax MoE: [Experts, In, Out])
