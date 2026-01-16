@@ -883,3 +883,73 @@ Epoch 0: mean=0.2699  # All processes see same aggregated result
 - `482dfb7` fix(es-trainer): adopt HyperscaleES multi-node pattern (4 tasks per node)
 - `7171b09` revert: remove CUDA_VISIBLE_DEVICES override (breaks JAX distributed)
 - `f4295c3` fix(es-trainer): partition perturbations across processes in multi-node mode
+
+---
+
+## 2026-01-16
+
+### Lesson 8: MaxText GPU XLA Optimization Flags
+
+#### Problem
+LOBMAX 训练速度远低于预期 MFU。原因是缺少 MaxText 的核心 GPU 优化 flags。
+
+#### Key Missing XLA Flags (from MaxText A3 configs)
+
+| Flag | Purpose | Default | Recommended |
+|------|---------|---------|-------------|
+| `xla_gpu_enable_pipelined_all_gather` | Pipeline weight gathering | false | **true** |
+| `xla_gpu_enable_pipelined_reduce_scatter` | Pipeline gradient scattering | false | **true** |
+| `xla_gpu_enable_pipelined_all_reduce` | Pipeline gradient reduction | false | **true** |
+| `xla_gpu_enable_while_loop_double_buffering` | Prefetch next batch | false | **true** |
+| `xla_gpu_all_reduce_combine_threshold_bytes` | AR batch threshold | 256 | **134217728** (128MB) |
+| `xla_gpu_all_gather_combine_threshold_bytes` | AG batch threshold | 256 | **134217728** (128MB) |
+| `xla_gpu_reduce_scatter_combine_threshold_bytes` | RS batch threshold | 256 | **67108864** (64MB) |
+| `xla_gpu_enable_triton_gemm` | Use Triton for GEMM | varies | **false** (cuBLAS faster) |
+
+#### Why These Matter
+
+**1. Pipelined Collectives (预计 10-30% 提速)**
+```
+Without pipelining:
+  [Compute L1] → [Wait AR] → [Compute L2] → [Wait AR]
+
+With pipelining:
+  [Compute L1] → [Compute L2] → [Compute L3]
+        ↓ (overlapped) ↓           ↓
+     [AR L1]        [AR L2]     [AR L3]
+```
+
+**2. Double Buffering (预计 5-15% 提速)**
+```
+Buffer A: [Load] → [Compute] → [Load] → [Compute]
+Buffer B:    ↓   → [Load]   → [Compute] → [Load]
+          (parallel loading while computing)
+```
+
+**3. Combine Thresholds (预计 5-20% 提速)**
+- 默认阈值 256 bytes → 每个小 tensor 单独通信
+- 改为 128MB → 累积多个 tensor 一起发送
+- 减少通信 latency overhead 524,288x
+
+#### Complete Optimized XLA_FLAGS
+
+```bash
+export XLA_FLAGS="${XLA_FLAGS} \
+  --xla_gpu_enable_cudnn_fmha=true \
+  --xla_gpu_enable_latency_hiding_scheduler=true \
+  --xla_gpu_enable_highest_priority_async_stream=true \
+  --xla_gpu_enable_triton_gemm=false \
+  --xla_gpu_all_reduce_combine_threshold_bytes=134217728 \
+  --xla_gpu_all_gather_combine_threshold_bytes=134217728 \
+  --xla_gpu_reduce_scatter_combine_threshold_bytes=67108864 \
+  --xla_gpu_enable_pipelined_all_gather=true \
+  --xla_gpu_enable_pipelined_reduce_scatter=true \
+  --xla_gpu_enable_pipelined_all_reduce=true \
+  --xla_gpu_enable_while_loop_double_buffering=true \
+  --xla_gpu_enable_all_gather_combine_by_dim=false \
+  --xla_gpu_enable_reduce_scatter_combine_by_dim=false"
+```
+
+#### Reference
+- MaxText A3 configs: `maxtext/src/MaxText/configs/a3/llama_2_7b/1vm.sh`
+- 详细分析: `subagent_maxtext_gpu_optimization_20260116.md`
