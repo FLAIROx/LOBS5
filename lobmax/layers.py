@@ -213,7 +213,8 @@ class TransformerLayer(nn.Module):
             x = x[0]  # (1, L, d_model) -> (L, d_model)
 
         # Return (carry, output) for nn.scan compatibility
-        return x, None
+        # Use dummy scalar output (will be discarded) since out_axes=(0, 0) requires stackable outputs
+        return x, jnp.zeros((), dtype=x.dtype)
 
 
 class StackedTransformerEncoder(nn.Module):
