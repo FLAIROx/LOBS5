@@ -1,0 +1,142 @@
+
+How will we use the node hours?
+We estimate that MoE pretraining of a 13B-A1.3B model (13 billion total parameters, 1.3 billion activated per forward pass) on our 20TB orderbook dataset would require 60k to 600k node hours. This estimate is derived as follows: our current 1.3B dense model represents the maximum capacity achievable with micro-batch size 22 on GH200 nodes (85GB HBM3). MoE architecture enables 10x parameter scaling while maintaining an identical memory footprint and FLOPs per forward pass—this is a well-established property of sparse MoE models demonstrated by DeepSeekMoE and Qwen3. Using MaxText with data parallelism across 4 GPUs per node, we estimate 25,000 node hours per epoch. With 2-20 epochs plus hyperparameter search, we project 60k to 600k node hours total.
+
+Why MoE for Financial Markets?
+Recent research ("Mixture of Parrots: Experts improve memorization more than reasoning", arXiv:2410.19034) demonstrates that MoE architectures excel at memorization and knowledge-intensive tasks while reasoning capabilities saturate with increasing experts. This finding aligns remarkably well with financial market modeling, where LOB prediction is fundamentally about recognizing patterns across heterogeneous market conditions—precisely where MoE excels according to the empirical evidence.
+
+Financial markets exhibit distinct operational regimes that naturally map to expert specialization. These include volatility states (low vs. high volatility periods), liquidity conditions (thick vs. thin order books), sector-specific patterns, and time-of-day effects (open auction, continuous trading, close). Each expert can specialize in specific market conditions while the router learns regime identification. A compelling secondary benefit is interpretability: expert activation patterns may reveal which market conditions the model perceives, valuable for risk monitoring and strategy attribution.
+
+Architecture and Models
+We adopt a conservative, well-proven architecture following DeepSeekMoE and Qwen3 design patterns. The single modification is replacing dense FFN layers with Sparse MoE FFN layers. The original FFN uses SwiGLU: gate = SiLU(x @ W_gate), up = x @ W_up, out = (gate * up) @ W_down. The MoE variant routes each token to top-k selected experts, each being a SwiGLU FFN. All other components use standard, well-established techniques: top-1 routing with softmax gating, auxiliary load balancing loss (coefficient 0.01), and 16 experts per MoE layer. Critically, the attention mechanism (Flash Attention), positional encoding (RoPE llama3.1), and dual-encoder structure (message + book) remain unchanged.
+
+Model Architecture:
+    x_m: (12000,) int32 tokens              x_b: (12000, 40) float32
+             |                                        |
+             v                                        v
+    +---------------------+                 +---------------------+
+    |  message_encoder    |                 |   book_encoder      |
+    |  (StackedTransformer|                 |  (TransformerBook   |
+    |   + Embedding)      |                 |   Encoder)          |
+    |   2 layers [MoE]    |                 |   1+1 layers [MoE]  |
+    +---------------------+                 +---------------------+
+             |                                        |
+             v                                        v
+       (12000, d_model)                        (12000, d_model)
+             |                                        |
+             +---------------+------------------------+
+                             |
+                             v concatenate(axis=-1)
+                    +---------------------+
+                    |  (12000, 2*d_model) |
+                    +---------------------+
+                             |
+                             v
+                    +---------------------+
+                    |  fusion_projection  |
+                    |  (Dense 2d -> d)    |
+                    +---------------------+
+                             |
+                             v
+                    +-----------------------------+
+                    |      fused_layers           |
+                    |   (N x TransformerLayer     |
+                    |    via nn.scan)             |
+                    |                             |
+                    |  +------------------------+ |
+                    |  | RMSNorm -> Attention   | |
+                    |  | RMSNorm -> FFN [MoE] <-+-+-- MoE in each layer's FFN
+                    |  +------------------------+ |
+                    +-----------------------------+
+                             |
+                             v
+                    +---------------------+
+                    |     final_norm      |
+                    |     (RMSNorm)       |
+                    +---------------------+
+                             |
+                             v
+                    +---------------------+
+                    |      decoder        |
+                    |   (Dense -> logits) |
+                    +---------------------+
+                             |
+                             v
+                      (12000, n_classes)
+                      log_softmax output
+
+MoE Layer Structure:
+                              Input: (B, L, d_model)
+                                       |
+                                       v
+                            +---------------------+
+                            |       Router        |
+                            |  Linear(d -> E)     |
+                            |  + Softmax          |
+                            +---------------------+
+                                       |
+                                       v
+                            +---------------------+
+                            |   Top-k Selection   |
+                            |   (k=1, top-1)      |
+                            +---------------------+
+                                       |
+                    +------------------+------------------+
+                    |                  |                  |
+                    v                  v                  v
+         +------------------+ +------------------+ +------------------+
+         |    Expert 0      | |    Expert 1      | |   Expert 15      |
+         |  +------------+  | |  +------------+  | |  +------------+  |
+         |  |  SwiGLU    |  | |  |  SwiGLU    |  | |  |  SwiGLU    |  |
+         |  | gate=SiLU  |  | |  | gate=SiLU  |  | |  | gate=SiLU  |  |
+         |  |  (x@W_gate)|  | |  |  (x@W_gate)|  | |  |  (x@W_gate)|  |
+         |  | up=x@W_up  |  | |  | up=x@W_up  |  | |  | up=x@W_up  |  |
+         |  | out=(gate* |  | |  | out=(gate* |  | |  | out=(gate* |  |
+         |  |  up)@W_down|  | |  |  up)@W_down|  | |  |  up)@W_down|  |
+         |  +------------+  | |  +------------+  | |  +------------+  |
+         +------------------+ +------------------+ +------------------+
+                    |                  |         ...      |
+                    |                  |                  |
+                    +------------------+------------------+
+                                       |
+                                       v
+                            +---------------------+
+                            |  Weighted Combine   |
+                            |  sum(weight_i*out_i)|
+                            +---------------------+
+                                       |
+                                       v
+                             Output: (B, L, d_model)
+
+Model Configurations:
++---------------+---------+----------+-----------+---------+---------------------------+
+| Preset        | d_model | n_layers | num_heads | mlp_dim | Params (Total/Activated)  |
++---------------+---------+----------+-----------+---------+---------------------------+
+| 125M (Dense)  |   768   |    12    |    12     |  3072   | 125M / 125M               |
+| 360M (Dense)  |  1024   |    24    |    16     |  4096   | 360M / 360M               |
+| 1.3B (Dense)  |  2048   |    24    |    16     |  8192   | 1.3B / 1.3B               |
++---------------+---------+----------+-----------+---------+---------------------------+
+| 1.25B-A125M   |   768   |    12    |    12     |  3072   | 1.25B / 125M (16 experts) |
+| 3.6B-A360M    |  1024   |    24    |    16     |  4096   | 3.6B / 360M (16 experts)  |
+| 13B-A1.3B     |  2048   |    24    |    16     |  8192   | 13B / 1.3B (16 experts)   |
++---------------+---------+----------+-----------+---------+---------------------------+
+
+How will we efficiently use the GPU resources?
+Our LOBMAX implementation is built on MaxText (Google's JAX-based LLM framework) with the following optimizations:
+- Flash Attention: O(S) memory complexity for sequence length S=12000, enabling batch size 22 per GPU
+- Megablox Kernel: Sparse matrix multiplication for efficient MoE computation
+- nn.scan: Efficient XLA compilation with gradient checkpointing (remat policy: save_dot_except_mlp)
+- RoPE (llama3.1): Rotary position embedding with scaling for long sequences
+- BFloat16: Mixed precision training for memory efficiency
+
+Current achieved performance on GH200 (85GB HBM3):
+- Dense 125M model: BSZ=22 per GPU, ~4.3% MFU, 13.9s/step
+- Sequence length: 12000 tokens (24 tokens/message x 500 messages)
+- Data parallelism: 4 GPUs per node
+
+Expected MoE outcomes:
+- 10x capacity scaling (13B effective model capacity with 1.3B computational cost)
+- Regime specialization where different experts learn different market conditions
+- Interpretable routing where expert activation patterns serve as market regime indicators
+- Validated MoE infrastructure foundation for future expansion to larger scales
+
