@@ -99,7 +99,15 @@ def create_lobmax_config(args: Namespace, n_classes: int, book_dim: int) -> LOBM
 
         # Matmul precision (default/high/highest)
         matmul_precision=getattr(args, 'matmul_precision', 'default'),
+        
+        # MoE Configuration
+        num_experts=getattr(args, 'num_experts', 1),
+        num_experts_per_tok=getattr(args, 'num_experts_per_tok', 1),
+        megablox=getattr(args, 'megablox', True),
+        capacity_factor=getattr(args, 'capacity_factor', -1.0),
+        load_balance_loss_weight=getattr(args, 'load_balance_loss_weight', 0.01),
     )
+
 
 
 def create_lobmax_optimizer(

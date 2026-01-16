@@ -163,6 +163,44 @@ class LOBMAXConfig:
     use_random_routing: bool = False      # Random routing for debug
     use_custom_sort_vjp: bool = True      # Custom VJP for sparse matmul
     
+    # === MaxText MoE Required Fields ===
+    fsdp_shard_on_exp: bool = False
+    use_2d_fsdp_sharding: bool = False
+    use_qwix_quantization: bool = False
+    use_tokamax_gmm: bool = False
+    routed_bias: bool = False
+    routed_scaling_factor: float = 1.0
+    model_call_mode: str = "train"
+    routed_score_func: str = ""
+    norm_topk_prob: bool = False
+    float32_weight_sum: bool = True
+
+
+
+    
+    # Megablox Tiling Defaults
+    wi_tile_fwd_batch_seq: int = 128
+    wi_tile_fwd_embed_dim: int = 128
+    wi_tile_fwd_mlp_dim: int = 128
+    wi_tile_dlhs_batch_seq: int = 128
+    wi_tile_dlhs_embed_dim: int = 128
+    wi_tile_dlhs_mlp_dim: int = 128
+    wi_tile_drhs_batch_seq: int = 128
+    wi_tile_drhs_embed_dim: int = 128
+    wi_tile_drhs_mlp_dim: int = 128
+
+    wo_tile_fwd_batch_seq: int = 128
+    wo_tile_fwd_embed_dim: int = 128
+    wo_tile_fwd_mlp_dim: int = 128
+    wo_tile_dlhs_batch_seq: int = 128
+    wo_tile_dlhs_embed_dim: int = 128
+    wo_tile_dlhs_mlp_dim: int = 128
+    wo_tile_drhs_batch_seq: int = 128
+    wo_tile_drhs_embed_dim: int = 128
+    wo_tile_drhs_mlp_dim: int = 128
+
+
+    
     # === Model Name (for MaxText checking) ===
     model_name: str = "lobmax"
     

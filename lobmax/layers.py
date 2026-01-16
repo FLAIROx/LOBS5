@@ -135,6 +135,8 @@ class TransformerLayer(nn.Module):
     def setup(self):
         cfg = self.config
         d_model = self.d_model or cfg.d_model
+
+
         dtype = cfg.get_dtype()
         weight_dtype = cfg.get_weight_dtype()
         
