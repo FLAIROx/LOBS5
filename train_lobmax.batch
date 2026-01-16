@@ -12,7 +12,7 @@
 
 # === Test config: small model ===
 # Increased from 4 to 8 for better MFU (larger batches = better GPU utilization)
-export PER_GPU_BSZ=${PER_GPU_BSZ:-32}
+export PER_GPU_BSZ=${PER_GPU_BSZ:-22}
 
 echo "============================================"
 echo "LOBMAX Training Job"
@@ -110,7 +110,7 @@ export JAX_PLATFORMS="cuda"
 export TF_GPU_ALLOCATOR=cuda_malloc_async
 
 # MaxText perf toggles (override via env)
-export ATTN_KERNEL="${ATTN_KERNEL:-cudnn_flash_jax}"
+export ATTN_KERNEL="${ATTN_KERNEL:-flash}"
 export FUSED_QKV="${FUSED_QKV:-True}"
 export FUSED_MLP="${FUSED_MLP:-True}"
 export FLOAT32_QK_PRODUCT="${FLOAT32_QK_PRODUCT:-False}"
