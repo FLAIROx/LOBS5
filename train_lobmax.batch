@@ -259,8 +259,8 @@ elif [ "$MODEL_PRESET" = "5.8B-A473M" ]; then
     LR_BASE=0.0003
     NUM_EXPERTS=16
     NUM_EXPERTS_PER_TOK=1
-elif [ "$MODEL_PRESET" = "20B-A1.9B" ]; then
-    # ~20B total MoE (calculated), ~1.9B activated per token
+elif [ "$MODEL_PRESET" = "23B-A1.9B" ]; then
+    # ~23B total MoE (calculated), ~1.89B activated per token
     D_MODEL=2048
     N_LAYERS=24
     NUM_HEADS=16
@@ -280,7 +280,7 @@ elif [ "$MODEL_PRESET" = "30B-A3.6B" ]; then
 else
     echo "[Error] Unknown preset: $MODEL_PRESET"
     echo "[Info] Dense presets: 30M, 125M, 360M, 1.3B, 3B"
-    echo "[Info] MoE presets: 1.9B-A153M, 5.8B-A473M, 20B-A1.9B, 30B-A3.6B"
+    echo "[Info] MoE presets: 1.9B-A153M, 5.8B-A473M, 23B-A1.9B, 30B-A3.6B"
     exit 1
 fi
 

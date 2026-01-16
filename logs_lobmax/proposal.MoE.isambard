@@ -92,19 +92,19 @@ MoE Layer Structure:
                              Output: (B, L, d_model)
 
 Model Configurations (Measured):
-+---------------+---------+----------+-----------+---------+---------------------------+
-| Preset        | d_model | n_layers | num_heads | mlp_dim | Params (Total/Activated)  |
-+---------------+---------+----------+-----------+---------+---------------------------+
-| 125M (Dense)  |   768   |    12    |    12     |  3072   | 152M / 152M               |
-| 360M (Dense)  |  1024   |    24    |    16     |  4096   | 472M / 472M               |
-| 1.3B (Dense)  |  2048   |    24    |    16     |  8192   | 1.89B / 1.89B             |
-| 3B (Dense)    |  2560   |    32    |    20     | 10240   | 3.79B / 3.79B             |
-+---------------+---------+----------+-----------+---------+---------------------------+
-| 1.9B-A153M    |   768   |    12    |    12     |  3072   | 1.85B / 153M (16 experts) |
-| 5.8B-A473M    |  1024   |    24    |    16     |  4096   | 5.76B / 473M (16 experts) |
-| 20B-A1.9B     |  2048   |    24    |    16     |  8192   | ~20B / 1.9B (16 experts)  |
-| 30B-A3.6B     |  4096   |    10    |    32     | 14336   | ~30B / 3.6B (16 experts)  |
-+---------------+---------+----------+-----------+---------+---------------------------+
++---------------+---------+----------+-----------+---------+-----------------------------+
+| Preset        | d_model | n_layers | num_heads | mlp_dim | Params (Total/Activated)    |
++---------------+---------+----------+-----------+---------+-----------------------------+
+| 125M (Dense)  |   768   |    12    |    12     |  3072   | 152M / 152M                 |
+| 360M (Dense)  |  1024   |    24    |    16     |  4096   | 472M / 472M                 |
+| 1.3B (Dense)  |  2048   |    24    |    16     |  8192   | 1.89B / 1.89B               |
+| 3B (Dense)    |  2560   |    32    |    20     | 10240   | 3.79B / 3.79B               |
++---------------+---------+----------+-----------+---------+-----------------------------+
+| 1.9B-A153M    |   768   |    12    |    12     |  3072   | 1.85B / 153M (16 experts)   |
+| 5.8B-A473M    |  1024   |    24    |    16     |  4096   | 5.76B / 473M (16 experts)   |
+| 23B-A1.9B     |  2048   |    24    |    16     |  8192   | ~23B / 1.89B (16 experts)   |
+| 30B-A3.6B     |  4096   |    10    |    32     | 14336   | ~30B / 3.6B (16 experts)    |
++---------------+---------+----------+-----------+---------+-----------------------------+
 
 How will we efficiently use the GPU resources?
 Our LOBMAX implementation is built on MaxText, Google's JAX-based LLM framework optimized for TPU and GPU training. We leverage Flash Attention for O(S) memory complexity on our 12,000-token sequences, enabling batch size 22 per GPU on GH200 nodes. For MoE computation, we utilize the Megablox kernel for efficient sparse matrix multiplication, which minimizes the overhead of expert routing. Memory efficiency is further enhanced through nn.scan with gradient checkpointing (remat policy: save_dot_except_mlp), BFloat16 mixed precision training, and RoPE (llama3.1 style) positional encoding optimized for long sequences.
