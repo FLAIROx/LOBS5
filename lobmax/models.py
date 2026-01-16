@@ -345,29 +345,54 @@ def count_active_parameters(params, num_experts: int, num_experts_per_tok: int) 
     """
     Count active parameters per token (measured).
     
-    Identifies MoE parameters by checking if the first dimension matches num_experts.
+    Identifies MoE parameters by checking if the first dimension matches num_experts
+    OR if the parameter path contains 'experts'.
     """
     if num_experts <= 1:
         return count_parameters(params)
         
-    leaves = jax.tree_util.tree_leaves(params)
+    flat_with_path, _ = jax.tree_util.tree_flatten_with_path(params)
     total_active = 0
+    found_moe = False
     
-    for leaf in leaves:
-        # Check if this is a MoE expert parameter
-        # Heuristic: dimension 0 is num_experts
-        # Note: We assume num_experts is distinct from other dimensions (vocab, d_model, etc.)
+    for path, leaf in flat_with_path:
+        path_str = "/".join(str(p.key) for p in path)
+        is_moe_param = False
+        
+        # Criterion 1: Shape-based (Standard Flax MoE: [Experts, In, Out])
         if leaf.ndim > 1 and leaf.shape[0] == num_experts:
-            # This is a MoE parameter (e.g. weights stored as [Experts, In, Out])
+            is_moe_param = True
+            
+        # Criterion 2: Name-based (MaxText/Megablox often use 'experts' in path)
+        # Even if shape doesn't match [NumExperts, ...], it might be [In, NumExperts * Out] or similar?
+        # But usually standard MoE keeps experts separated.
+        elif 'experts' in path_str:
+            # Fallback: If name says experts but shape doesn't start with num_experts,
+            # we need to be careful. Check if any dimension is num_experts.
+            if num_experts in leaf.shape:
+                is_moe_param = True
+                # print(f"DEBUG: Identified MoE param by name: {path_str} {leaf.shape}")
+
+        if is_moe_param:
+            found_moe = True
             # Active count = Size of one expert * num_experts_per_tok
+            # Careful: If shape is [In, Experts * Out], direct division works assuming balanced.
+            # Best is to divide by num_experts.
             expert_size = leaf.size // num_experts
             total_active += expert_size * num_experts_per_tok
         else:
-            # Standard parameter (Router, Attention, Norm, Embeddings)
-            # Always active
             total_active += leaf.size
-            
+            if 'experts' in path_str:
+                 print(f"WARNING: Param has 'experts' in name but shape {leaf.shape} does not match num_experts={num_experts}. Path: {path_str}")
+
+    if not found_moe:
+        print(f"WARNING: No MoE parameters identified! (num_experts={num_experts})")
+        # debug: print first few layers
+        # for path, leaf in flat_with_path[:5]:
+        #    print(f"  {'/'.join(str(p.key) for p in path)}: {leaf.shape}")
+
     return total_active
+
 
 
 def get_model_summary(config: LOBMAXConfig, total_params: Optional[int] = None, active_params: Optional[int] = None) -> str:
