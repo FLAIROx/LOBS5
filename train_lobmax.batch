@@ -198,6 +198,7 @@ echo "[Wrapper] Starting LOBMAX Training"
 echo "============================================"
 
 # Use model preset or explicit parameters
+# Dense presets
 if [ "$MODEL_PRESET" = "30M" ]; then
     # Tiny model for seq_len=12000 with limited memory
     D_MODEL=512
@@ -205,36 +206,81 @@ if [ "$MODEL_PRESET" = "30M" ]; then
     NUM_HEADS=8
     MLP_DIM=2048
     LR_BASE=0.0008
+    NUM_EXPERTS=1
+    NUM_EXPERTS_PER_TOK=1
 elif [ "$MODEL_PRESET" = "125M" ]; then
     D_MODEL=768
     N_LAYERS=12
     NUM_HEADS=12
     MLP_DIM=3072
     LR_BASE=0.0005
+    NUM_EXPERTS=1
+    NUM_EXPERTS_PER_TOK=1
 elif [ "$MODEL_PRESET" = "360M" ]; then
     D_MODEL=1024
     N_LAYERS=24
     NUM_HEADS=16
     MLP_DIM=4096
     LR_BASE=0.0003
+    NUM_EXPERTS=1
+    NUM_EXPERTS_PER_TOK=1
 elif [ "$MODEL_PRESET" = "1.3B" ]; then
     D_MODEL=2048
     N_LAYERS=24
     NUM_HEADS=16
     MLP_DIM=8192
     LR_BASE=0.00015
+    NUM_EXPERTS=1
+    NUM_EXPERTS_PER_TOK=1
 elif [ "$MODEL_PRESET" = "3B" ]; then
     D_MODEL=2560
     N_LAYERS=32
     NUM_HEADS=20
     MLP_DIM=10240
     LR_BASE=0.00008
+    NUM_EXPERTS=1
+    NUM_EXPERTS_PER_TOK=1
+# MoE presets - ~10x total params, same activated params (Qwen-style naming)
+elif [ "$MODEL_PRESET" = "1.25B-A125M" ]; then
+    # 125M dense → ~1.25B total MoE, ~125M activated per token
+    D_MODEL=768
+    N_LAYERS=12
+    NUM_HEADS=12
+    MLP_DIM=3072
+    LR_BASE=0.0005
+    NUM_EXPERTS=16
+    NUM_EXPERTS_PER_TOK=1
+elif [ "$MODEL_PRESET" = "3.6B-A360M" ]; then
+    # 360M dense → ~3.6B total MoE, ~360M activated per token
+    D_MODEL=1024
+    N_LAYERS=24
+    NUM_HEADS=16
+    MLP_DIM=4096
+    LR_BASE=0.0003
+    NUM_EXPERTS=16
+    NUM_EXPERTS_PER_TOK=1
+elif [ "$MODEL_PRESET" = "13B-A1.3B" ]; then
+    # 1.3B dense → ~13B total MoE, ~1.3B activated per token
+    D_MODEL=2048
+    N_LAYERS=24
+    NUM_HEADS=16
+    MLP_DIM=8192
+    LR_BASE=0.00015
+    NUM_EXPERTS=16
+    NUM_EXPERTS_PER_TOK=1
 else
     echo "[Error] Unknown preset: $MODEL_PRESET"
+    echo "[Info] Dense presets: 30M, 125M, 360M, 1.3B, 3B"
+    echo "[Info] MoE presets: 1.25B-A125M, 3.6B-A360M, 13B-A1.3B"
     exit 1
 fi
 
-echo "[Wrapper] LOBMAX Config: d_model=$D_MODEL, n_layers=$N_LAYERS, num_heads=$NUM_HEADS, mlp_dim=$MLP_DIM"
+if [ "$NUM_EXPERTS" -gt 1 ]; then
+    echo "[Wrapper] LOBMAX MoE Config: d_model=$D_MODEL, n_layers=$N_LAYERS, num_heads=$NUM_HEADS, mlp_dim=$MLP_DIM"
+    echo "  [MoE] num_experts=$NUM_EXPERTS, num_experts_per_tok=$NUM_EXPERTS_PER_TOK"
+else
+    echo "[Wrapper] LOBMAX Config: d_model=$D_MODEL, n_layers=$N_LAYERS, num_heads=$NUM_HEADS, mlp_dim=$MLP_DIM"
+fi
 
 python -u -B run_lobmax.py \
     --USE_WANDB=True \
@@ -281,9 +327,12 @@ python -u -B run_lobmax.py \
     --debug_overfit=False \
     --use_bf16=True \
     --token_mode=24 \
+    --num_experts=$NUM_EXPERTS \
+    --num_experts_per_tok=$NUM_EXPERTS_PER_TOK \
     ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS} \
 '
 
 echo "============================================"
 echo "LOBMAX Training completed at: $(date)"
 echo "============================================"
+

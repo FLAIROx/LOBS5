@@ -75,6 +75,30 @@ if __name__ == "__main__":
             "micro_bsz": 8, "lr_base": 0.0005, "lr_factor": 1,
             "wandb_project": "lobmax-125M"
         },
+        # MoE Presets - ~10x total params, SAME activated params per token as dense
+        # Naming: TotalParams-AActivatedParams (like Qwen3-30B-A3B)
+        # Use num_experts=16, num_experts_per_tok=1 for ~10x total params with same activation
+        "1.25B-A125M": {
+            # 125M dense → ~1.25B total MoE, ~125M activated per token
+            "d_model": 768, "n_layers": 12, "num_heads": 12, "mlp_dim": 3072,
+            "num_experts": 16, "num_experts_per_tok": 1,
+            "micro_bsz": 6, "lr_base": 0.0005, "lr_factor": 1,
+            "wandb_project": "lobmax-1.25B-A125M"
+        },
+        "3.6B-A360M": {
+            # 360M dense → ~3.6B total MoE, ~360M activated per token
+            "d_model": 1024, "n_layers": 24, "num_heads": 16, "mlp_dim": 4096,
+            "num_experts": 16, "num_experts_per_tok": 1,
+            "micro_bsz": 3, "lr_base": 0.0003, "lr_factor": 1,
+            "wandb_project": "lobmax-3.6B-A360M"
+        },
+        "13B-A1.3B": {
+            # 1.3B dense → ~13B total MoE, ~1.3B activated per token
+            "d_model": 2048, "n_layers": 24, "num_heads": 16, "mlp_dim": 8192,
+            "num_experts": 16, "num_experts_per_tok": 1,
+            "micro_bsz": 1, "lr_base": 0.00015, "lr_factor": 1,
+            "wandb_project": "lobmax-13B-A1.3B"
+        },
     }
 
     parser = argparse.ArgumentParser(description="LOBMAX: Transformer-based LOB Prediction")
@@ -101,6 +125,20 @@ if __name__ == "__main__":
     parser.add_argument("--n_message_layers", type=int, default=2)
     parser.add_argument("--n_book_pre_layers", type=int, default=1)
     parser.add_argument("--n_book_post_layers", type=int, default=1)
+
+    # === MoE (Mixture of Experts) Configuration ===
+    parser.add_argument("--num_experts", type=int, default=1,
+                        help="Number of experts in MoE layer. Set to 1 for dense model.")
+    parser.add_argument("--num_experts_per_tok", type=int, default=1,
+                        help="Number of experts activated per token (top-k routing).")
+    parser.add_argument("--sparse_matmul", type=str2bool, default=True,
+                        help="Use sparse matmul for MoE (efficient kernel).")
+    parser.add_argument("--megablox", type=str2bool, default=True,
+                        help="Use Megablox kernel for sparse MoE matmul.")
+    parser.add_argument("--capacity_factor", type=float, default=-1.0,
+                        help="Expert capacity factor. -1.0 for dropless MoE.")
+    parser.add_argument("--load_balance_loss_weight", type=float, default=0.01,
+                        help="Weight for load balancing auxiliary loss.")
 
     # === Attention Configuration ===
     parser.add_argument("--attention_kernel", type=str, default="flash",
@@ -228,6 +266,9 @@ if __name__ == "__main__":
     print(f"    fused_qkv={args.fused_qkv}, fused_mlp={args.fused_mlp}")
     print(f"    float32_qk_product={args.float32_qk_product}, float32_logits={args.float32_logits}")
     print(f"    Message layers={args.n_message_layers}, Book pre/post={args.n_book_pre_layers}/{args.n_book_post_layers}")
+    if args.num_experts > 1:
+        print(f"    [MoE] num_experts={args.num_experts}, num_experts_per_tok={args.num_experts_per_tok}")
+        print(f"    [MoE] sparse_matmul={args.sparse_matmul}, megablox={args.megablox}, capacity_factor={args.capacity_factor}")
 
     # ============================================
     # JAX Distributed Initialization

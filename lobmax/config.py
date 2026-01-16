@@ -154,6 +154,15 @@ class LOBMAXConfig:
     moba_chunk_size: int = 1024
     moba_topk: int = 2
     
+    # === MoE (Mixture of Experts) Configuration ===
+    num_experts: int = 1                  # Number of experts (1 = dense model)
+    num_experts_per_tok: int = 1          # Top-k experts per token
+    megablox: bool = True                 # Use Megablox kernel for sparse matmul
+    capacity_factor: float = -1.0         # Expert capacity factor (-1.0 = dropless)
+    load_balance_loss_weight: float = 0.01  # Auxiliary loss for load balancing
+    use_random_routing: bool = False      # Random routing for debug
+    use_custom_sort_vjp: bool = True      # Custom VJP for sparse matmul
+    
     # === Model Name (for MaxText checking) ===
     model_name: str = "lobmax"
     
