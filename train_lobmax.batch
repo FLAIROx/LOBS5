@@ -217,6 +217,7 @@ python -u -B run_lobmax.py \
     --prenorm=True \
     --batchnorm=False \
     --dataset=lobster-prediction \
+    --msg_seq_len=1024 \
     --merging=padded \
     --dir_name="'"$DATA_DIR"'" \
     --test_dir_name="'"$TEST_DIR"'" \
