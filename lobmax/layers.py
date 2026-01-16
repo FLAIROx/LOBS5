@@ -292,6 +292,7 @@ class StackedTransformerEncoder(nn.Module):
             name="layers",
         )
 
+    @nn.compact
     def __call__(self, x, integration_timesteps=None, positions=None):
         """
         Forward pass through stacked transformer using nn.scan.
@@ -396,6 +397,7 @@ class TransformerBookEncoder(nn.Module):
             name=name,
         )
 
+    @nn.compact
     def __call__(self, x, integration_timesteps=None, positions=None):
         """
         Forward pass through book encoder using nn.scan.

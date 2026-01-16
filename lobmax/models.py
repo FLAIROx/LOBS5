@@ -143,6 +143,7 @@ class LOBMAXModel(nn.Module):
             name="fused_layers",
         )
     
+    @nn.compact
     def __call__(
         self,
         x_m: jnp.ndarray,
