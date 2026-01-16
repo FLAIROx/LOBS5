@@ -233,6 +233,10 @@ def train_lobmax(args):
             max_job_hours=args.max_job_hours,
             save_before_timeout_minutes=args.save_before_timeout_minutes,
             mesh=mesh,  # CRITICAL: Pass mesh for proper multi-GPU sharding
+            # Transformer params for MFU
+            num_layers=args.n_layers,
+            num_heads=args.num_heads,
+            d_model=args.d_model,
         )
 
         epoch_time = time.time() - epoch_start

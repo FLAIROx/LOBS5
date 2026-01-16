@@ -875,9 +875,56 @@ def print_memory_usage_tofile():
 
 
 class MFUTracker:
-    """Track and compute MFU (Model FLOPs Utilization) with sliding window average."""
-    def __init__(self, model_params, batch_size, seq_len, num_devices, peak_tflops=1000.0, window=10):
+    """Track and compute MFU (Model FLOPs Utilization) with sliding window average.
+    
+    FORMULA EXPLANATION:
+    --------------------
+    Formula 1 (Standard/Linear): 
+        FLOPS = 6 * N * B * S
+        - N: Model Parameters
+        - B: Batch size
+        - S: Sequence length
+        - Used when num_layers/heads are NOT provided (e.g. S5/RNN models).
+        - Ignores Attention O(S^2) cost.
+
+    Formula 2 (Transformer with Attention):
+        FLOPS = FLOPS_Linear + FLOPS_Attention
+        
+        FLOPS_Linear = 6 * N * B * S
+        
+        FLOPS_Attention = 12 * L * H * Q * B * S^2
+        - L: Number of Layers
+        - H: Number of Heads
+        - Q: Head Dimension (d_model / H)
+        - 12 factor accounts for QK^T and Softmax*V in forward+backward passes.
+        
+    For long sequences (e.g. S=12000), FLOPS_Attention dominates.
+    Without it, MFU is severely underestimated (e.g. 1.6% vs 50%).
+    """
+    def __init__(self, model_params, batch_size, seq_len, num_devices, peak_tflops=1000.0, window=10,
+                 num_layers=None, num_heads=None, d_model=None):
+        
+        # Base Linear FLOPs (6NBS)
         self.flops_per_step = 6 * batch_size * seq_len * model_params
+        
+        # Add Attention FLOPs if transformer params provided
+        if num_layers is not None and num_heads is not None and d_model is not None:
+            L = num_layers
+            H = num_heads
+            Q = d_model // num_heads
+            B = batch_size
+            S = seq_len
+            
+            # Attention FLOPs: 12 * L * H * Q * B * S^2
+            att_flops = 12 * L * H * Q * B * (S**2)
+            
+            print(f"[MFUTracker] Transformer detected.")
+            print(f"  Linear FLOPs: {self.flops_per_step/1e12:.2f} TFLOPS")
+            print(f"  Attn FLOPs:   {att_flops/1e12:.2f} TFLOPS")
+            print(f"  Total FLOPs:  {(self.flops_per_step + att_flops)/1e12:.2f} TFLOPS")
+            
+            self.flops_per_step += att_flops
+
         self.total_peak = peak_tflops * num_devices
         self.window = []
         self.window_size = window
@@ -923,6 +970,10 @@ def train_epoch(
         batch_size=None,
         peak_tflops=1000.0,
         goodput_monitor=None,
+        # Transformer params for accurate MFU
+        num_layers=None,
+        num_heads=None,
+        d_model=None,
         # Step-level checkpointing parameters
         checkpoint_callback=None,  # Callable: (state, epoch, step, loss) -> None
         checkpoint_every_n_steps=1000,  # Save every N steps, or "auto" for ~1 hour intervals
@@ -953,9 +1004,13 @@ def train_epoch(
     cross_entropies= [] #list of 1xNTok losses
 
     # Initialize MFU tracker if parameters provided
+    # Initialize MFU tracker if parameters provided
     mfu_tracker = None
     if model_params is not None and batch_size is not None:
-        mfu_tracker = MFUTracker(model_params, batch_size, seq_len, num_devices, peak_tflops)
+        mfu_tracker = MFUTracker(
+            model_params, batch_size, seq_len, num_devices, peak_tflops,
+            num_layers=num_layers, num_heads=num_heads, d_model=d_model
+        )
 
     # =========================================================================
     # AUTO MODE TIMING (WALL CLOCK):

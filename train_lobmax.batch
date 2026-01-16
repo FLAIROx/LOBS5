@@ -217,7 +217,7 @@ python -u -B run_lobmax.py \
     --prenorm=True \
     --batchnorm=False \
     --dataset=lobster-prediction \
-    --msg_seq_len=128 \
+    --msg_seq_len=500 \
     --merging=padded \
     --dir_name="'"$DATA_DIR"'" \
     --test_dir_name="'"$TEST_DIR"'" \
@@ -226,7 +226,6 @@ python -u -B run_lobmax.py \
     --p_dropout=0.0 \
     --warmup_end=1 \
     --weight_decay=0.05 \
-    --msg_seq_len=500 \
     --use_book_data=True \
     --use_simple_book=False \
     --book_transform=True \
