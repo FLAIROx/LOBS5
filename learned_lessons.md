@@ -953,3 +953,202 @@ export XLA_FLAGS="${XLA_FLAGS} \
 #### Reference
 - MaxText A3 configs: `maxtext/src/MaxText/configs/a3/llama_2_7b/1vm.sh`
 - 详细分析: `subagent_maxtext_gpu_optimization_20260116.md`
+
+---
+
+### Lesson 9: nn.scan 替代 Python For-Loop 优化 XLA 编译
+
+#### 问题背景
+
+LOBMAX 使用 Python for-loop 迭代 Transformer 层：
+```python
+# 旧代码 - 每层单独 trace
+for i in range(n_layers):
+    layer = TransformerLayer(name=f"layer_{i}")
+    x = layer(x, positions)
+```
+
+**问题**：
+1. XLA 对每层单独编译 → 32 层 = 32 次 trace
+2. 编译时间随层数线性增长 (~30min for 32 layers)
+3. 无法复用中间激活缓冲区 → 内存占用高
+
+#### 解决方案：nn.scan
+
+```python
+# 新代码 - 单次 trace + 循环展开
+from flax.linen import partitioning as nn_partitioning
+
+def _create_scanned_layers(self):
+    initializing = self.is_mutable_collection("params")
+    params_spec = cfg.param_scan_axis if initializing else nn_partitioning.ScanIn(cfg.param_scan_axis)
+
+    return nn.scan(
+        TransformerLayer,
+        variable_axes={"params": params_spec, "intermediates": 0},
+        split_rngs={"params": True, "dropout": cfg.enable_dropout},
+        in_axes=(nn.broadcast,),  # positions 广播到所有层
+        out_axes=(0, 0),
+        length=n_layers,
+    )(config=cfg, mesh=self.mesh, name="layers")
+
+# 调用
+x, _ = self._create_scanned_layers()(x, positions)
+```
+
+#### 关键技术点
+
+**1. ScanIn 的双模式处理**
+
+```python
+initializing = self.is_mutable_collection("params")
+params_spec = 0 if initializing else nn_partitioning.ScanIn(0)
+```
+
+| 阶段 | params_spec | 作用 |
+|------|-------------|------|
+| init | `0` (int) | 创建 `[n_layers, d_model, d_model]` 形状的堆叠参数 |
+| apply | `ScanIn(0)` | 沿 axis=0 展开参数分配给各层 |
+
+**2. 返回签名变更**
+
+```python
+# 旧代码
+def __call__(self, x, positions):
+    ...
+    return x
+
+# 新代码 - scan 需要 (carry, output) 元组
+def __call__(self, x, positions):
+    ...
+    return x, None  # carry=x, output=None
+```
+
+**3. remat 位置移动**
+
+```python
+# 旧代码 - 装饰器在类上
+@nn.remat
+class TransformerLayer:
+    ...
+
+# 新代码 - remat 在 scan 包装时应用
+layer_cls = TransformerLayer
+if cfg.remat_policy != "none":
+    layer_cls = nn.remat(
+        TransformerLayer,
+        policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
+    )
+```
+
+**4. 参数结构变化**
+
+```
+# 旧结构 (for-loop)
+params/layer_0/pre_attn_norm/scale: [d_model]
+params/layer_1/pre_attn_norm/scale: [d_model]
+...
+
+# 新结构 (nn.scan)
+params/layers/pre_attn_norm/scale: [n_layers, d_model]
+```
+
+#### 预期效果
+
+| 指标 | For-Loop | nn.scan |
+|------|----------|---------|
+| XLA 编译时间 | O(n_layers × trace_time) | O(1 × trace_time) |
+| Peak Memory | 高 (每层独立缓冲) | 低 (缓冲复用) |
+| 代码复杂度 | 简单 | 中等 |
+
+#### 注意事项
+
+1. **layer_idx 不再显式传递**: nn.scan 自动迭代，无需手动管理
+2. **Checkpoint 兼容性**: 参数结构变化意味着旧 checkpoint 无法直接加载
+3. **调试难度增加**: scan 内部错误堆栈不如 for-loop 直观
+
+#### 相关代码修改
+
+| 文件 | 修改内容 |
+|------|----------|
+| `lobmax/config.py` | 添加 `param_scan_axis`, `remat_policy` |
+| `lobmax/layers.py` | TransformerLayer 返回 `(x, None)`, 添加 `_create_scanned_layers()` |
+| `lobmax/models.py` | fused_layers 改用 nn.scan |
+
+#### Commit
+- `b9a2948` perf(lobmax): convert for-loop to nn.scan for transformer layers
+
+---
+
+### Lesson 10: nn.scan 与 LogicallyPartitioned 变量兼容性
+
+#### 问题背景
+
+使用 nn.scan 后遇到 `PartitioningUnspecifiedError`:
+```
+flax.errors.PartitioningUnspecifiedError: Trying to transform a Partitioned variable but "partition_name" is not specified in metadata_params: LogicallyPartitioned(value=..., names=('heads', 'kv', 'embed'), mesh=None, rules=None)
+```
+
+#### 根本原因
+
+1. MaxText 的 attention 层使用 `kernel_axes=("heads", "kv", "embed")` 创建 `LogicallyPartitioned` 变量
+2. `nn.scan` 需要为这些变量添加一个新的扫描轴（axis 0）
+3. `LogicallyPartitioned` 变量需要知道新轴的**逻辑分区名称**
+4. 未提供 `metadata_params` → Flax 不知道如何命名新轴 → 报错
+
+#### 解决方案
+
+添加 `metadata_params={nn.PARTITION_NAME: 'layers'}`:
+
+```python
+# 修复前
+return nn.scan(
+    layer_cls,
+    variable_axes={"params": params_spec, "intermediates": 0},
+    ...
+)(...)
+
+# 修复后
+return nn.scan(
+    layer_cls,
+    variable_axes={"params": params_spec, "intermediates": 0},
+    ...,
+    metadata_params={nn.PARTITION_NAME: 'layers'},  # 关键！
+)(...)
+```
+
+#### 工作原理
+
+当 nn.scan 遇到 LogicallyPartitioned 变量时：
+```
+原始分区名: ('heads', 'kv', 'embed')
+           ↓ 添加 scan axis (metadata_params 指定名称)
+新分区名:   ('layers', 'heads', 'kv', 'embed')
+```
+
+这告诉 Flax：
+1. 新的 axis 0 代表 "layers" 维度
+2. 在分布式训练时可以沿此轴分片
+
+#### 最佳实践
+
+| 场景 | 是否需要 metadata_params |
+|------|-------------------------|
+| 普通 JAX arrays | 否 |
+| LogicallyPartitioned 变量 | **是** |
+| 使用 nn_partitioning.param_with_axes() | **是** |
+| 使用 MaxText 的 attention/linear 层 | **是** |
+
+#### MaxText 参考
+
+位置: `maxtext/src/MaxText/layers/decoders.py:497-513`
+```python
+scan_fn = nn.scan(
+    decoder_layer,
+    variable_axes={...},
+    metadata_params={nn.PARTITION_NAME: metadata_axis_name},  # ← 关键
+)
+```
+
+#### Commit
+- `f15b08a` fix(lobmax): add metadata_params for LogicallyPartitioned variables in nn.scan
