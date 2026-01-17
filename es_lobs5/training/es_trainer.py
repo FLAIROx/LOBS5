@@ -1084,6 +1084,22 @@ class ESTrainer:
         # Use simple jnp array for now
         self.replay_book_data = jnp.array(book_data)
 
+        # H4: Verify data structure assumptions (User Request)
+        # Check that Ask Price (Idx 3) > Bid Price (Idx 5) for a sample
+        # to ensure we are using the correct columns.
+        sample_indices = np.random.randint(0, len(book_data), size=100)
+        sample_ask = np.array(book_data[sample_indices, 3])
+        sample_bid = np.array(book_data[sample_indices, 5])
+        
+        # Check average spread is positive
+        avg_spread = np.mean(sample_ask - sample_bid)
+        if avg_spread <= 0:
+            print(f"[WARN] Replay Data Validation Warning: Average spread is {avg_spread} (<=0).")
+            print(f"       Ask P1 (Idx 3): {np.mean(sample_ask)}, Bid P1 (Idx 5): {np.mean(sample_bid)}")
+            print("       Double check column indices in replay_book_data!")
+        else:
+            print(f"[INIT-REPLAY] Data structure verified: Avg Spread = {avg_spread:.2f} (Ask > Bid confirmed)")
+
 
         # Extract date from dataset files for logging
         from glob import glob
@@ -2027,11 +2043,13 @@ class ESTrainer:
              total_msgs = n_warmup + config.n_steps * n_bg
              
              # Extract GT trace (Best Ask, Best Bid)
-             # replay_book_data is (N, 40+)
-             # Columns 0 (Ask Price 1) and 2 (Bid Price 1)
-             gt_trace_full = replay_book_data[:total_msgs, [0, 2]]
-             info['gt_bid_trace'] = gt_trace_full[:, 1] # Bid P1
-             info['gt_ask_trace'] = gt_trace_full[:, 0] # Ask P1
+             # Extract GT trace (Best Ask, Best Bid)
+             # replay_book_data has header cols 0,1,2.
+             # LOBSTER data starts at col 3.
+             # Ask Price 1 is at index 3, Bid Price 1 is at index 5
+             gt_trace_full = replay_book_data[:total_msgs, [3, 5]]
+             info['gt_bid_trace'] = gt_trace_full[:, 1] # Bid P1 (was ind 5)
+             info['gt_ask_trace'] = gt_trace_full[:, 0] # Ask P1 (was ind 3)
         else:
              # Placeholder for World Model mode
              info['gt_bid_trace'] = jnp.zeros((1,), dtype=jnp.int32)
