@@ -1815,9 +1815,12 @@ class ESTrainer:
             book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
 
+            # Get best bid/ask for plotting
+            best_ask, best_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
+
             # Return policy_msg for order analysis (shape: (msg_len,))
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-                    book_feat, world_oid_offset, quant_executed, accum_revenue), policy_msg
+                    book_feat, world_oid_offset, quant_executed, accum_revenue), (policy_msg, best_bid, best_ask)
 
         # Run episode
         # H2: Apply pvary to initial carry values when inside shard_map
@@ -1834,7 +1837,7 @@ class ESTrainer:
             maybe_pvary(jnp.float32(0)),
         )
         # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
-        (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue), policy_msgs_all = jax.lax.scan(
+        (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue), (policy_msgs_all, bid_trace, ask_trace) = jax.lax.scan(
             step_fn,
             main_scan_init,
             jnp.arange(config.n_steps),
@@ -1958,7 +1961,10 @@ class ESTrainer:
             'agent_trades': agent_trades,
             'total_trades': total_trades,
             'init_mid_price': init_mid_price,
+            'init_mid_price': init_mid_price,
             'policy_msgs': policy_msgs_all,    # shape: (n_steps, msg_len) for order analysis
+            'bid_trace': bid_trace,
+            'ask_trace': ask_trace,
         }
 
         return fitness, info
@@ -2148,7 +2154,22 @@ class ESTrainer:
             self.noiser_params = noiser_params_updated
             self.lobs5_init.params = updated_params
 
-        aggregated_info = {k: jnp.mean(v) for k, v in infos.items()}
+        # Extract one example trace for plotting (from first perturbation)
+        # We must pull this out BEFORE averaging, as averaging traces is meaningless/expensive
+        # Note: infos['bid_trace'] shape is (n_perturbations, n_steps)
+        example_bid_trace = infos['bid_trace'][0]
+        example_ask_trace = infos['ask_trace'][0]
+
+        # Filter out heavy/non-scalar items before averaging
+        infos_for_mean = {
+            k: v for k, v in infos.items() 
+            if k not in ['bid_trace', 'ask_trace', 'policy_msgs']
+        }
+        aggregated_info = {k: jnp.mean(v) for k, v in infos_for_mean.items()}
+
+        # Add example traces back to aggregated info
+        aggregated_info['example_bid_trace'] = example_bid_trace
+        aggregated_info['example_ask_trace'] = example_ask_trace
 
         return jnp.mean(fitnesses), fitnesses, aggregated_info
 
@@ -2270,6 +2291,32 @@ class ESTrainer:
                 model_fill_rate = model_qty / task_size              # Model orders fill rate
                 liquidation_fill_rate = liquidation_qty / task_size  # Force market order fill rate
                 unfill_rate = unfilled_qty / task_size               # Unfilled rate (book depth insufficient)
+
+                # Generate Best Bid/Ask Price Plot
+                if 'example_bid_trace' in epoch_info and 'example_ask_trace' in epoch_info:
+                    try:
+                        import matplotlib.pyplot as plt
+                        
+                        bid_trace = epoch_info['example_bid_trace']
+                        ask_trace = epoch_info['example_ask_trace']
+                        steps = list(range(len(bid_trace)))
+                        
+                        # Create static plot
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        ax.plot(steps, bid_trace, label='Best Bid', color='green', alpha=0.7)
+                        ax.plot(steps, ask_trace, label='Best Ask', color='red', alpha=0.7)
+                        
+                        ax.set_title(f"Best Bid/Ask Price Over Time (Epoch {epoch})")
+                        ax.set_xlabel("Step")
+                        ax.set_ylabel("Price")
+                        ax.legend()
+                        ax.grid(True, alpha=0.3)
+                        
+                        # Log to WandB
+                        wandb_run.log({"price_trace": wandb.Image(fig)}, commit=False)
+                        plt.close(fig)
+                    except Exception as e:
+                        print(f"[WARN] Failed to generate price plot: {e}")
 
                 wandb_run.log({
                     'epoch': epoch,
