@@ -555,11 +555,39 @@ def create_train_state(model_cls,
     # jax.debug.print("Dummy input shapes (msg,book) ({}, \n {})",dummy_input[0].shape,dummy_input[1].shape)
     #RNN mode and initialisation needs to go in here if we need it. 
 
-    variables = model.init({"params": init_rng,
-                            "dropout": dropout_rng},
-                           *dummy_input, *integration_timesteps,
-                           method='__call_ar__' 
-                           )
+    import time
+    if isinstance(dummy_input, tuple) and len(dummy_input) > 0:
+         pass
+
+    # Sleep to allow distributed environment to settle (though CPU hack below is the real fix)
+    # time.sleep(1)
+
+    # Force initialization on CPU to avoid potential distributed GPU hangs
+    # Observation: On GH200 multi-node, model.init() on default GPU device hangs during distributed init.
+    # Attempting to run on CPU (even if it fails) seems to unblock the subsequent attempt.
+    try:
+        # Try to use CPU device
+        cpu_back = jax.local_devices(backend='cpu')[0] if len(jax.local_devices(backend='cpu')) > 0 else None
+        if cpu_back:
+            with jax.default_device(cpu_back):
+                 variables = model.init({"params": init_rng,
+                                        "dropout": dropout_rng},
+                                       *dummy_input, *integration_timesteps,
+                                       method='__call_ar__' 
+                                       )
+        else:
+            raise RuntimeError("No CPU backend found")
+            
+    except Exception as e:
+        # print(f"[DEBUG-HELPER] model.init on CPU failed with error: {e}")
+        # Fallback to default device
+        variables = model.init({"params": init_rng,
+                                "dropout": dropout_rng},
+                               *dummy_input, *integration_timesteps,
+                               method='__call_ar__' 
+                               )
+                               
+    # print(f"[DEBUG-HELPER] model.init returned.")
     
     if batchnorm:
         params = variables["params"]#.unfreeze()
