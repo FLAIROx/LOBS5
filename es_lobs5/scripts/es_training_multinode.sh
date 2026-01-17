@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=es-multinode
 #SBATCH --nodes=2             # Default, override with sbatch --nodes=N
-#SBATCH --ntasks-per-node=4
+#SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --mem=0
 #SBATCH --time=02:00:00        # Short time for testing
@@ -9,6 +9,8 @@
 #SBATCH --error=logs/es_multinode_%j.err
 #SBATCH --partition=workq
 #SBATCH --exclusive           # Exclusive access is usually better for multi-node
+#SBATCH --contiguous
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
 
 # =============================================================================
 # ES Multi-Node Training Script
@@ -26,11 +28,9 @@ nodes_array=($nodes)
 head_node=${nodes_array[0]}
 head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
 
-# if we detect ipv6, we might need to use brackets, but hostname -I usually gives ipv4 first.
-# actually `hostname --ip-address` gives the IP.
-
 echo "Coordinator: $head_node ($head_node_ip)"
-export COORD_ADDR="$head_node_ip:6000"
+export JAX_COORDINATOR_ADDRESS="$head_node_ip:6000"
+export JAX_COORDINATOR_TIMEOUT_MS=600000  # 10 minutes timeout
 
 # -----------------------------------------------------------------------------
 # Environment Setup
@@ -67,31 +67,39 @@ echo "=============================================="
 echo " ES Multi-Node Training"
 echo "=============================================="
 echo "Nodes: ${SLURM_JOB_NUM_NODES}"
-echo "Total Processes: ${SLURM_NTASKS}"
-echo "Coordinator: ${COORD_ADDR}"
+echo "Coordinator: ${JAX_COORDINATOR_ADDRESS}"
 echo "Per-GPU Perturbations: ${PERGPU_PERTURBATIONS}"
 echo "=============================================="
 
 # -----------------------------------------------------------------------------
 # Run Training
 # -----------------------------------------------------------------------------
-# We use srun to launch one process per GPU (ntasks-per-node=4)
-# es_training.py handles distributed init using --coord_addr
+# Use srun with ntasks-per-node=1 (one process per node managing all its GPUs)
+# Environment variables handle JAX coordination logic inside the python script
 
-srun python es_lobs5/scripts/es_training.py \
-    --lobs5_checkpoint "${CHECKPOINT}" \
-    --replay_data_path "${DATA_DIR}" \
-    --n_epochs ${N_EPOCHS} \
-    --pergpu_perturbations ${PERGPU_PERTURBATIONS} \
-    --n_steps ${N_STEPS} \
+export JAX_PROCESS_COUNT=${SLURM_JOB_NUM_NODES}
+
+srun --ntasks-per-node=1 \
+     --kill-on-bad-exit=1 \
+     bash -c '
+export JAX_PROCESS_INDEX=$SLURM_PROCID
+echo "[Wrapper] Node $SLURM_NODEID/$SLURM_NNODES Proc $SLURM_PROCID/$SLURM_NTASKS"
+
+python es_lobs5/scripts/es_training.py \
+    --lobs5_checkpoint "'"${CHECKPOINT}"'" \
+    --replay_data_path "'"${DATA_DIR}"'" \
+    --n_epochs '${N_EPOCHS}' \
+    --pergpu_perturbations '${PERGPU_PERTURBATIONS}' \
+    --n_steps '${N_STEPS}' \
     --n_warmup_msgs 500 \
-    --background_msgs_per_step ${BG_MSGS} \
+    --background_msgs_per_step '${BG_MSGS}' \
     --task sell \
-    --task_size ${TASK_SIZE} \
+    --task_size '${TASK_SIZE}' \
     --tick_size 100 \
-    --checkpoint_dir "${CHECKPOINT_DIR}" \
-    --wandb_project "${WANDB_PROJECT}" \
-    --wandb_entity "${WANDB_ENTITY}" \
-    --coord_addr "${COORD_ADDR}" \
-    --num_procs ${SLURM_NTASKS} \
-    --proc_id -1 # Will be auto-detected from SLURM_PROCID
+    --checkpoint_dir "'"${CHECKPOINT_DIR}"'" \
+    --wandb_project "'"${WANDB_PROJECT}"'" \
+    --wandb_entity "'"${WANDB_ENTITY}"'" \
+    --coord_addr "'"${JAX_COORDINATOR_ADDRESS}"'" \
+    --num_procs '${SLURM_JOB_NUM_NODES}' \
+    --proc_id -1
+'

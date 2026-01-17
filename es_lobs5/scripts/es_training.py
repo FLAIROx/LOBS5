@@ -49,6 +49,37 @@ def _init_distributed_if_needed():
     parser.add_argument('--proc_id', type=int, default=None)  # Default None, will use env var
     args, _ = parser.parse_known_args()
 
+    # Priority 1: Check standard JAX distributed environment variables
+    coord_env = os.environ.get('JAX_COORDINATOR_ADDRESS')
+    if coord_env:
+        import jax
+        pid = int(os.environ.get('JAX_PROCESS_INDEX', os.environ.get('SLURM_PROCID', '0')))
+        pcnt = int(os.environ.get('JAX_PROCESS_COUNT', os.environ.get('SLURM_NNODES', '1')))
+        
+        # Determine local devices (critical for 1-process-per-node mode)
+        # We assume 4 GPUs per node as per standard config, or check CUDA_VISIBLE_DEVICES
+        cvd = os.environ.get('CUDA_VISIBLE_DEVICES')
+        if cvd:
+            n_local = len([d for d in cvd.split(',') if d.strip()])
+        else:
+            # Fallback/Default for our nodes
+            n_local = 4
+            
+        local_device_ids = list(range(n_local))
+        
+        print(f"[DIST] Initializing JAX distributed (Env): coord={coord_env}, procs={pcnt}, id={pid}")
+        print(f"[DIST] Using local_device_ids={local_device_ids} ({n_local} GPUs)")
+        
+        jax.distributed.initialize(
+            coordinator_address=coord_env,
+            num_processes=pcnt,
+            process_id=pid,
+            local_device_ids=local_device_ids
+        )
+        print(f"[DIST] Process {jax.process_index()} initialized. Global devices: {jax.device_count()}, Local devices: {jax.local_device_count()}")
+        return True
+
+    # Priority 2: Legacy argument parsing (fallback)
     if args.coord_addr is not None:
         import jax
         # Get proc_id from command line or SLURM environment variable
