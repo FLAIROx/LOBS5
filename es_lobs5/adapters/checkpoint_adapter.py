@@ -778,6 +778,10 @@ def load_checkpoint_for_es(
     # SSM parameters that should NEVER be trained (stability-critical)
     STABILITY_CRITICAL_PARAMS = {'Lambda_re', 'Lambda_im'}
 
+    # SSM parameters that should use FULL training (not LoRA) when trainable
+    # log_step is (P, 1) - too small for LoRA to be efficient
+    FULL_TRAINABLE_PARAMS = {'log_step'}
+
     def create_es_map(params_tree, key=None):
         """Create es_map tree: EXCLUDED for emb/decoder/Lambda, MM_PARAM for 2D weights, PARAM for others."""
         if isinstance(params_tree, dict):
@@ -789,6 +793,9 @@ def load_checkpoint_for_es(
                 elif k in STABILITY_CRITICAL_PARAMS:
                     # Lambda eigenvalues - ALWAYS frozen for numerical stability
                     new_map[k] = EXCLUDED
+                elif k in FULL_TRAINABLE_PARAMS:
+                    # log_step - use FULL training, controlled by freeze_nonlora
+                    new_map[k] = PARAM
                 else:
                     new_map[k] = create_es_map(v, key=k)
             return new_map
