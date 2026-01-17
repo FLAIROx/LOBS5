@@ -848,28 +848,31 @@ class ESTrainer:
             print(f"[NOISER] Full fine-tuning: freeze_nonlora=False, rank={config.lora_rank}")
             print(f"[NOISER] WARNING: ALL parameters will be updated (including embeddings)")
 
-        # Calculate actual trainable parameters based on es_map
-        # ES types: 0=PARAM (full), 1=MM_PARAM (LORA), 2=EMB_PARAM (frozen), 3=EXCLUDED (frozen)
-        total_params = 0
-        trainable_params = 0
+        # Calculate actual trainable parameters from noiser_params (LORA)
+        # EGGROLL stores LORA adapters in noiser_params, not in es_map
+        # noiser_params structure: {param_path: {'u': (rank, in), 'v': (out, rank)}} for each matmul layer
+        total_base_params = sum(x.size for x in jax.tree_util.tree_leaves(self.lobs5_init.params))
+        
+        # Count LORA adapter parameters in noiser_params
+        lora_params = 0
+        def count_lora(x):
+            nonlocal lora_params
+            if hasattr(x, 'size'):
+                lora_params += x.size
+        jax.tree.map(count_lora, self.noiser_params)
+        
+        # In LORA training: base model params are frozen, only adapter params are trainable
+        if freeze_nonlora:
+            trainable_params = lora_params
+            frozen_params = total_base_params
+        else:
+            trainable_params = total_base_params + lora_params
+            frozen_params = 0
 
-        def count_params(param, es_type):
-            nonlocal total_params, trainable_params
-            size = param.size
-            total_params += size
-            # MM_PARAM (1) = LORA update, PARAM (0) = full update (if not frozen)
-            if es_type == 1:  # MM_PARAM - always LORA updated
-                trainable_params += size
-            elif es_type == 0 and not freeze_nonlora:  # PARAM - only if not frozen
-                trainable_params += size
-
-        jax.tree.map(count_params, self.lobs5_init.params, self.lobs5_init.es_map)
-
-        frozen_params = total_params - trainable_params
         print(f"[NOISER] Parameter breakdown:")
-        print(f"[NOISER]   Total: {total_params:,}")
-        print(f"[NOISER]   Trainable: {trainable_params:,} ({100*trainable_params/total_params:.2f}%)")
-        print(f"[NOISER]   Frozen: {frozen_params:,} ({100*frozen_params/total_params:.2f}%)")
+        print(f"[NOISER]   Base model: {total_base_params:,} ({'frozen' if freeze_nonlora else 'trainable'})")
+        print(f"[NOISER]   LORA adapters: {lora_params:,} (trainable, rank={config.lora_rank})")
+        print(f"[NOISER]   Total trainable: {trainable_params:,}")
 
     def _init_jaxlob(self):
         """Initialize JaxLOB order book simulator.
