@@ -1797,7 +1797,11 @@ class ESTrainer:
             # Track execution
             trades = sim_state.trades
             is_new_trade = (trades[:, 0] != -1)
-            is_policy_in_trade = ((trades[:, 2] == policy_order_id) | (trades[:, 3] == policy_order_id)) & is_new_trade
+            # FIX: Use POLICY_TRADER_ID check instead of Order ID.
+            # This is CRITICAL for Smart Cancellation: if an old order (with old Order ID)
+            # is preserved and fills, we must count it!
+            # Col 6 = Passive Trader ID, Col 7 = Aggressive Trader ID
+            is_policy_in_trade = ((trades[:, 6] == POLICY_TRADER_ID) | (trades[:, 7] == POLICY_TRADER_ID)) & is_new_trade
             step_executed = jnp.sum(jnp.where(is_policy_in_trade, jnp.abs(trades[:, 1]), 0))
             quant_executed = quant_executed + step_executed
 
