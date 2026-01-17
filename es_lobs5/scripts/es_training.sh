@@ -12,6 +12,25 @@
 # ES Training - Production Script
 # =============================================================================
 #
+# PERGPU_PERTURBATIONS Scaling Test Results (2026-01-17):
+# ------------------------------------------------------
+# Max Stable:  14,336 (Total 57,344) - Job 1921017 - RUNNING
+# First Fail:  16,384 (Total 65,536) - Job 1920937 - FAILED (OOM/Aborted)
+#
+# Jobs 18,432+ all fail with OOM (RESOURCE_EXHAUSTED ~48-80GB allocation)
+# The "Aborted" status indicates XLA runtime forced abort to prevent deadlock
+# after one replica hit OOM during distributed computation.
+#
+# Related files:
+#   - es_lobs5/scripts/es_training.py     (entry point)
+#   - es_lobs5/training/es_trainer.py     (core logic)
+#
+# Reference logs:
+#   - logs/es_train_1921017.out/.err  (max stable run)
+#   - logs/es_train_1920937.out/.err  (first OOM failure)
+#   - logs/es_train_1921018.out/.err  (detailed OOM traceback)
+# =============================================================================
+#
 # Usage:
 #   # Default configuration
 #   sbatch es_lobs5/scripts/es_training.sh
