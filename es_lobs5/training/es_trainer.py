@@ -346,6 +346,17 @@ def get_field_masks_from_validation_matrix(token_mode: int, vocab_size: int):
     return additive_mask
 
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 def create_es_config():
     """Create argument parser for ES training configuration."""
     parser = argparse.ArgumentParser(description='ES JaxLOB Training for LOBS5')
@@ -360,7 +371,8 @@ def create_es_config():
     parser.add_argument('--sigma', type=float, default=0.01, help='Noise std')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--lora_rank', type=int, default=4, help='LORA rank')
-    parser.add_argument('--freeze_nonlora', type=bool, default=True,
+    parser.add_argument('--use_lora', type=str2bool, default=True, help='Use LORA (Low-Rank Adaptation). Default: True')
+    parser.add_argument('--freeze_nonlora', type=str2bool, default=True,
                         help='Freeze non-LORA params (embeddings, base model). Default: True')
 
     # Training configuration
