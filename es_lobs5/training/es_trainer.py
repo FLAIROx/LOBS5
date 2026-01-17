@@ -132,13 +132,14 @@ __all__ = ['ESTrainer', 'create_es_config', 'es_train']
 
 def _lazy_import_jaxlob():
     """Lazy import JaxLOB to avoid import errors when not using this mode."""
-    global OrderBook, LobState, Message_Tokenizer, encoding, get_best_bid_and_ask, create_trade, add_trade
+    global OrderBook, LobState, Message_Tokenizer, encoding, get_best_bid_and_ask, create_trade, add_trade, getCancelMsgs
     if OrderBook is None:
         from gymnax_exchange.jaxob.jorderbook import OrderBook as _OrderBook, LobState as _LobState
         from gymnax_exchange.jaxob.JaxOrderBookArrays import (
             get_best_bid_and_ask as _get_best_bid_and_ask,
             create_trade as _create_trade,
             add_trade as _add_trade,
+            getCancelMsgs as _getCancelMsgs,
         )
         from lob.encoding import Message_Tokenizer as _Message_Tokenizer
         import lob.encoding as _encoding
@@ -149,6 +150,69 @@ def _lazy_import_jaxlob():
         get_best_bid_and_ask = _get_best_bid_and_ask
         create_trade = _create_trade
         add_trade = _add_trade
+        getCancelMsgs = _getCancelMsgs
+
+
+# =============================================================================
+# Helper Functions for Smart Cancellation (Ported from Gymnax Exchange)
+# =============================================================================
+from functools import partial
+
+@partial(jax.jit, static_argnames=['size', 'fill_value'])
+def p_in_cnl_vmap(p, prices_cnl):
+    return jnp.where((prices_cnl == p) & (p != 0), True, False)
+
+def matching_masks(prices_a, prices_cnl):
+    # Vectorized match check
+    p_in_cnl_fn = jax.vmap(p_in_cnl_vmap, in_axes=(0, None))
+    res = p_in_cnl_fn(prices_a, prices_cnl)
+    return jnp.any(res, axis=1), jnp.any(res, axis=0)
+
+def argsort_rev(arr):
+    """ 'arr' sorted in descending order (LTR priority tie-breaker) """
+    return (arr.shape[0] - 1 - jnp.argsort(arr[::-1]))[::-1]
+
+def rank_rev(arr):
+    """ Rank array in descending order, with ties having left-to-right priority. """
+    return jnp.argsort(argsort_rev(arr))
+
+def _filter_messages(action_msgs: jax.Array, cnl_msgs: jax.Array) -> Tuple[jax.Array, jax.Array]:
+    """ Filter out cancelation messages, when same actions should be placed again.
+        NOTE: only simplifies cancellations if new action size <= old action size.
+        To prevent multiple split orders, new larger orders still cancel the entire old order.
+    """
+    a_mask, c_mask = matching_masks(action_msgs[:, 3], cnl_msgs[:, 3])
+    
+    a_i = jnp.where(a_mask, size=a_mask.shape[0], fill_value=-1)[0]
+    a = jnp.where(a_i == -1, 0, action_msgs[a_i][:, 2])
+    c_i = jnp.where(c_mask, size=c_mask.shape[0], fill_value=-1)[0]
+    c = jnp.where(c_i == -1, 0, cnl_msgs[c_i][:, 2])
+
+    rel_cnl_quants = (c >= a) * a
+    
+    # Update action messages
+    # If action size matches cancel size (or is smaller), we reduce action.
+    # If action becomes 0, it means we don't need to send it (and don't need to cancel).
+    action_msgs = action_msgs.at[:, 2].set(
+        action_msgs[:, 2] - rel_cnl_quants[rank_rev(a_mask)])
+        
+    # Set actions with 0 quant to dummy messages (so process_orders skips/NOOPs them)
+    # Note: NOOP in JaxLOB is often type 0 or quantity 0.
+    # We ensure they are effectively NOOP.
+    action_msgs = jnp.where(
+        (action_msgs[:, 2] == 0)[:, None], # Broadcast
+        0,
+        action_msgs,
+    )
+    
+    # Update cancel messages
+    cnl_msgs = cnl_msgs.at[:, 2].set(cnl_msgs[:, 2] - rel_cnl_quants[rank_rev(c_mask)])
+    cnl_msgs = jnp.where(
+        (cnl_msgs[:, 2] == 0)[:, None],
+        0,
+        cnl_msgs,
+    )
+    return action_msgs, cnl_msgs
 
 
 def _get_flax_loaders():
@@ -1311,6 +1375,7 @@ class ESTrainer:
         # Reference: HyperscaleES/llm_experiments/utils.py - build_generate_thread pattern
         # ========================================================================
         process_order_array = self.sim.process_order_array
+        process_orders_array = self.sim.process_orders_array
         sim_obj = self.sim
         encoder = self.encoder
         replay_tokens = self.replay_tokens
@@ -1687,17 +1752,6 @@ class ESTrainer:
                 trader_id=POLICY_TRADER_ID, token_mode=config.token_mode
             )
 
-            # Cancel previous unfilled policy order
-            prev_policy_oid = POLICY_ORDER_ID_START + step_idx - 1
-            is_prev_order_in_asks = sim_state.asks[:, 2] == prev_policy_oid
-            sim_state = sim_state._replace(
-                asks=jnp.where(is_prev_order_in_asks[:, None], jnp.array([0, 0, -1, -1, 0, 0]), sim_state.asks)
-            )
-            is_prev_order_in_bids = sim_state.bids[:, 2] == prev_policy_oid
-            sim_state = sim_state._replace(
-                bids=jnp.where(is_prev_order_in_bids[:, None], jnp.array([0, 0, -1, -1, 0, 0]), sim_state.bids)
-            )
-
             # Truncate quantity to remaining task
             quant_remaining = task_size - quant_executed
             original_qty = sim_msg[2]
@@ -1705,13 +1759,40 @@ class ESTrainer:
             sim_msg = sim_msg.at[2].set(truncated_qty)
 
             # =================================================================
+            # SMART CANCELLATION LOGIC (Match Gymnax Exchange Standard)
+            # =================================================================
+            # 1. Generate Cancel Messages for this agent
+            is_sell_task = (config.task == 'sell')
+            bookside = sim_state.asks if is_sell_task else sim_state.bids
+            side_int = -1 if is_sell_task else 1
+            
+            # Use getCancelMsgs (size=5: max concurrent active orders to cancel)
+            # Note: gym_env uses world_state.time for cancel time. We use 0.
+            cancel_msgs = getCancelMsgs(
+                bookside, 
+                POLICY_TRADER_ID, 
+                5,          # size
+                side_int,   # side
+                0, 0        # time
+            )
+
+            # 2. Filter Messages (Remove redundant cancel+add pairs)
+            # Expand sim_msg to (1,8) for batch processing
+            action_msgs_in = sim_msg[None, :]
+            action_msgs, cancel_msgs = _filter_messages(action_msgs_in, cancel_msgs)
+            
+            # 3. Combine Action and Cancel Messages
+            # (N_cancel + 1) messages
+            combined_msgs = jnp.concatenate([cancel_msgs, action_msgs])
+
+            # =================================================================
             # FIX: Clear trades buffer before processing to prevent
             # quadratic accumulation of trades across steps.
             # =================================================================
             sim_state = sim_state._replace(trades=jnp.ones_like(sim_state.trades) * -1)
 
-            # Process order
-            sim_state = process_order_array(sim_state, sim_msg)
+            # Process orders (Batch)
+            sim_state = process_orders_array(sim_state, combined_msgs)
 
             # Track execution
             trades = sim_state.trades
