@@ -117,6 +117,9 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 export JAX_COORDINATOR_TIMEOUT_MS=600000
 export JAX_PLATFORMS="cuda"
 
+# NCCL timeout: 1 hour (prevents infinite hang on communication deadlock)
+export NCCL_TIMEOUT=3600
+
 
 
 #   | Job ID  | BSZ/GPU | Effective BSZ | status     | MFU    | memory    |
