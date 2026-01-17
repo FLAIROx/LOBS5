@@ -375,7 +375,7 @@ def create_es_config():
     parser.add_argument('--n_steps', type=int, default=100, help='Steps per episode')
     parser.add_argument('--n_warmup_msgs', type=int, default=500,
                         help='Number of warmup messages to replay before episode starts (0 = no warmup)')
-    parser.add_argument('--background_msgs_per_step', type=int, default=10,
+    parser.add_argument('--background_msgs_per_step', type=int, default=100,
                         help='Background messages per step (applies to both world_model and historical_replay)')
     # Legacy alias alias
     parser.add_argument('--world_msgs_per_step', type=int, default=None,
@@ -384,7 +384,7 @@ def create_es_config():
     # Execution task
     parser.add_argument('--task', type=str, default='sell',
                         choices=['sell', 'buy'])
-    parser.add_argument('--task_size', type=int, default=500,
+    parser.add_argument('--task_size', type=int, default=50,
                         help='Shares to execute')
     parser.add_argument('--tick_size', type=int, default=100,
                         help='Tick size in cents')

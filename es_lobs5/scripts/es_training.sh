@@ -117,7 +117,7 @@ PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-32}"
 N_PERTURBATIONS="${N_PERTURBATIONS:-}" 
 N_STEPS="${N_STEPS:-100}"
 N_WARMUP="${N_WARMUP:-500}"
-BG_MSGS="${BG_MSGS:-10}"
+BG_MSGS="${BG_MSGS:-100}"
 
 # ES hyperparameters
 SIGMA="${SIGMA:-0.01}"
@@ -127,7 +127,7 @@ LORA_RANK="${LORA_RANK:-4}"
 
 # Task configuration
 TASK="${TASK:-sell}"
-TASK_SIZE="${TASK_SIZE:-500}"
+TASK_SIZE="${TASK_SIZE:-50}"
 TICK_SIZE="${TICK_SIZE:-100}"
 
 # Data window control (empty = random, number = fixed)
