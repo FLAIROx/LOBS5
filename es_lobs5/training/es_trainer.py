@@ -2384,7 +2384,7 @@ class ESTrainer:
                 liquidation_fill_rate = liquidation_qty / task_size  # Force market order fill rate
                 unfill_rate = unfilled_qty / task_size               # Unfilled rate (book depth insufficient)
 
-                # Generate Best Bid/Ask Price Plot
+                # Generate Best Bid/Ask Price Plot (Market Data Only)
                 if 'example_gt_bid_trace' in epoch_info and 'example_gt_ask_trace' in epoch_info:
                     try:
                         import matplotlib.pyplot as plt
@@ -2392,39 +2392,32 @@ class ESTrainer:
                         # Ground Truth (High Res)
                         gt_bid = epoch_info['example_gt_bid_trace']
                         gt_ask = epoch_info['example_gt_ask_trace']
+                        
+                        # Compute Mid Price
+                        # Check for valid prices (non-zero) to avoid weird mid prices
+                        valid_mask = (gt_bid > 0) & (gt_ask > 0)
+                        gt_mid = (gt_bid + gt_ask) / 2
+                        # Handle invalid (zero) values if necessary, but plotting usually handles nans/zeros ok visually 
+                        # or we can mask them. For now, plot direct values.
+                        
                         gt_steps = list(range(len(gt_bid)))
                         
-                        # Simulation (Low Res - Step-wise)
-                        sim_bid = epoch_info.get('example_bid_trace', None)
-                        sim_ask = epoch_info.get('example_ask_trace', None)
-                        sim_steps = []
-                        if sim_bid is not None:
-                            # Align simulation steps to message time
-                            # Sim step i corresponds to time = n_warmup + i * bg_msgs
-                            n_warmup = getattr(self.config, 'n_warmup_msgs', 500)
-                            bg_msgs = getattr(self.config, 'background_msgs_per_step', 10)
-                            sim_steps = [n_warmup + i * bg_msgs for i in range(len(sim_bid))]
-
                         # Create static plot
                         fig, ax = plt.subplots(figsize=(12, 6))
                         
-                        # Plot GT (Solid lines, slightly transparent)
-                        ax.plot(gt_steps, gt_bid, label='Market Bid (Data)', color='green', alpha=0.5, linewidth=1.0)
-                        ax.plot(gt_steps, gt_ask, label='Market Ask (Data)', color='red', alpha=0.5, linewidth=1.0)
+                        # Plot GT
+                        ax.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
+                        ax.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                        ax.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
                         
-                        # Plot Sim (Points or Dashed lines, more visible)
-                        if sim_bid is not None:
-                             ax.plot(sim_steps, sim_bid, label='Agent View Bid', color='darkgreen', linestyle='--', marker='o', markersize=3, alpha=0.8)
-                             ax.plot(sim_steps, sim_ask, label='Agent View Ask', color='darkred', linestyle='--', marker='o', markersize=3, alpha=0.8)
-                        
-                        ax.set_title(f"Best Bid/Ask: Market Data vs Agent View (Epoch {epoch})")
+                        ax.set_title(f"Market Trace (Data Window) - Epoch {epoch}")
                         ax.set_xlabel("Message Index (Time)")
                         ax.set_ylabel("Price")
                         ax.legend()
                         ax.grid(True, alpha=0.3)
                         
                         # Log to WandB
-                        wandb_run.log({"price_trace_full": wandb.Image(fig)}, commit=False)
+                        wandb_run.log({"market_data_trace": wandb.Image(fig)}, commit=False)
                         plt.close(fig)
                     except Exception as e:
                         print(f"[WARN] Failed to generate price plot: {e}")
