@@ -2196,6 +2196,17 @@ class ESTrainer:
         checkpoint_dir = getattr(self.config, 'checkpoint_dir', './es_checkpoints')
         checkpoint_every = getattr(self.config, 'checkpoint_every', 50)
         os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        # Log Doom Logic Parameters
+        print("="*60)
+        print("[CONFIG] Hybrid Liquidation Logic Enabled")
+        print("[CONFIG] 1. Attempt Market Order (Limit 0/Inf) to sweep book")
+        print("[CONFIG] 2. Unfilled Quantity Penalty (Doom Price):")
+        if self.config.task == 'sell':
+            print("[CONFIG]    CELL: 0.75 * Final Best Bid (25% Haircut)")
+        else:
+            print("[CONFIG]    BUY:  1.25 * Final Best Ask (25% Premium)")
+        print("="*60)
 
         # Resume from checkpoint if specified
         start_epoch = 0
