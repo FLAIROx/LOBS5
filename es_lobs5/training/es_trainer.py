@@ -1801,13 +1801,19 @@ class ESTrainer:
         )
 
         # Compute fitness (PnL)
+        # =================================================================
+        # FIX: Use POLICY_TRADER_ID instead of Order ID range to match
+        # agent trades (consistent with gymnax_exchange pattern).
+        # trades[:, 6] = passive trader id, trades[:, 7] = aggressive trader id
+        # =================================================================
         trades = final_state.trades
         valid_trades_mask = trades[:, 0] != -1
 
-        passive_ids = trades[:, 2]
-        aggr_ids = trades[:, 3]
-        is_policy_passive = (passive_ids >= POLICY_ORDER_ID_START) & (passive_ids < WORLD_ORDER_ID_START) & valid_trades_mask
-        is_policy_aggr = (aggr_ids >= POLICY_ORDER_ID_START) & (aggr_ids < WORLD_ORDER_ID_START) & valid_trades_mask
+        # Filter by POLICY_TRADER_ID (column 6=passive_tid, 7=aggr_tid)
+        passive_tids = trades[:, 6]
+        aggr_tids = trades[:, 7]
+        is_policy_passive = (passive_tids == POLICY_TRADER_ID) & valid_trades_mask
+        is_policy_aggr = (aggr_tids == POLICY_TRADER_ID) & valid_trades_mask
         is_policy_trade = is_policy_passive | is_policy_aggr
 
         is_sell_task = (config.task == 'sell')
@@ -1815,12 +1821,17 @@ class ESTrainer:
             sell_revenue = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
             sell_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
             pnl_raw = sell_revenue - init_mid_price * sell_quantity
-            agent_quantity = sell_quantity
         else:
             buy_cost = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
             buy_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
             pnl_raw = init_mid_price * buy_quantity - buy_cost
-            agent_quantity = buy_quantity
+
+        # =================================================================
+        # FIX: Use final_quant_executed as agent_quantity to avoid
+        # double-counting from trades table. The loop correctly tracks
+        # only incremental fills per step.
+        # =================================================================
+        agent_quantity = final_quant_executed
 
         # Normalize PnL to -1 to 1 range using tanh
         # pnl_normalized = "number of ticks improvement for full task execution"
@@ -1836,9 +1847,10 @@ class ESTrainer:
         # model_quantity: executed by model orders during regular steps
         # liquidation_quantity: executed by force_market_order at end
         # unfilled_quantity: not executed due to insufficient book depth
-        # NOTE: With force_market_order, agent_quantity MAY BE < task_size!
+        # NOTE: agent_quantity should never exceed task_size due to truncation
         liquidation_quantity = agent_quantity - model_quantity
-        unfilled_quantity = task_size - agent_quantity
+        # Clamp unfilled_quantity to >= 0 (should not be negative if tracking is correct)
+        unfilled_quantity = jnp.maximum(0, task_size - agent_quantity)
 
         # Final fitness = PnL (only counts what was actually filled)
         # Unfilled quantity has no revenue and no cost, so PnL is naturally
