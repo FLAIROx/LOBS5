@@ -770,20 +770,27 @@ def load_checkpoint_for_es(
 
     # Create es_map:
     # - 'embedding' and 'decoder' -> EXCLUDED (3) (Match Juan's implementation)
+    # - 'Lambda_re' and 'Lambda_im' -> EXCLUDED (stability-critical eigenvalues)
     # - 2D arrays (weights) -> MM_PARAM (1) for LoRA updates
     # - 1D arrays (biases/norms) -> PARAM (0) for standard updates (or frozen if freeze_nonlora)
     from ..models.common import MM_PARAM, EXCLUDED
 
-    def create_es_map(params_tree):
-        """Create es_map tree: EXCLUDED for emb/decoder, MM_PARAM for 2D weights, PARAM for others."""
+    # SSM parameters that should NEVER be trained (stability-critical)
+    STABILITY_CRITICAL_PARAMS = {'Lambda_re', 'Lambda_im'}
+
+    def create_es_map(params_tree, key=None):
+        """Create es_map tree: EXCLUDED for emb/decoder/Lambda, MM_PARAM for 2D weights, PARAM for others."""
         if isinstance(params_tree, dict):
             new_map = {}
             for k, v in params_tree.items():
                 if k in ['embedding', 'decoder']:
                     # Recursively mark everything under embedding/decoder as EXCLUDED
                     new_map[k] = create_es_map_excluded(v)
+                elif k in STABILITY_CRITICAL_PARAMS:
+                    # Lambda eigenvalues - ALWAYS frozen for numerical stability
+                    new_map[k] = EXCLUDED
                 else:
-                    new_map[k] = create_es_map(v)
+                    new_map[k] = create_es_map(v, key=k)
             return new_map
         elif hasattr(params_tree, 'ndim') and params_tree.ndim == 2:
             return MM_PARAM  # Enable LoRA for 2D weights
