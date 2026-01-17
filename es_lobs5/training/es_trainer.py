@@ -158,7 +158,7 @@ def _lazy_import_jaxlob():
 # =============================================================================
 from functools import partial
 
-@partial(jax.jit, static_argnames=['size', 'fill_value'])
+@jax.jit
 def p_in_cnl_vmap(p, prices_cnl):
     return jnp.where((prices_cnl == p) & (p != 0), True, False)
 
