@@ -830,12 +830,15 @@ class ESTrainer:
         n_classes = len(self.vocab)
 
         # Step 3: Get frozen params for model dimensions
+        print(f"[DEBUG-INIT] Step 3: Getting frozen params...")
         fp = self.lobs5_init.frozen_params
         msg_seq_len = fp.get('msg_seq_len', 500)
         book_depth = fp.get('book_depth', 500)
         book_dim = fp.get('d_book', 503)
+        print(f"[DEBUG-INIT]   Dimensions: msg_seq_len={msg_seq_len}, book_depth={book_depth}, book_dim={book_dim}")
 
         # Step 4: Initialize Flax train_state and model class (with random params)
+        print(f"[DEBUG-INIT] Step 4: Calling init_train_state (allocating params)...")
         self.flax_train_state, self.flax_model_cls, total_params = init_train_state(
             args,
             n_classes=n_classes,
@@ -844,12 +847,15 @@ class ESTrainer:
             book_seq_len=book_depth,
             train_size=1,  # dummy value for inference
         )
+        print(f"[DEBUG-INIT] Step 4 Completed. Model params: {total_params:,}")
         print(f"[INIT-FLAX] Model parameters: {total_params:,}")
 
         # Step 5: Load checkpoint params using OCDBT-compatible loader
+        print(f"[DEBUG-INIT] Step 5: Loading Flax checkpoint params (OCDBT)...")
         # (same loader already used successfully in checkpoint_adapter.py)
         from es_lobs5.adapters.checkpoint_adapter import load_flax_checkpoint
         loaded_params, _ = load_flax_checkpoint(config.lobs5_checkpoint)
+        print(f"[DEBUG-INIT] Step 5 Completed. Checkpoint loaded.")
         print(f"[INIT-FLAX] Loaded {len(jax.tree_util.tree_leaves(loaded_params))} param arrays from checkpoint")
 
         # Step 6: Replace random params with loaded checkpoint params
