@@ -101,6 +101,9 @@ export JAX_COORDINATOR_TIMEOUT_MS=600000
 export JAX_PLATFORMS="cuda"
 export TF_GPU_ALLOCATOR=cuda_malloc_async
 
+# NCCL timeout: 1 hour (prevents infinite hang on communication deadlock)
+export NCCL_TIMEOUT=3600
+
 # Multi-node JAX config
 if [ -n "$JAX_COORDINATOR_ADDRESS" ]; then
     echo "[Wrapper] Multi-node coordinator: $JAX_COORDINATOR_ADDRESS"
