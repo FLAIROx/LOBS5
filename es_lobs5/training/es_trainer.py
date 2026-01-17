@@ -372,8 +372,8 @@ def create_es_config():
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--lora_rank', type=int, default=4, help='LORA rank')
     parser.add_argument('--use_lora', type=str2bool, default=True, help='Use LORA (Low-Rank Adaptation). Default: True')
-    parser.add_argument('--freeze_nonlora', type=str2bool, default=True,
-                        help='Freeze non-LORA params (embeddings, base model). Default: True')
+    parser.add_argument('--freeze_nonlora', type=str2bool, default=False,
+                        help='Freeze non-LORA params (embeddings, base model). Default: False (train log_step, B, C, D)')
 
     # Training configuration
     parser.add_argument('--pergpu_perturbations', type=int, default=32,
@@ -951,9 +951,10 @@ class ESTrainer:
         # Get group_size from config (required for EggRollBS, default 0 for EggRoll)
         group_size = getattr(config, 'group_size', 0)
 
-        # freeze_nonlora=True: Only train LORA parameters, freeze embeddings & base model
-        # freeze_nonlora=False: Train ALL parameters (not recommended for large models)
-        freeze_nonlora = getattr(config, 'freeze_nonlora', True)  # Default: freeze non-LORA
+        # freeze_nonlora=True: Only train LORA parameters (out2), freeze everything else
+        # freeze_nonlora=False: Train log_step, B, C, D, norm, bias + LORA (recommended)
+        # Note: Lambda eigenvalues are ALWAYS frozen for stability (hardcoded in checkpoint_adapter.py)
+        freeze_nonlora = getattr(config, 'freeze_nonlora', False)  # Default: train SSM params
 
         self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
             self.lobs5_init.params,
