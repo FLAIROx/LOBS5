@@ -870,16 +870,66 @@ class ESTrainer:
         print(f"[INIT-FLAX]   token_mode={token_mode}, batchnorm={self.flax_batchnorm}")
         print(f"[INIT-FLAX]   mixed_precision={'BF16' if use_bf16 else 'FP32'} (USE_BF16={os.environ.get('USE_BF16', '1')})")
 
+    def _log_detailed_param_stats(self, params, es_map, config, freeze_nonlora):
+        """Log detailed parameter structure with status for each tensor."""
+        print(f"\n[NOISER] {'='*100}")
+        print(f"[NOISER] {'Parameter Name':<60} | {'Shape':<15} | {'Type':<10} | {'Status':<12} | {'Eff. Params':>12}")
+        print(f"[NOISER] {'-'*100}")
+
+        total_physical = 0
+        total_effective = 0
+        
+        # Flatten with paths to iterate
+        flat_params, tree_def = jax.tree_util.tree_flatten_with_path(params)
+        flat_map = jax.tree_util.tree_flatten(es_map)[0]
+        
+        # Helper to format path
+        def path_to_str(path):
+            # path is a tuple of (DictKey, SequenceKey, etc)
+            return "/".join([str(p.key) if hasattr(p, 'key') else str(p) for p in path])
+
+        for (path, param), map_val in zip(flat_params, flat_map):
+            name = path_to_str(path)
+            shape = str(param.shape)
+            physical_size = param.size
+            total_physical += physical_size
+            
+            # map: 0=FULL, 1=LORA, 2=FIXED, 3=FIXED
+            if map_val == 1: # LORA
+                p_type = "LORA"
+                status = "[Trainable]"
+                # LoRA DoF = (in + out) * rank (assuming 2D)
+                if param.ndim == 2:
+                    eff_size = (param.shape[0] + param.shape[1]) * config.lora_rank
+                else:
+                    eff_size = 0 # Fallback or unlikely for LoRA
+            elif map_val == 0: # FULL
+                p_type = "FULL"
+                if freeze_nonlora:
+                    status = "[Frozen]"
+                    eff_size = 0
+                else:
+                    status = "[Trainable]"
+                    eff_size = physical_size
+            else: # FIXED
+                p_type = "FIXED"
+                status = "[Fixed]"
+                eff_size = 0
+            
+            total_effective += eff_size
+            
+            # Print row
+            print(f"[NOISER] {name:<60} | {shape:<15} | {p_type:<10} | {status:<12} | {eff_size:>12,}")
+
+        print(f"[NOISER] {'='*100}")
+        print(f"[NOISER] SUMMARY:")
+        print(f"[NOISER]   Total Physical Params:  {total_physical:,}")
+        print(f"[NOISER]   Total Effective Params: {total_effective:,} ({(total_effective/total_physical)*100:.4f}%)")
+        print(f"[NOISER] {'='*100}\n")
+
+
     def _init_noiser(self):
-        """Initialize EGGROLL noiser for Policy.
-
-        Note: solver=None uses default optax.sgd. The init_noiser API expects
-        a callable (like optax.sgd), not a pre-built optimizer chain.
-        See learned_lessons.md Lesson 4 for details.
-
-        For EggRollBS (baseline subtraction), group_size must be > 0.
-        Threads 0,1 in each group are baselines (no noise).
-        """
+        """Initialize EGGROLL noiser for Policy."""
         config = self.config
         all_noisers = _get_all_noisers()
         NOISER = all_noisers[config.noiser]
@@ -912,75 +962,8 @@ class ESTrainer:
             print(f"[NOISER] Full fine-tuning: freeze_nonlora=False, rank={config.lora_rank}")
             print(f"[NOISER] WARNING: ALL parameters will be updated (including embeddings)")
 
-        # Calculate actual trainable parameters
-        # For EGGROLL LORA, we count equivalent parameters (Degrees of Freedom)
-        # map: 0=FULL, 1=LORA, 2=FIXED
-        total_base_params = sum(x.size for x in jax.tree_util.tree_leaves(self.lobs5_init.params))
-        
-        lora_dof_params = 0
-        trainable_full_params = 0
-        
-        def count_dof(param, mapping):
-            nonlocal lora_dof_params, trainable_full_params
-            if mapping == 1: # LORA
-                if param.ndim == 2:
-                    # LORA DoF = (in + out) * rank
-                    lora_dof_params += (param.shape[0] + param.shape[1]) * config.lora_rank
-                else:
-                    # Fallback for non-2D LORA (treated as trainable?) 
-                    # Usually LORA only applies to 2D weights. If 1D, it might be bias.
-                    # Assume full training for 1D lora mapped? Or ignored?
-                    # EggRoll _simple_lora_update only handles 2D (A, B decomposition).
-                    # So 1D might be ignored or errored?
-                    # Let's verify EggRoll code handles shapes.
-                    # It assumes A, B split.
-                    pass
-            elif mapping == 0: # FULL
-                trainable_full_params += param.size
-
-        # Use es_map to distinguish LORA/FULL
-        jax.tree.map(count_dof, self.lobs5_init.params, self.lobs5_init.es_map)
-        
-        if freeze_nonlora:
-            trainable_params = lora_dof_params
-            frozen_params = total_base_params
-        else:
-            trainable_params = trainable_full_params + lora_dof_params # Approx
-            frozen_params = 0
-
-        print(f"[NOISER] Parameter breakdown (Effective DoF):")
-        
-        # Calculate percentages
-        def get_pct(count):
-            return f"{count / total_base_params * 100:.3f}%"
-
-        # 1. Base Model (Physical)
-        print(f"[NOISER]   Base model (Physical): {total_base_params:,} (100%)")
-        
-        # 2. LoRA Params (Trainable)
-        print(f"[NOISER]   LORA Effective Params: {lora_dof_params:,} ({get_pct(lora_dof_params)}) [Trainable] (rank={config.lora_rank})")
-        print(f"[NOISER]       (Rank Scaling: Params scale linearly with rank P ~ (d_in + d_out) * r)")
-        print(f"[NOISER]       (e.g., Rank {config.lora_rank * 2} would have approx {lora_dof_params * 2:,} params)")
-        
-        # 3. Full Trainable Params (Mapped as 0 in es_map)
-        # These are parameters NOT targeted by LoRA (e.g. Embeddings, LayerNorm, Output Head)
-        if freeze_nonlora:
-            label_full = "[Frozen]"
-            desc_full = "(Includes Embeddings, LayerNorms, Biases, etc. frozen during LoRA training)"
-        else:
-            label_full = "[Trainable]"
-            desc_full = "(Includes Embeddings, LayerNorms, Biases, etc. trainable in Full FT)"
-
-        print(f"[NOISER]   Full Mapped Params:    {trainable_full_params:,} ({get_pct(trainable_full_params)}) {label_full}")
-        print(f"[NOISER]       {desc_full}")
-
-        # 4. Total Effective Trainable
-        print(f"[NOISER]   ------------------------------------------------------------")
-        print(f"[NOISER]   Total Effective Trainable: {trainable_params:,} ({get_pct(trainable_params)})")
-        if freeze_nonlora:
-             print(f"[NOISER]       (Only LoRA params are trained. All others are frozen.)")
-        else:
-             print(f"[NOISER]       (Full Fine-Tuning: LoRA (if any) + Base Non-LoRA params are trained.)")
+        # Detailed Parameter Logging
+        self._log_detailed_param_stats(self.lobs5_init.params, self.lobs5_init.es_map, config, freeze_nonlora)
 
     def _init_jaxlob(self):
         """Initialize JaxLOB order book simulator.
