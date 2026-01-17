@@ -949,10 +949,32 @@ class ESTrainer:
             frozen_params = 0
 
         print(f"[NOISER] Parameter breakdown (Effective DoF):")
-        print(f"[NOISER]   Base model: {total_base_params:,} (Physical params)")
-        print(f"[NOISER]   LORA Effective Params: {lora_dof_params:,} (rank={config.lora_rank})")
-        print(f"[NOISER]   Full Trainable Params: {trainable_full_params:,}")
-        print(f"[NOISER]   Total Effective Trainable: {trainable_params:,}")
+        
+        # Calculate percentages
+        def get_pct(count):
+            return f"{count / total_base_params * 100:.3f}%"
+
+        # 1. Base Model (Physical)
+        print(f"[NOISER]   Base model (Physical): {total_base_params:,} (100%)")
+        
+        # 2. LoRA Params (Trainable)
+        # Yes, this depends on rank. params = (in + out) * rank. 
+        # Rank 8 will have roughly double the params of Rank 4.
+        print(f"[NOISER]   LORA Effective Params: {lora_dof_params:,} ({get_pct(lora_dof_params)}) [Trainable] (rank={config.lora_rank})")
+        
+        # 3. Full Trainable Params (Mapped as 0 in es_map)
+        # These are parameters NOT targeted by LoRA (e.g. Embeddings, LayerNorm, Output Head)
+        label_full = "[Frozen]" if freeze_nonlora else "[Trainable]"
+        print(f"[NOISER]   Full Mapped Params:    {trainable_full_params:,} ({get_pct(trainable_full_params)}) {label_full}")
+        print(f"[NOISER]       (Includes Embeddings, LayerNorms, Biases, etc. not covered by LoRA)")
+
+        # 4. Total Effective Trainable
+        print(f"[NOISER]   ------------------------------------------------------------")
+        print(f"[NOISER]   Total Effective Trainable: {trainable_params:,} ({get_pct(trainable_params)})")
+        if freeze_nonlora:
+             print(f"[NOISER]       (Only LoRA params are trained. All others are frozen.)")
+        else:
+             print(f"[NOISER]       (Full Fine-Tuning: LoRA + Base Non-LoRA params are trained.)")
 
     def _init_jaxlob(self):
         """Initialize JaxLOB order book simulator.
