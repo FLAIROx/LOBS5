@@ -769,18 +769,33 @@ def load_checkpoint_for_es(
     es_params, config = convert_and_load_checkpoint(checkpoint_path, return_config=True)
 
     # Create es_map:
+    # - 'embedding' and 'decoder' -> EXCLUDED (3) (Match Juan's implementation)
     # - 2D arrays (weights) -> MM_PARAM (1) for LoRA updates
     # - 1D arrays (biases/norms) -> PARAM (0) for standard updates (or frozen if freeze_nonlora)
-    from ..models.common import MM_PARAM
+    from ..models.common import MM_PARAM, EXCLUDED
 
     def create_es_map(params_tree):
-        """Create es_map tree: MM_PARAM for 2D weights, PARAM for others."""
+        """Create es_map tree: EXCLUDED for emb/decoder, MM_PARAM for 2D weights, PARAM for others."""
         if isinstance(params_tree, dict):
-            return {k: create_es_map(v) for k, v in params_tree.items()}
+            new_map = {}
+            for k, v in params_tree.items():
+                if k in ['embedding', 'decoder']:
+                    # Recursively mark everything under embedding/decoder as EXCLUDED
+                    new_map[k] = create_es_map_excluded(v)
+                else:
+                    new_map[k] = create_es_map(v)
+            return new_map
         elif hasattr(params_tree, 'ndim') and params_tree.ndim == 2:
             return MM_PARAM  # Enable LoRA for 2D weights
         else:
             return PARAM     # Standard parameter (frozen if freeze_nonlora=True)
+
+    def create_es_map_excluded(params_tree):
+        """Recursively mark tree as EXCLUDED."""
+        if isinstance(params_tree, dict):
+            return {k: create_es_map_excluded(v) for k, v in params_tree.items()}
+        else:
+            return EXCLUDED
 
     es_map = create_es_map(es_params)
 
