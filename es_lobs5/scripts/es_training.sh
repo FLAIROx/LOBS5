@@ -199,7 +199,9 @@ python es_lobs5/scripts/es_training.py \
     --checkpoint_dir "${CHECKPOINT_DIR}" \
     --wandb_project "${WANDB_PROJECT}" \
     --wandb_entity "${WANDB_ENTITY}" \
-    ${FILE_IDX_ARG}
+    --freeze_nonlora False \
+    ${FILE_IDX_ARG} \
+    "$@"
 
 EXIT_CODE=$?
 
