@@ -958,15 +958,21 @@ class ESTrainer:
         print(f"[NOISER]   Base model (Physical): {total_base_params:,} (100%)")
         
         # 2. LoRA Params (Trainable)
-        # Yes, this depends on rank. params = (in + out) * rank. 
-        # Rank 8 will have roughly double the params of Rank 4.
         print(f"[NOISER]   LORA Effective Params: {lora_dof_params:,} ({get_pct(lora_dof_params)}) [Trainable] (rank={config.lora_rank})")
+        print(f"[NOISER]       (Rank Scaling: Params scale linearly with rank P ~ (d_in + d_out) * r)")
+        print(f"[NOISER]       (e.g., Rank {config.lora_rank * 2} would have approx {lora_dof_params * 2:,} params)")
         
         # 3. Full Trainable Params (Mapped as 0 in es_map)
         # These are parameters NOT targeted by LoRA (e.g. Embeddings, LayerNorm, Output Head)
-        label_full = "[Frozen]" if freeze_nonlora else "[Trainable]"
+        if freeze_nonlora:
+            label_full = "[Frozen]"
+            desc_full = "(Includes Embeddings, LayerNorms, Biases, etc. frozen during LoRA training)"
+        else:
+            label_full = "[Trainable]"
+            desc_full = "(Includes Embeddings, LayerNorms, Biases, etc. trainable in Full FT)"
+
         print(f"[NOISER]   Full Mapped Params:    {trainable_full_params:,} ({get_pct(trainable_full_params)}) {label_full}")
-        print(f"[NOISER]       (Includes Embeddings, LayerNorms, Biases, etc. not covered by LoRA)")
+        print(f"[NOISER]       {desc_full}")
 
         # 4. Total Effective Trainable
         print(f"[NOISER]   ------------------------------------------------------------")
@@ -974,7 +980,7 @@ class ESTrainer:
         if freeze_nonlora:
              print(f"[NOISER]       (Only LoRA params are trained. All others are frozen.)")
         else:
-             print(f"[NOISER]       (Full Fine-Tuning: LoRA + Base Non-LoRA params are trained.)")
+             print(f"[NOISER]       (Full Fine-Tuning: LoRA (if any) + Base Non-LoRA params are trained.)")
 
     def _init_jaxlob(self):
         """Initialize JaxLOB order book simulator.
