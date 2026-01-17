@@ -2031,15 +2031,17 @@ class ESTrainer:
             self.lobs5_init.es_map,
         )
 
-        # Extract updated params back to single device for storage
+        # Extract updated params back to single LOCAL device for storage
+        # CRITICAL: Must use jax.local_devices()[0] in multi-node to avoid cross-host issues
         if n_devices > 1 and hasattr(self, '_mesh'):
-            # Get first shard from replicated params
+            # In multi-node mode: place on LOCAL device 0, not global device 0
+            local_device = jax.local_devices()[0]
             self.noiser_params = jax.tree.map(
-                lambda x: jax.device_put(x, jax.devices()[0]),
+                lambda x: jax.device_put(x, local_device),
                 noiser_params_updated
             )
             self.lobs5_init.params = jax.tree.map(
-                lambda x: jax.device_put(x, jax.devices()[0]),
+                lambda x: jax.device_put(x, local_device),
                 updated_params
             )
         else:
