@@ -26,6 +26,34 @@ gymanx_exchange env path: https://github.com/KangOxford/JaxMARL-HFT
 """
 
 # =============================================================================
+# S5 SSM Parameter Training Strategy
+# =============================================================================
+#
+# Default Behavior (freeze_nonlora=False):
+# ┌──────────────┬───────────┬───────────────┬───────────────────────────────┐
+# │  Parameter   │  Status   │ Training Mode │             Notes             │
+# ├──────────────┼───────────┼───────────────┼───────────────────────────────┤
+# │ Lambda_re/im │ Frozen    │ -             │ Always frozen (for stability) │
+# │ embedding    │ Frozen    │ -             │ Always frozen                 │
+# │ decoder      │ Frozen    │ -             │ Always frozen                 │
+# ├──────────────┼───────────┼───────────────┼───────────────────────────────┤
+# │ log_step     │ Trainable │ FULL          │ Time scale adaptation         │
+# │ B, C         │ Trainable │ FULL          │ Input/output projection       │
+# │ D            │ Trainable │ FULL          │ Skip/direct channel           │
+# │ norm, bias   │ Trainable │ FULL          │ Normalization layers          │
+# ├──────────────┼───────────┼───────────────┼───────────────────────────────┤
+# │ out2/weight  │ Trainable │ LoRA          │ GLU output layer              │
+# └──────────────┴───────────┴───────────────┴───────────────────────────────┘
+#
+# Summary:
+# - Frozen: Core stability components (Lambda eigenvalues, embedding, decoder)
+# - FULL training: SSM dynamics (B, C, D, log_step) and normalization layers
+# - LoRA training: Only the GLU output layer uses Low-Rank Adaptation
+#
+# To use conservative mode (LoRA-only): --freeze_nonlora True
+# =============================================================================
+
+# =============================================================================
 # PERGPU_PERTURBATIONS Scaling Test Results (2026-01-17):
 # ------------------------------------------------------
 # Max Stable:  14,336 (Total 57,344) - Job 1921017 - RUNNING
