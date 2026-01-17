@@ -768,13 +768,19 @@ def load_checkpoint_for_es(
     # Load and convert
     es_params, config = convert_and_load_checkpoint(checkpoint_path, return_config=True)
 
-    # Create es_map (mark all params as PARAM by default)
+    # Create es_map:
+    # - 2D arrays (weights) -> MM_PARAM (1) for LoRA updates
+    # - 1D arrays (biases/norms) -> PARAM (0) for standard updates (or frozen if freeze_nonlora)
+    from ..models.common import MM_PARAM
+
     def create_es_map(params_tree):
-        """Create es_map tree with same structure as params, all marked as PARAM."""
+        """Create es_map tree: MM_PARAM for 2D weights, PARAM for others."""
         if isinstance(params_tree, dict):
             return {k: create_es_map(v) for k, v in params_tree.items()}
+        elif hasattr(params_tree, 'ndim') and params_tree.ndim == 2:
+            return MM_PARAM  # Enable LoRA for 2D weights
         else:
-            return PARAM  # All trainable parameters
+            return PARAM     # Standard parameter (frozen if freeze_nonlora=True)
 
     es_map = create_es_map(es_params)
 
