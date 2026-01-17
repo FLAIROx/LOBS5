@@ -280,8 +280,10 @@ def create_es_config():
                         help='Freeze non-LORA params (embeddings, base model). Default: True')
 
     # Training configuration
-    parser.add_argument('--n_perturbations', type=int, default=128,
-                        help='Population size (number of ES perturbations, must be divisible by n_devices)')
+    parser.add_argument('--pergpu_perturbations', type=int, default=32,
+                        help='Perturbations per GPU (Total = pergpu * n_devices)')
+    parser.add_argument('--n_perturbations', type=int, default=None,
+                        help='[DEPRECATED] Total population size. If set, overrides pergpu_perturbations.')
     # Legacy alias alias
     parser.add_argument('--n_threads', type=int, default=None,
                         help='[DEPRECATED] Use --n_perturbations instead')
@@ -615,14 +617,30 @@ class ESTrainer:
             self._process_index = 0
             self._process_count = 1
 
-        # Legacy alias: n_threads -> n_perturbations
+        # Handle perturbations configuration
+        # Priority: n_perturbations (explicit) > pergpu_perturbations (auto)
+        
+        # 1. Check deprecated n_threads
         if hasattr(config, 'n_threads') and getattr(config, 'n_threads', None) is not None:
-            if not hasattr(config, 'n_perturbations') or getattr(config, 'n_perturbations', 128) == 128:
-                print("[WARN] --n_threads is deprecated, use --n_perturbations instead")
-                config.n_perturbations = config.n_threads
-        # Ensure n_perturbations exists
-        if not hasattr(config, 'n_perturbations'):
-            config.n_perturbations = getattr(config, 'n_threads', 128)
+            print("[WARN] --n_threads is deprecated, use --pergpu_perturbations instead")
+            if getattr(config, 'n_perturbations', None) is None:
+                 config.n_perturbations = config.n_threads
+
+        # 2. Calculate effective n_perturbations
+        total_devices = jax.device_count()
+        
+        if getattr(config, 'n_perturbations', None) is not None:
+            # User explicitly set total count
+            pass
+        else:
+            # Auto-calculate from per-gpu
+            per_gpu = getattr(config, 'pergpu_perturbations', 32)
+            config.n_perturbations = per_gpu * total_devices
+            print(f"[INIT] Auto-calculated n_perturbations: {config.n_perturbations} ({per_gpu} per GPU * {total_devices} devices)")
+
+        # Validate divisibility
+        if config.n_perturbations % total_devices != 0:
+            print(f"[WARN] n_perturbations ({config.n_perturbations}) is not divisible by n_devices ({total_devices})")
 
         # Legacy alias: world_msgs_per_step -> background_msgs_per_step
         if hasattr(config, 'world_msgs_per_step') and getattr(config, 'world_msgs_per_step', None) is not None:

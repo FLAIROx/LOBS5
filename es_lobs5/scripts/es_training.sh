@@ -93,7 +93,9 @@ DATA_DIR="${DATA_DIR:-/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_prepr
 
 # Training scale
 N_EPOCHS="${N_EPOCHS:-1000}"
-N_PERTURBATIONS="${N_PERTURBATIONS:-128}"
+PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-32}"
+# N_PERTURBATIONS is deprecated but kept for backward compatibility if set explicitly
+N_PERTURBATIONS="${N_PERTURBATIONS:-}" 
 N_STEPS="${N_STEPS:-100}"
 N_WARMUP="${N_WARMUP:-500}"
 BG_MSGS="${BG_MSGS:-10}"
@@ -126,7 +128,11 @@ echo "Configuration:"
 echo "  CHECKPOINT: ${CHECKPOINT}"
 echo "  DATA_DIR: ${DATA_DIR}"
 echo "  N_EPOCHS: ${N_EPOCHS}"
-echo "  N_PERTURBATIONS: ${N_PERTURBATIONS}"
+if [ -n "${N_PERTURBATIONS}" ]; then
+    echo "  N_PERTURBATIONS: ${N_PERTURBATIONS} (explicitly set)"
+else
+    echo "  PERGPU_PERTURBATIONS: ${PERGPU_PERTURBATIONS}"
+fi
 echo "  N_STEPS: ${N_STEPS}"
 echo "  SIGMA: ${SIGMA}, LR: ${LR}, LORA_RANK: ${LORA_RANK}"
 echo "  NOISER: ${NOISER}"
@@ -146,11 +152,18 @@ else
     FILE_IDX_ARG=""
 fi
 
+# Determine perturbation argument
+if [ -n "${N_PERTURBATIONS}" ]; then
+    PERTURBATION_ARG="--n_perturbations ${N_PERTURBATIONS}"
+else
+    PERTURBATION_ARG="--pergpu_perturbations ${PERGPU_PERTURBATIONS}"
+fi
+
 python es_lobs5/scripts/es_training.py \
     --lobs5_checkpoint "${CHECKPOINT}" \
     --replay_data_path "${DATA_DIR}" \
     --n_epochs ${N_EPOCHS} \
-    --n_perturbations ${N_PERTURBATIONS} \
+    ${PERTURBATION_ARG} \
     --n_steps ${N_STEPS} \
     --n_warmup_msgs ${N_WARMUP} \
     --background_msgs_per_step ${BG_MSGS} \

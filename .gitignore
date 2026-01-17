@@ -245,3 +245,12 @@ xvla_detailed_timing.py
 xvla_params_only.py
 xvla_timing_benchmark.py
 xvla_timing.slurm
+logs/**
+exclude_files.commit
+logs_lobmax/proposal.MoE.isambardupdate
+logs_lobmax/proposal.MoE.isambard
+**.tar.gz
+logs_lobmax/** 
+tensorboard_logs/** 
+**.gz
+.gitignore

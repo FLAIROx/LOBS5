@@ -53,7 +53,7 @@ def _init_distributed_if_needed():
         import jax
         # Get proc_id from command line or SLURM environment variable
         proc_id = args.proc_id
-        if proc_id is None:
+        if proc_id is None or proc_id < 0:
             # Use SLURM_PROCID for global process ID (0 to ntasks-1)
             # With ntasks-per-node=4, this gives unique ID per GPU across all nodes
             proc_id = int(os.environ.get('SLURM_PROCID', 0))
