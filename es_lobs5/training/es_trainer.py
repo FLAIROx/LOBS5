@@ -1501,7 +1501,7 @@ class ESTrainer:
         def step_fn(carry, step_idx):
             """Single step: Background messages -> Policy action."""
             (key, msg_history, hiddens_world, hiddens_policy,
-             sim_state, book_feat, world_oid_offset, quant_executed) = carry
+             sim_state, book_feat, world_oid_offset, quant_executed, accum_revenue) = carry
 
             key, key_world, key_policy = jax.random.split(key, 3)
 
@@ -1704,6 +1704,12 @@ class ESTrainer:
             truncated_qty = jnp.minimum(original_qty, jnp.maximum(quant_remaining, 0))
             sim_msg = sim_msg.at[2].set(truncated_qty)
 
+            # =================================================================
+            # FIX: Clear trades buffer before processing to prevent
+            # quadratic accumulation of trades across steps.
+            # =================================================================
+            sim_state = sim_state._replace(trades=jnp.ones_like(sim_state.trades) * -1)
+
             # Process order
             sim_state = process_order_array(sim_state, sim_msg)
 
@@ -1714,13 +1720,19 @@ class ESTrainer:
             step_executed = jnp.sum(jnp.where(is_policy_in_trade, jnp.abs(trades[:, 1]), 0))
             quant_executed = quant_executed + step_executed
 
+            # Track revenue (accumulate Price * Qty)
+            step_revenue = jnp.sum(jnp.where(is_policy_in_trade, 
+                                            trades[:, 0] * jnp.abs(trades[:, 1]), 
+                                            0)).astype(jnp.float32)
+            accum_revenue = accum_revenue + step_revenue
+
             # Update state
             book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
 
             # Return policy_msg for order analysis (shape: (msg_len,))
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-                    book_feat, world_oid_offset, quant_executed), policy_msg
+                    book_feat, world_oid_offset, quant_executed, accum_revenue), policy_msg
 
         # Run episode
         # H2: Apply pvary to initial carry values when inside shard_map
@@ -1734,9 +1746,10 @@ class ESTrainer:
             maybe_pvary(book_feat),
             maybe_pvary(jnp.int32(0)),
             maybe_pvary(jnp.int32(0)),
+            maybe_pvary(jnp.float32(0)),
         )
         # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
-        (_, _, _, _, final_state, _, _, final_quant_executed), policy_msgs_all = jax.lax.scan(
+        (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue), policy_msgs_all = jax.lax.scan(
             step_fn,
             main_scan_init,
             jnp.arange(config.n_steps),
@@ -1800,38 +1813,28 @@ class ESTrainer:
             (final_state, quant_remaining)
         )
 
-        # Compute fitness (PnL)
+        # FIX: Combine Loop Metrics (final_quant_executed, final_revenue)
+        # with Liquidation Metrics (from final_state.trades).
         # =================================================================
-        # FIX: Use POLICY_TRADER_ID instead of Order ID range to match
-        # agent trades (consistent with gymnax_exchange pattern).
-        # trades[:, 6] = passive trader id, trades[:, 7] = aggressive trader id
-        # =================================================================
+        # Filter Liquidation Trades from final_state (which contains last step + liquidation)
+        liquidation_oid = POLICY_ORDER_ID_START + config.n_steps
         trades = final_state.trades
-        valid_trades_mask = trades[:, 0] != -1
-
-        # Filter by POLICY_TRADER_ID (column 6=passive_tid, 7=aggr_tid)
-        passive_tids = trades[:, 6]
-        aggr_tids = trades[:, 7]
-        is_policy_passive = (passive_tids == POLICY_TRADER_ID) & valid_trades_mask
-        is_policy_aggr = (aggr_tids == POLICY_TRADER_ID) & valid_trades_mask
-        is_policy_trade = is_policy_passive | is_policy_aggr
-
+        valid_trades = trades[:, 0] != -1
+        is_liquidation = ((trades[:, 2] == liquidation_oid) | (trades[:, 3] == liquidation_oid)) & valid_trades
+        
+        liquidation_quantity_filled = jnp.sum(jnp.where(is_liquidation, jnp.abs(trades[:, 1]), 0))
+        liquidation_revenue = jnp.sum(jnp.where(is_liquidation, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
+        
+        # Total metrics
+        agent_quantity = final_quant_executed + liquidation_quantity_filled
+        
         is_sell_task = (config.task == 'sell')
         if is_sell_task:
-            sell_revenue = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
-            sell_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
-            pnl_raw = sell_revenue - init_mid_price * sell_quantity
+            total_revenue = final_revenue + liquidation_revenue
+            pnl_raw = total_revenue - init_mid_price * agent_quantity
         else:
-            buy_cost = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
-            buy_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
-            pnl_raw = init_mid_price * buy_quantity - buy_cost
-
-        # =================================================================
-        # FIX: Use final_quant_executed as agent_quantity to avoid
-        # double-counting from trades table. The loop correctly tracks
-        # only incremental fills per step.
-        # =================================================================
-        agent_quantity = final_quant_executed
+            total_cost = final_revenue + liquidation_revenue # Revenu accum is always P*Q
+            pnl_raw = init_mid_price * agent_quantity - total_cost
 
         # Normalize PnL to -1 to 1 range using tanh
         # pnl_normalized = "number of ticks improvement for full task execution"
@@ -1840,8 +1843,8 @@ class ESTrainer:
         pnl_normalized = pnl_raw / jnp.maximum(normalization_scale, 1.0)
         pnl = jnp.tanh(pnl_normalized)  # squash to -1 to 1, 0 = executed at mid price
 
-        total_trades = jnp.sum(valid_trades_mask)
-        agent_trades = jnp.sum(is_policy_trade)
+        total_trades = jnp.sum(valid_trades)
+        agent_trades = -1 # Trades count lost due to buffer clearing, but quantity/pnl is exact
 
         # Calculate execution breakdown
         # model_quantity: executed by model orders during regular steps
