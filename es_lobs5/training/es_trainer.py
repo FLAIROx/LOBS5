@@ -830,15 +830,12 @@ class ESTrainer:
         n_classes = len(self.vocab)
 
         # Step 3: Get frozen params for model dimensions
-        print(f"[DEBUG-INIT] Step 3: Getting frozen params...")
         fp = self.lobs5_init.frozen_params
         msg_seq_len = fp.get('msg_seq_len', 500)
         book_depth = fp.get('book_depth', 500)
         book_dim = fp.get('d_book', 503)
-        print(f"[DEBUG-INIT]   Dimensions: msg_seq_len={msg_seq_len}, book_depth={book_depth}, book_dim={book_dim}")
 
         # Step 4: Initialize Flax train_state and model class (with random params)
-        print(f"[DEBUG-INIT] Step 4: Calling init_train_state (allocating params)...")
         self.flax_train_state, self.flax_model_cls, total_params = init_train_state(
             args,
             n_classes=n_classes,
@@ -847,15 +844,12 @@ class ESTrainer:
             book_seq_len=book_depth,
             train_size=1,  # dummy value for inference
         )
-        print(f"[DEBUG-INIT] Step 4 Completed. Model params: {total_params:,}")
         print(f"[INIT-FLAX] Model parameters: {total_params:,}")
 
         # Step 5: Load checkpoint params using OCDBT-compatible loader
-        print(f"[DEBUG-INIT] Step 5: Loading Flax checkpoint params (OCDBT)...")
         # (same loader already used successfully in checkpoint_adapter.py)
         from es_lobs5.adapters.checkpoint_adapter import load_flax_checkpoint
         loaded_params, _ = load_flax_checkpoint(config.lobs5_checkpoint)
-        print(f"[DEBUG-INIT] Step 5 Completed. Checkpoint loaded.")
         print(f"[INIT-FLAX] Loaded {len(jax.tree_util.tree_leaves(loaded_params))} param arrays from checkpoint")
 
         # Step 6: Replace random params with loaded checkpoint params
@@ -918,31 +912,47 @@ class ESTrainer:
             print(f"[NOISER] Full fine-tuning: freeze_nonlora=False, rank={config.lora_rank}")
             print(f"[NOISER] WARNING: ALL parameters will be updated (including embeddings)")
 
-        # Calculate actual trainable parameters from noiser_params (LORA)
-        # EGGROLL stores LORA adapters in noiser_params, not in es_map
-        # noiser_params structure: {param_path: {'u': (rank, in), 'v': (out, rank)}} for each matmul layer
+        # Calculate actual trainable parameters
+        # For EGGROLL LORA, we count equivalent parameters (Degrees of Freedom)
+        # map: 0=FULL, 1=LORA, 2=FIXED
         total_base_params = sum(x.size for x in jax.tree_util.tree_leaves(self.lobs5_init.params))
         
-        # Count LORA adapter parameters in noiser_params
-        lora_params = 0
-        def count_lora(x):
-            nonlocal lora_params
-            if hasattr(x, 'size'):
-                lora_params += x.size
-        jax.tree.map(count_lora, self.noiser_params)
+        lora_dof_params = 0
+        trainable_full_params = 0
         
-        # In LORA training: base model params are frozen, only adapter params are trainable
+        def count_dof(param, mapping):
+            nonlocal lora_dof_params, trainable_full_params
+            if mapping == 1: # LORA
+                if param.ndim == 2:
+                    # LORA DoF = (in + out) * rank
+                    lora_dof_params += (param.shape[0] + param.shape[1]) * config.lora_rank
+                else:
+                    # Fallback for non-2D LORA (treated as trainable?) 
+                    # Usually LORA only applies to 2D weights. If 1D, it might be bias.
+                    # Assume full training for 1D lora mapped? Or ignored?
+                    # EggRoll _simple_lora_update only handles 2D (A, B decomposition).
+                    # So 1D might be ignored or errored?
+                    # Let's verify EggRoll code handles shapes.
+                    # It assumes A, B split.
+                    pass
+            elif mapping == 0: # FULL
+                trainable_full_params += param.size
+
+        # Use es_map to distinguish LORA/FULL
+        jax.tree.map(count_dof, self.lobs5_init.params, self.lobs5_init.es_map)
+        
         if freeze_nonlora:
-            trainable_params = lora_params
+            trainable_params = lora_dof_params
             frozen_params = total_base_params
         else:
-            trainable_params = total_base_params + lora_params
+            trainable_params = trainable_full_params + lora_dof_params # Approx
             frozen_params = 0
 
-        print(f"[NOISER] Parameter breakdown:")
-        print(f"[NOISER]   Base model: {total_base_params:,} ({'frozen' if freeze_nonlora else 'trainable'})")
-        print(f"[NOISER]   LORA adapters: {lora_params:,} (trainable, rank={config.lora_rank})")
-        print(f"[NOISER]   Total trainable: {trainable_params:,}")
+        print(f"[NOISER] Parameter breakdown (Effective DoF):")
+        print(f"[NOISER]   Base model: {total_base_params:,} (Physical params)")
+        print(f"[NOISER]   LORA Effective Params: {lora_dof_params:,} (rank={config.lora_rank})")
+        print(f"[NOISER]   Full Trainable Params: {trainable_full_params:,}")
+        print(f"[NOISER]   Total Effective Trainable: {trainable_params:,}")
 
     def _init_jaxlob(self):
         """Initialize JaxLOB order book simulator.
@@ -1046,6 +1056,12 @@ class ESTrainer:
         encoded = encode_msgs(msg_raw, self.encoder, token_mode=self.config.token_mode)
         self.replay_tokens = jnp.array(encoded)  # (n_msgs, token_mode)
 
+        # H4: Store Ground Truth Book Data for plotting
+        # book_data shape: (n_msgs, 43? or 21?)
+        # Use simple jnp array for now
+        self.replay_book_data = jnp.array(book_data)
+
+
         # Extract date from dataset files for logging
         from glob import glob
         msg_files = sorted(glob(os.path.join(data_path, '*message*.npy')))
@@ -1059,6 +1075,7 @@ class ESTrainer:
 
         print(f"[INIT-REPLAY] File {file_idx}: date={self.replay_data_date}")
         print(f"[INIT-REPLAY] Raw msgs shape: {msg_raw.shape}, Tokens shape: {msg_tokens.shape}")
+        print(f"[INIT-REPLAY] Replay Book Data shape: {self.replay_book_data.shape}")
         print(f"[INIT-REPLAY] Init book L2 shape: {book_l2_init.shape}")
 
     def _shard_to_mesh(self, x):
@@ -1386,6 +1403,10 @@ class ESTrainer:
         encoder = self.encoder
         replay_tokens = self.replay_tokens
         replay_data_raw = self.replay_data_raw
+        if self.config.background_mode == 'historical_replay':
+            replay_book_data = self.replay_book_data
+        else:
+            replay_book_data = None
         n_replay_msgs = replay_tokens.shape[0] if replay_tokens is not None else 0
 
         # ========================================================================
@@ -1973,6 +1994,26 @@ class ESTrainer:
             'ask_trace': ask_trace,
         }
 
+        # H4: Add Ground Truth Trace for "Whole Data Window" Plot
+        # We assume standard LOBSTER format: Ask P1 (0), Ask S1 (1), Bid P1 (2), Bid S1 (3)
+        # We need to slice replay_book_data for the duration of this episode
+        # Duration = n_warmup + n_steps * bg_msgs
+        if replay_book_data is not None:
+             n_warmup = getattr(config, 'n_warmup_msgs', 500)
+             n_bg = getattr(config, 'background_msgs_per_step', 10)
+             total_msgs = n_warmup + config.n_steps * n_bg
+             
+             # Extract GT trace (Best Ask, Best Bid)
+             # replay_book_data is (N, 40+)
+             # Columns 0 (Ask Price 1) and 2 (Bid Price 1)
+             gt_trace_full = replay_book_data[:total_msgs, [0, 2]]
+             info['gt_bid_trace'] = gt_trace_full[:, 1] # Bid P1
+             info['gt_ask_trace'] = gt_trace_full[:, 0] # Ask P1
+        else:
+             # Placeholder for World Model mode
+             info['gt_bid_trace'] = jnp.zeros((1,), dtype=jnp.int32)
+             info['gt_ask_trace'] = jnp.zeros((1,), dtype=jnp.int32)
+
         return fitness, info
 
     def eval_single_thread(
@@ -2165,17 +2206,23 @@ class ESTrainer:
         # Note: infos['bid_trace'] shape is (n_perturbations, n_steps)
         example_bid_trace = infos['bid_trace'][0]
         example_ask_trace = infos['ask_trace'][0]
+        
+        # Ground Truth Traces (High Res)
+        example_gt_bid_trace = infos['gt_bid_trace'][0]
+        example_gt_ask_trace = infos['gt_ask_trace'][0]
 
         # Filter out heavy/non-scalar items before averaging
         infos_for_mean = {
             k: v for k, v in infos.items() 
-            if k not in ['bid_trace', 'ask_trace', 'policy_msgs']
+            if k not in ['bid_trace', 'ask_trace', 'policy_msgs', 'gt_bid_trace', 'gt_ask_trace']
         }
         aggregated_info = {k: jnp.mean(v) for k, v in infos_for_mean.items()}
 
         # Add example traces back to aggregated info
         aggregated_info['example_bid_trace'] = example_bid_trace
         aggregated_info['example_ask_trace'] = example_ask_trace
+        aggregated_info['example_gt_bid_trace'] = example_gt_bid_trace
+        aggregated_info['example_gt_ask_trace'] = example_gt_ask_trace
 
         return jnp.mean(fitnesses), fitnesses, aggregated_info
 
@@ -2310,27 +2357,46 @@ class ESTrainer:
                 unfill_rate = unfilled_qty / task_size               # Unfilled rate (book depth insufficient)
 
                 # Generate Best Bid/Ask Price Plot
-                if 'example_bid_trace' in epoch_info and 'example_ask_trace' in epoch_info:
+                if 'example_gt_bid_trace' in epoch_info and 'example_gt_ask_trace' in epoch_info:
                     try:
                         import matplotlib.pyplot as plt
                         
-                        bid_trace = epoch_info['example_bid_trace']
-                        ask_trace = epoch_info['example_ask_trace']
-                        steps = list(range(len(bid_trace)))
+                        # Ground Truth (High Res)
+                        gt_bid = epoch_info['example_gt_bid_trace']
+                        gt_ask = epoch_info['example_gt_ask_trace']
+                        gt_steps = list(range(len(gt_bid)))
                         
+                        # Simulation (Low Res - Step-wise)
+                        sim_bid = epoch_info.get('example_bid_trace', None)
+                        sim_ask = epoch_info.get('example_ask_trace', None)
+                        sim_steps = []
+                        if sim_bid is not None:
+                            # Align simulation steps to message time
+                            # Sim step i corresponds to time = n_warmup + i * bg_msgs
+                            n_warmup = getattr(self.config, 'n_warmup_msgs', 500)
+                            bg_msgs = getattr(self.config, 'background_msgs_per_step', 10)
+                            sim_steps = [n_warmup + i * bg_msgs for i in range(len(sim_bid))]
+
                         # Create static plot
-                        fig, ax = plt.subplots(figsize=(10, 6))
-                        ax.plot(steps, bid_trace, label='Best Bid', color='green', alpha=0.7)
-                        ax.plot(steps, ask_trace, label='Best Ask', color='red', alpha=0.7)
+                        fig, ax = plt.subplots(figsize=(12, 6))
                         
-                        ax.set_title(f"Best Bid/Ask Price Over Time (Epoch {epoch})")
-                        ax.set_xlabel("Step")
+                        # Plot GT (Solid lines, slightly transparent)
+                        ax.plot(gt_steps, gt_bid, label='Market Bid (Data)', color='green', alpha=0.5, linewidth=1.0)
+                        ax.plot(gt_steps, gt_ask, label='Market Ask (Data)', color='red', alpha=0.5, linewidth=1.0)
+                        
+                        # Plot Sim (Points or Dashed lines, more visible)
+                        if sim_bid is not None:
+                             ax.plot(sim_steps, sim_bid, label='Agent View Bid', color='darkgreen', linestyle='--', marker='o', markersize=3, alpha=0.8)
+                             ax.plot(sim_steps, sim_ask, label='Agent View Ask', color='darkred', linestyle='--', marker='o', markersize=3, alpha=0.8)
+                        
+                        ax.set_title(f"Best Bid/Ask: Market Data vs Agent View (Epoch {epoch})")
+                        ax.set_xlabel("Message Index (Time)")
                         ax.set_ylabel("Price")
                         ax.legend()
                         ax.grid(True, alpha=0.3)
                         
                         # Log to WandB
-                        wandb_run.log({"price_trace": wandb.Image(fig)}, commit=False)
+                        wandb_run.log({"price_trace_full": wandb.Image(fig)}, commit=False)
                         plt.close(fig)
                     except Exception as e:
                         print(f"[WARN] Failed to generate price plot: {e}")
