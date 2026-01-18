@@ -768,12 +768,12 @@ class ESTrainer:
 
         # Legacy alias: world_msgs_per_step -> background_msgs_per_step
         if hasattr(config, 'world_msgs_per_step') and getattr(config, 'world_msgs_per_step', None) is not None:
-            if not hasattr(config, 'background_msgs_per_step') or getattr(config, 'background_msgs_per_step', 10) == 10:
+            if not hasattr(config, 'background_msgs_per_step') or getattr(config, 'background_msgs_per_step', 50) == 10:
                 print("[WARN] --world_msgs_per_step is deprecated, use --background_msgs_per_step instead")
                 config.background_msgs_per_step = config.world_msgs_per_step
         # Ensure background_msgs_per_step exists
         if not hasattr(config, 'background_msgs_per_step'):
-            config.background_msgs_per_step = getattr(config, 'world_msgs_per_step', 10)
+            config.background_msgs_per_step = getattr(config, 'world_msgs_per_step', 50)
 
         _lazy_import_jaxlob()
 
@@ -987,7 +987,7 @@ class ESTrainer:
         # ========================================================================
         # [MODIFIED] Full Mode Handler (Disable LoRA)
         # ========================================================================
-        use_lora = getattr(config, 'use_lora', True)
+        use_lora = getattr(config, 'use_lora', False)
         if not use_lora:
             print(f"[NOISER] use_lora=False DETECTED: Switching to FULL FINE-TUNING mode")
             
@@ -1053,7 +1053,7 @@ class ESTrainer:
         from dataclasses import replace
 
         # Calculate required capacity
-        n_warmup = getattr(self.config, 'n_warmup_msgs', 500)
+        n_warmup = getattr(self.config, 'n_warmup_msgs', 10)
         expected_orders = n_warmup + self.config.n_steps * (self.config.background_msgs_per_step + 1)
         n_orders = max(1000, int(expected_orders * 1.5))
         n_trades = max(500, self.config.n_steps * 2)
@@ -1098,7 +1098,7 @@ class ESTrainer:
 
         # Use inference.get_dataset() - SAME code path as run_inference.py
         # This ensures consistent token_mode handling
-        n_warmup = getattr(self.config, 'n_warmup_msgs', 500)
+        n_warmup = getattr(self.config, 'n_warmup_msgs', 10)
         n_sim = getattr(self.config, 'n_sim_steps', 1000)
 
         self.replay_dataset = inference.get_dataset(
@@ -1217,7 +1217,7 @@ class ESTrainer:
         print(f"[INIT-STATE] Initialized JaxLOB with L2 book shape: {self.init_book_l2.shape}")
 
         # 2. Warmup: replay messages to initialize order book state
-        n_warmup = getattr(config, 'n_warmup_msgs', 500)
+        n_warmup = getattr(config, 'n_warmup_msgs', 10)
         n_replay = min(n_warmup, len(self.replay_data_raw))
 
         if n_replay > 0:
@@ -1775,7 +1775,7 @@ class ESTrainer:
                 return (key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr), world_msg
 
             # Select background generation function
-            n_warmup_cfg = getattr(config, 'n_warmup_msgs', 500)
+            n_warmup_cfg = getattr(config, 'n_warmup_msgs', 10)
             if config.background_mode == 'historical_replay':
                 step_fn_background = historical_replay_step
                 replay_ptr_init = jnp.int32(n_warmup_cfg + step_idx * config.background_msgs_per_step)
@@ -2102,7 +2102,7 @@ class ESTrainer:
         # We need to slice replay_book_data for the duration of this episode
         # Duration = n_warmup + n_steps * bg_msgs
         if replay_book_data is not None:
-             n_warmup = getattr(config, 'n_warmup_msgs', 500)
+             n_warmup = getattr(config, 'n_warmup_msgs', 10)
              n_bg = getattr(config, 'background_msgs_per_step', 10)
              total_msgs = n_warmup + config.n_steps * n_bg
              
