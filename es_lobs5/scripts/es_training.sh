@@ -200,6 +200,7 @@ python es_lobs5/scripts/es_training.py \
     --wandb_project "${WANDB_PROJECT}" \
     --wandb_entity "${WANDB_ENTITY}" \
     --freeze_nonlora False \
+    --use_lora "${USE_LORA:-False}" \
     ${FILE_IDX_ARG} \
     "$@"
 

@@ -984,8 +984,41 @@ class ESTrainer:
         # Note: Lambda eigenvalues are ALWAYS frozen for stability (hardcoded in checkpoint_adapter.py)
         freeze_nonlora = getattr(config, 'freeze_nonlora', False)  # Default: train SSM params
 
+        # ========================================================================
+        # [MODIFIED] Full Mode Handler (Disable LoRA)
+        # ========================================================================
+        use_lora = getattr(config, 'use_lora', True)
+        if not use_lora:
+            print(f"[NOISER] use_lora=False DETECTED: Switching to FULL FINE-TUNING mode")
+            
+            # 1. Remap all MM_PARAM (1) to PARAM (0) in es_map
+            # This treats 2D weights as full parameters instead of LoRA candidates
+            # es_map uses: 0=PARAM (full), 1=MM_PARAM (lora), 3=EXCLUDED
+            from ..models.common import PARAM, MM_PARAM
+            
+            def remap_to_full(map_tree):
+                if isinstance(map_tree, dict):
+                    return {k: remap_to_full(v) for k, v in map_tree.items()}
+                else:
+                    # If it's a leaf value and it's MM_PARAM, switch to PARAM
+                    # Leave EXCLUDED (3) and FIXED (2) alone
+                    if map_tree == MM_PARAM:
+                        return PARAM
+                    return map_tree
+            
+            self.lobs5_init.es_map = remap_to_full(self.lobs5_init.es_map)
+            print(f"[NOISER]   > All LoRA parameters (MM_PARAM) remapped to FULL (PARAM)")
+            
+            # 2. Force freeze_nonlora=False
+            # Full mode implies training everything (except EXCLUDED stability params)
+            if freeze_nonlora:
+                print(f"[NOISER]   > Overriding freeze_nonlora=True -> False (required for clean full mode)")
+                freeze_nonlora = False
+                config.freeze_nonlora = False
+
         self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
             self.lobs5_init.params,
+            self.lobs5_init.es_map,
             sigma=config.sigma,
             lr=config.lr,
             rank=config.lora_rank,
@@ -996,11 +1029,14 @@ class ESTrainer:
         )
 
         # Log training mode
-        if freeze_nonlora:
+        if not use_lora:
+            print(f"[NOISER] Full fine-tuning (LoRA Disabled): use_lora=False")
+            print(f"[NOISER] All valid parameters will be updated directly")
+        elif freeze_nonlora:
             print(f"[NOISER] LORA-only training: freeze_nonlora=True, rank={config.lora_rank}")
             print(f"[NOISER] Only LORA parameters will be updated (embeddings & base model frozen)")
         else:
-            print(f"[NOISER] Full fine-tuning: freeze_nonlora=False, rank={config.lora_rank}")
+            print(f"[NOISER] Hybrid training: LoRA + SSM fine-tuning (freeze_nonlora=False), rank={config.lora_rank}")
             print(f"[NOISER] WARNING: ALL parameters will be updated (including embeddings)")
 
         # Detailed Parameter Logging
