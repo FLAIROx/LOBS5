@@ -1764,7 +1764,7 @@ class ESTrainer:
         def step_fn(carry, step_idx):
             """Single step: Background messages -> Policy action."""
             (key, msg_history, hiddens_world, hiddens_policy,
-             sim_state, book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades) = carry
+             sim_state, book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_submitted) = carry
 
             key, key_world, key_policy = jax.random.split(key, 3)
 
