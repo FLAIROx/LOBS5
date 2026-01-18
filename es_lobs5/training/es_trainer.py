@@ -412,10 +412,10 @@ def create_es_config():
     parser.add_argument('--n_threads', type=int, default=None,
                         help='[DEPRECATED] Use --n_perturbations instead')
     parser.add_argument('--n_epochs', type=int, default=1000, help='Training epochs')
-    parser.add_argument('--n_steps', type=int, default=100, help='Steps per episode')
-    parser.add_argument('--n_warmup_msgs', type=int, default=500,
+    parser.add_argument('--n_steps', type=int, default=10, help='Steps per episode')
+    parser.add_argument('--n_warmup_msgs', type=int, default=10,
                         help='Number of warmup messages to replay before episode starts (0 = no warmup)')
-    parser.add_argument('--background_msgs_per_step', type=int, default=100,
+    parser.add_argument('--background_msgs_per_step', type=int, default=50,
                         help='Background messages per step (applies to both world_model and historical_replay)')
     # Legacy alias alias
     parser.add_argument('--world_msgs_per_step', type=int, default=None,
