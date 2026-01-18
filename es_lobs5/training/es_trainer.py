@@ -2450,6 +2450,8 @@ class ESTrainer:
         print("="*60)
         print("[CONFIG] Metric Definitions:")
         print(" [Normal Orders] : model_quantity       (Executed by model orders during regular steps)")
+        print("                 : submitted_quantity   (Total Quantity Submitted by Model)")
+        print("                 : execution_prob       (Executed / Submitted)")
         print(" [Market Orders] : liquidation_quantity (Executed by force_market_order at end)")
         print(" [Doom Orders]   : doom_quantity        (Unfilled quantity, subject to penalty)")
         print(" [Fill Rates]    : quantity / task_size")
