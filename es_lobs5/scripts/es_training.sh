@@ -139,7 +139,7 @@ WANDB_ENTITY="${WANDB_ENTITY:-kang-oxford}"
 
 # Checkpointing
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-100}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/es_runs/${SLURM_JOB_ID}}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/es_runs/${SLURM_JOB_ID}}"
 
 # Random seed
 SEED="${SEED:-2026}"
