@@ -131,7 +131,8 @@ TASK_SIZE="${TASK_SIZE:-50}"
 TICK_SIZE="${TICK_SIZE:-100}"
 
 # Data window control (empty = random, number = fixed)
-FILE_IDX="${FILE_IDX:-}"
+FILE_IDX="${FILE_IDX:-8}"
+# FILE_IDX="${FILE_IDX:-}"  # Use this for random file selection
 
 # Wandb
 WANDB_PROJECT="${WANDB_PROJECT:-es-lobs5}"
@@ -182,7 +183,7 @@ printf "│ Paths      │ CHECKPOINT                        │ %-78s │\n" "$
 printf "│            │ DATA_DIR                          │ %-78s │\n" "${DATA_DIR}"
 printf "│            │ CHECKPOINT_DIR                    │ %-78s │\n" "${CHECKPOINT_DIR}"
 echo "├────────────┼───────────────────────────────────┼────────────────┬─────────────────────────────────────────────────────────────┤"
-printf "│            │ FILE_IDX                          │ %-14s │ %-59s │\n" "${FILE_IDX:-random}" "Data file index (random = random selection)"
+printf "│            │ FILE_IDX                          │ %-14s │ %-59s │\n" "${FILE_IDX}" "Data file index (empty = random, number = fixed)"
 echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
 printf "│ Logging    │ WANDB_PROJECT                     │ %-14s │ %-59s │\n" "${WANDB_PROJECT}" "Weights & Biases project name"
 printf "│            │ WANDB_ENTITY                      │ %-14s │ %-59s │\n" "${WANDB_ENTITY}" "Weights & Biases entity/username"
