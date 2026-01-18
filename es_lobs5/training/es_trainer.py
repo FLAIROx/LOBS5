@@ -1025,28 +1025,28 @@ class ESTrainer:
         # ========================================================================
         lora_v2 = getattr(config, 'lora_v2', False)
         if lora_v2 and use_lora:
-            print(f"\n[NOISER] ╔══════════════════════════════════════════════════════════════════════════════╗")
-            print(f"[NOISER] ║                           LORA v2 MODE ENABLED                               ║")
-            print(f"[NOISER] ║  Based on ICLR 2025: LoRA effective on projections, not on SSM modules       ║")
-            print(f"[NOISER] ╚══════════════════════════════════════════════════════════════════════════════╝")
+            print(f"\n[NOISER] ╔══════════════════════════════════════════════════════════════════════════════════════════╗")
+            print(f"[NOISER] ║                                  LORA v2 MODE ENABLED                                     ║")
+            print(f"[NOISER] ╠══════════════════════════════════════════════════════════════════════════════════════════╣")
+            print(f"[NOISER] ║  Reference: 'Parameter-Efficient Fine-Tuning of State Space Models'                      ║")
+            print(f"[NOISER] ║             ICLR 2025 | arXiv:2410.09016                                                  ║")
+            print(f"[NOISER] ║  Finding:   LoRA effective on projection matrices, fails on SSM modules (B, C, Δ)        ║")
+            print(f"[NOISER] ╚══════════════════════════════════════════════════════════════════════════════════════════╝")
 
             from ..models.common import PARAM, MM_PARAM, LORA_V2_PATTERNS
 
             # Print the LORA v2 scope table
             print(f"[NOISER]")
-            print(f"[NOISER] ┌───────────────────┬─────────────────┬────────┬─────────┬─────────────────────────────┐")
-            print(f"[NOISER] │     Parameter     │      Shape      │ Before │ LORA v2 │           Reason            │")
-            print(f"[NOISER] ├───────────────────┼─────────────────┼────────┼─────────┼─────────────────────────────┤")
-            print(f"[NOISER] │ out2/weight       │ (2048, 2048)    │ LoRA   │ LoRA    │ Projection matrix           │")
-            print(f"[NOISER] ├───────────────────┼─────────────────┼────────┼─────────┼─────────────────────────────┤")
-            print(f"[NOISER] │ input_proj/weight │ (2048, 4096)    │ FULL   │ LoRA    │ Projection (expanded in v2) │")
-            print(f"[NOISER] ├───────────────────┼─────────────────┼────────┼─────────┼─────────────────────────────┤")
-            print(f"[NOISER] │ proj/weight       │ (2048, 503)     │ FULL   │ LoRA    │ Projection (expanded in v2) │")
-            print(f"[NOISER] ├───────────────────┼─────────────────┼────────┼─────────┼─────────────────────────────┤")
-            print(f"[NOISER] │ ssm/B             │ (1024, 2048, 2) │ FULL   │ FULL    │ SSM param + discretization  │")
-            print(f"[NOISER] ├───────────────────┼─────────────────┼────────┼─────────┼─────────────────────────────┤")
-            print(f"[NOISER] │ ssm/C             │ (2048, 1024, 2) │ FULL   │ FULL    │ SSM param + discretization  │")
-            print(f"[NOISER] └───────────────────┴─────────────────┴────────┴─────────┴─────────────────────────────┘")
+            print(f"[NOISER] ┌───────────────────┬─────────────────┬────────┬─────────┬──────────────────────────────────────────┐")
+            print(f"[NOISER] │     Parameter     │      Shape      │ Before │ LORA v2 │                  Reason                  │")
+            print(f"[NOISER] ├───────────────────┼─────────────────┼────────┼─────────┼──────────────────────────────────────────┤")
+            print(f"[NOISER] │ out2/weight       │ (2048, 2048)    │ LoRA   │ LoRA    │ Output projection matrix                 │")
+            print(f"[NOISER] │ input_proj/weight │ (2048, 4096)    │ FULL   │ LoRA    │ Input projection (expanded in v2)        │")
+            print(f"[NOISER] │ proj/weight       │ (2048, 503)     │ FULL   │ LoRA    │ Book encoder projection (expanded in v2) │")
+            print(f"[NOISER] ├───────────────────┼─────────────────┼────────┼─────────┼──────────────────────────────────────────┤")
+            print(f"[NOISER] │ ssm/B             │ (1024, 2048, 2) │ FULL   │ FULL    │ SSM input matrix (discretization issue)  │")
+            print(f"[NOISER] │ ssm/C             │ (2048, 1024, 2) │ FULL   │ FULL    │ SSM output matrix (discretization issue) │")
+            print(f"[NOISER] └───────────────────┴─────────────────┴────────┴─────────┴──────────────────────────────────────────┘")
             print(f"[NOISER]")
 
             # Helper to check if path matches any LORA_V2 pattern
