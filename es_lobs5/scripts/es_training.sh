@@ -144,24 +144,48 @@ CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/es_runs/${SLURM_JOB_ID}}"
 # Random seed
 SEED="${SEED:-2026}"
 
-# Print configuration
+# Token mode and training mode
+TOKEN_MODE="${TOKEN_MODE:-24}"
+FREEZE_NONLORA="${FREEZE_NONLORA:-False}"
+
+# Print configuration table
 echo ""
-echo "Configuration:"
-echo "  CHECKPOINT: ${CHECKPOINT}"
-echo "  DATA_DIR: ${DATA_DIR}"
-echo "  N_EPOCHS: ${N_EPOCHS}"
+echo "┌────────────┬───────────────────────────────────┬────────────────┬─────────────────────────────────────────────────────────────┐"
+echo "│  Category  │         Parameter / Flag          │     Value      │                         Description                         │"
+echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
+echo "│ Task       │ TASK_SIZE                         │ $(printf '%-14s' ${TASK_SIZE}) │ Total number of shares to sell/buy in the episode           │"
+echo "│ Config     │ TASK                              │ $(printf '%-14s' ${TASK}) │ Direction of the task (sell or buy)                         │"
+echo "│            │ TICK_SIZE                         │ $(printf '%-14s' ${TICK_SIZE}) │ Tick size in cents (e.g., 100 = \$1.00)                      │"
+echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
+echo "│ Simulation │ N_STEPS                           │ $(printf '%-14s' ${N_STEPS}) │ Number of simulation steps per episode                      │"
+echo "│            │ BG_MSGS (--background_msgs)       │ $(printf '%-14s' ${BG_MSGS}) │ Background market messages processed per step               │"
+echo "│            │ N_WARMUP (--n_warmup_msgs)        │ $(printf '%-14s' ${N_WARMUP}) │ Warmup messages replayed before episode starts              │"
+echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
+echo "│ Training   │ N_EPOCHS                          │ $(printf '%-14s' ${N_EPOCHS}) │ Total number of training generations/epochs                 │"
 if [ -n "${N_PERTURBATIONS}" ]; then
-    echo "  N_PERTURBATIONS: ${N_PERTURBATIONS} (explicitly set)"
+echo "│            │ N_PERTURBATIONS                   │ $(printf '%-14s' ${N_PERTURBATIONS}) │ Total population size (explicitly set)                      │"
 else
-    echo "  PERGPU_PERTURBATIONS: ${PERGPU_PERTURBATIONS}"
+echo "│            │ PERGPU_PERTURBATIONS              │ $(printf '%-14s' ${PERGPU_PERTURBATIONS}) │ Population size per GPU (Total = ${PERGPU_PERTURBATIONS} × 4 GPUs)                     │"
 fi
-echo "  N_STEPS: ${N_STEPS}"
-echo "  SIGMA: ${SIGMA}, LR: ${LR}, LORA_RANK: ${LORA_RANK}"
-echo "  NOISER: ${NOISER}"
-echo "  TASK: ${TASK} x ${TASK_SIZE}, TICK_SIZE: ${TICK_SIZE}"
-echo "  WANDB: ${WANDB_PROJECT} / ${WANDB_ENTITY}"
-echo "  CHECKPOINT_DIR: ${CHECKPOINT_DIR}"
-echo "  FILE_IDX: ${FILE_IDX:-random}"
+echo "│            │ SIGMA                             │ $(printf '%-14s' ${SIGMA}) │ Evolution Strategy noise standard deviation                 │"
+echo "│            │ LR                                │ $(printf '%-14s' ${LR}) │ Learning rate                                               │"
+echo "│            │ NOISER                            │ $(printf '%-14s' ${NOISER}) │ Type of noise strategy used                                 │"
+echo "│            │ LORA_RANK                         │ $(printf '%-14s' ${LORA_RANK}) │ Rank for LoRA adapters                                      │"
+echo "│            │ USE_LORA                          │ $(printf '%-14s' ${USE_LORA:-False}) │ Whether to use LoRA (Low-Rank Adaptation)                   │"
+echo "│            │ FREEZE_NONLORA                    │ $(printf '%-14s' ${FREEZE_NONLORA}) │ Freeze non-LoRA params (if True: LoRA-only training)        │"
+echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
+echo "│ System     │ CHECKPOINT_EVERY                  │ $(printf '%-14s' ${CHECKPOINT_EVERY}) │ Epoch frequency to save checkpoints                         │"
+echo "│            │ TOKEN_MODE                        │ $(printf '%-14s' ${TOKEN_MODE}) │ Token vocabulary mode (24 = base-100 encoding)              │"
+echo "│            │ SEED                              │ $(printf '%-14s' ${SEED}) │ Random seed for reproducibility                             │"
+echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
+echo "│ Paths      │ CHECKPOINT                        │ ...$(echo ${CHECKPOINT} | rev | cut -c1-40 | rev) │"
+echo "│            │ DATA_DIR                          │ ...$(echo ${DATA_DIR} | rev | cut -c1-40 | rev) │"
+echo "│            │ CHECKPOINT_DIR                    │ $(printf '%-14s' ${CHECKPOINT_DIR}) │"
+echo "│            │ FILE_IDX                          │ $(printf '%-14s' ${FILE_IDX:-random}) │ Data file index (random = random selection)                 │"
+echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
+echo "│ Logging    │ WANDB_PROJECT                     │ $(printf '%-14s' ${WANDB_PROJECT}) │ Weights & Biases project name                               │"
+echo "│            │ WANDB_ENTITY                      │ $(printf '%-14s' ${WANDB_ENTITY}) │ Weights & Biases entity/username                            │"
+echo "└────────────┴───────────────────────────────────┴────────────────┴─────────────────────────────────────────────────────────────┘"
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -197,12 +221,12 @@ python es_lobs5/scripts/es_training.py \
     --task ${TASK} \
     --task_size ${TASK_SIZE} \
     --tick_size ${TICK_SIZE} \
-    --token_mode 24 \
+    --token_mode ${TOKEN_MODE} \
     --checkpoint_every ${CHECKPOINT_EVERY} \
     --checkpoint_dir "${CHECKPOINT_DIR}" \
     --wandb_project "${WANDB_PROJECT}" \
     --wandb_entity "${WANDB_ENTITY}" \
-    --freeze_nonlora False \
+    --freeze_nonlora ${FREEZE_NONLORA} \
     --use_lora "${USE_LORA:-False}" \
     --seed ${SEED} \
     ${FILE_IDX_ARG} \
