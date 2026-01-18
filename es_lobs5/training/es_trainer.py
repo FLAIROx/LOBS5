@@ -1656,14 +1656,17 @@ class ESTrainer:
         # ========================================================================
         def maybe_pvary(x):
             """Apply pvary if inside shard_map context."""
-            if in_shard_map:
-                return jax.lax.pvary(x, ('data',))
+            # DISABLED: pvary causes OOM by forcing global state materialization
+            # when used with vmap. Standard vmap(scan) handles local batching correctly.
+            # if in_shard_map:
+            #     return jax.lax.pvary(x, ('data',))
             return x
 
         def maybe_pvary_tree(tree):
             """Apply pvary to all leaves of a pytree if inside shard_map."""
-            if in_shard_map:
-                return jax.tree.map(lambda x: jax.lax.pvary(x, ('data',)), tree)
+            # DISABLED: see maybe_pvary
+            # if in_shard_map:
+            #     return jax.tree.map(lambda x: jax.lax.pvary(x, ('data',)), tree)
             return tree
         # ========================================================================
 
