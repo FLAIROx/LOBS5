@@ -174,46 +174,55 @@ class ES_SequenceLayer(Model):
         # Residual connection
         skip = x
 
-        # Pre-normalization
-        if prenorm:
-            x = call_submodule(ES_LayerNorm, 'norm', common_params, x)
+        # H1: Gradient Checkpointing (Rematerialization)
+        # Rematerialize the internal layer computation to save activation memory
+        @jax.remat
+        def _internal_block(x):
+            # Pre-normalization
+            if prenorm:
+                x = call_submodule(ES_LayerNorm, 'norm', common_params, x)
 
-        # SSM
-        x = call_submodule(S5SSMParams, 'ssm', common_params, x)
+            # SSM
+            x = call_submodule(S5SSMParams, 'ssm', common_params, x)
 
-        # Activation and GLU gates
-        if activation == 'full_glu':
-            x = jax.nn.gelu(x)
-            gate = call_submodule(ES_Linear, 'out1', common_params, x)
-            gate_sigmoid = jax.nn.sigmoid(
-                call_submodule(ES_Linear, 'out2', common_params, x)
-            )
-            x = gate * gate_sigmoid
-        elif activation == 'half_glu1':
-            x = jax.nn.gelu(x)
-            gate_sigmoid = jax.nn.sigmoid(
-                call_submodule(ES_Linear, 'out2', common_params, x)
-            )
-            x = x * gate_sigmoid
-        elif activation == 'half_glu2':
-            x1 = jax.nn.gelu(x)
-            gate_sigmoid = jax.nn.sigmoid(
-                call_submodule(ES_Linear, 'out2', common_params, x1)
-            )
-            x = x * gate_sigmoid
-        elif activation == 'gelu':
-            x = jax.nn.gelu(x)
-        elif activation in ACTIVATIONS:
-            x = ACTIVATIONS[activation](x)
-        else:
-            raise NotImplementedError(f"Activation: {activation} not implemented")
+            # Activation and GLU gates
+            if activation == 'full_glu':
+                x = jax.nn.gelu(x)
+                gate = call_submodule(ES_Linear, 'out1', common_params, x)
+                gate_sigmoid = jax.nn.sigmoid(
+                    call_submodule(ES_Linear, 'out2', common_params, x)
+                )
+                x = gate * gate_sigmoid
+            elif activation == 'half_glu1':
+                x = jax.nn.gelu(x)
+                gate_sigmoid = jax.nn.sigmoid(
+                    call_submodule(ES_Linear, 'out2', common_params, x)
+                )
+                x = x * gate_sigmoid
+            elif activation == 'half_glu2':
+                x1 = jax.nn.gelu(x)
+                gate_sigmoid = jax.nn.sigmoid(
+                    call_submodule(ES_Linear, 'out2', common_params, x1)
+                )
+                x = x * gate_sigmoid
+            elif activation == 'gelu':
+                x = jax.nn.gelu(x)
+            elif activation in ACTIVATIONS:
+                x = ACTIVATIONS[activation](x)
+            else:
+                raise NotImplementedError(f"Activation: {activation} not implemented")
+            
+            # Post-normalization
+            if not prenorm:
+                x = call_submodule(ES_LayerNorm, 'norm', common_params, x)
+                
+            return x
 
-        # Residual connection
-        x = skip + x
+        # Apply rematerialized block
+        x_out = _internal_block(x)
 
-        # Post-normalization
-        if not prenorm:
-            x = call_submodule(ES_LayerNorm, 'norm', common_params, x)
+        # Residual connection (always outside remat to avoid re-computing inputs)
+        x = skip + x_out
 
         return x
 
