@@ -174,6 +174,15 @@ printf "│            │ NOISER                            │ %-14s │ %-59s
 printf "│            │ LORA_RANK                         │ %-14s │ %-59s │\n" "${LORA_RANK}" "Rank for LoRA adapters"
 printf "│            │ USE_LORA                          │ %-14s │ %-59s │\n" "${USE_LORA:-False}" "Whether to use LoRA (Low-Rank Adaptation)"
 printf "│            │ FREEZE_NONLORA                    │ %-14s │ %-59s │\n" "${FREEZE_NONLORA}" "Freeze non-LoRA params (if True: LoRA-only training)"
+# Compute training mode based on USE_LORA and FREEZE_NONLORA
+if [ "${USE_LORA:-False}" = "False" ]; then
+    TRAINING_MODE="FULL"
+elif [ "${FREEZE_NONLORA}" = "True" ]; then
+    TRAINING_MODE="LORA-only"
+else
+    TRAINING_MODE="LORA+SSM"
+fi
+printf "│            │ TRAINING_MODE                     │ %-14s │ %-59s │\n" "${TRAINING_MODE}" "Derived: FULL / LORA+SSM / LORA-only"
 echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
 printf "│ System     │ CHECKPOINT_EVERY                  │ %-14s │ %-59s │\n" "${CHECKPOINT_EVERY}" "Epoch frequency to save checkpoints"
 printf "│            │ TOKEN_MODE                        │ %-14s │ %-59s │\n" "${TOKEN_MODE}" "Token vocabulary mode (24 = base-100 encoding)"
