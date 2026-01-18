@@ -2436,6 +2436,15 @@ class ESTrainer:
             print("[CONFIG]    BUY:  1.25 * Final Best Ask (25% Premium)")
         print("="*60)
 
+        # Log Metric Definitions
+        print("="*60)
+        print("[CONFIG] Metric Definitions:")
+        print(" [Normal Orders] : model_quantity       (Executed by model orders during regular steps)")
+        print(" [Market Orders] : liquidation_quantity (Executed by force_market_order at end)")
+        print(" [Doom Orders]   : doom_quantity        (Unfilled quantity, subject to penalty)")
+        print(" [Fill Rates]    : quantity / task_size")
+        print("="*60)
+
         # Resume from checkpoint if specified
         start_epoch = 0
         best_fitness = -float('inf')
