@@ -113,6 +113,7 @@ DATA_DIR="${DATA_DIR:-/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_prepr
 # Training scale
 N_EPOCHS="${N_EPOCHS:-1000}"
 PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-56}"
+# PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-56}" # for FULL mode
 # N_PERTURBATIONS is deprecated but kept for backward compatibility if set explicitly
 N_PERTURBATIONS="${N_PERTURBATIONS:-}" 
 N_STEPS="${N_STEPS:-10}"
@@ -152,11 +153,13 @@ TOKEN_MODE="${TOKEN_MODE:-24}"
 # Training Mode (single variable to control all LoRA settings)
 # =============================================================================
 # MODE options:
-#   FULL     - Full parameter training (no LoRA)
-#   LORA     - LoRA-only training (freeze non-LoRA params)
-#   LORA+SSM - LoRA + SSM params training
-#   LORA_V2  - LoRA v2: Expand LoRA to all projection matrices (ICLR 2025)
+#   FULL      - Full parameter training (no LoRA)
+#   LORA      - LoRA-only training (freeze non-LoRA params)
+#   LORA+SSM  - LoRA + SSM params training
+#   LORA_V1.5 - LoRA v1.5: Expand LoRA to all projections, freeze SSM/norm
+#   LORA_V2   - LoRA v2: Expand LoRA to all projections + train SSM/norm
 # =============================================================================
+FREEZE_SSM="False"
 MODE="${MODE:-FULL}"
 
 # Derive internal flags from MODE
@@ -176,13 +179,19 @@ case "${MODE}" in
         FREEZE_NONLORA="False"
         LORA_V2="False"
         ;;
+    LORA_V1.5)
+        USE_LORA="True"
+        FREEZE_NONLORA="False"
+        LORA_V2="True"
+        FREEZE_SSM="True"
+        ;;
     LORA_V2)
         USE_LORA="True"
         FREEZE_NONLORA="False"
         LORA_V2="True"
         ;;
     *)
-        echo "ERROR: Unknown MODE '${MODE}'. Valid options: FULL, LORA, LORA+SSM, LORA_V2"
+        echo "ERROR: Unknown MODE '${MODE}'. Valid options: FULL, LORA, LORA+SSM, LORA_V1.5, LORA_V2"
         exit 1
         ;;
 esac
@@ -210,7 +219,7 @@ printf "│            │ SIGMA                             │ %-14s │ %-59s
 printf "│            │ LR                                │ %-14s │ %-59s │\n" "${LR}" "Learning rate"
 printf "│            │ NOISER                            │ %-14s │ %-59s │\n" "${NOISER}" "Type of noise strategy used"
 printf "│            │ LORA_RANK                         │ %-14s │ %-59s │\n" "${LORA_RANK}" "Rank for LoRA adapters"
-printf "│            │ MODE                              │ %-14s │ %-59s │\n" "${MODE}" "Training mode: FULL / LORA / LORA+SSM / LORA_V2"
+printf "│            │ MODE                              │ %-14s │ %-59s │\n" "${MODE}" "Training mode: FULL / LORA / LORA+SSM / LORA_V1.5 / LORA_V2"
 echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
 printf "│ System     │ CHECKPOINT_EVERY                  │ %-14s │ %-59s │\n" "${CHECKPOINT_EVERY}" "Epoch frequency to save checkpoints"
 printf "│            │ TOKEN_MODE                        │ %-14s │ %-59s │\n" "${TOKEN_MODE}" "Token vocabulary mode (24 = base-100 encoding)"
@@ -267,6 +276,7 @@ python es_lobs5/scripts/es_training.py \
     --wandb_entity "${WANDB_ENTITY}" \
     --freeze_nonlora ${FREEZE_NONLORA} \
     --use_lora "${USE_LORA:-False}" \
+    --freeze_ssm "${FREEZE_SSM}" \
     --lora_v2 "${LORA_V2}" \
     --seed ${SEED} \
     ${FILE_IDX_ARG} \

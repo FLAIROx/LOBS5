@@ -404,6 +404,8 @@ def create_es_config():
                         help='Freeze non-LORA params (embeddings, base model). Default: False (train log_step, B, C, D)')
     parser.add_argument('--lora_v2', type=str2bool, default=False,
                         help='LORA v2: Expand LoRA to all projection matrices (input_proj, proj, out2). Based on ICLR 2025 research.')
+    parser.add_argument('--freeze_ssm', type=str2bool, default=False,
+                        help='Freeze SSM parameters (B, C, D, log_step). Used with LORA_V2 for LORA_V1.5 mode.')
 
     # Training configuration
     parser.add_argument('--pergpu_perturbations', type=int, default=32,
@@ -1025,6 +1027,7 @@ class ESTrainer:
         # ========================================================================
         # [NEW] LORA v2 Mode Handler (Expand LoRA to all projection matrices)
         # Based on ICLR 2025: "Parameter-Efficient Fine-Tuning of State Space Models"
+        # arXiv: https://arxiv.org/abs/2410.09016
         # Research finding: LoRA effective on projections, not on SSM modules
         # ========================================================================
         lora_v2 = getattr(config, 'lora_v2', False)
@@ -1083,6 +1086,58 @@ class ESTrainer:
             print(f"[NOISER]")
         elif lora_v2 and not use_lora:
             print(f"[NOISER] WARNING: lora_v2=True but use_lora=False. LORA v2 requires use_lora=True. Ignoring.")
+
+
+        # ========================================================================
+        # [NEW] FREEZE SSM Mode (LORA_V1.5 = LORA_V2 + FREEZE_SSM)
+        # Based on standard PEFT best practices
+        # ========================================================================
+        freeze_ssm = getattr(config, 'freeze_ssm', False)
+        if freeze_ssm:
+            print(f"\n[NOISER] ╔══════════════════════════════════════════════════════════════════════════════════════════╗")
+            print(f"[NOISER] ║                                 LORA v1.5 MODE ENABLED                                    ║")
+            print(f"[NOISER] ║                         (LORA_V2 + FREEZE_SSM)                                            ║")
+            print(f"[NOISER] ╠══════════════════════════════════════════════════════════════════════════════════════════╣")
+            print(f"[NOISER] ║  Reference: Standard PEFT best practices for fine-tuning                                 ║")
+            print(f"[NOISER] ║             - Databricks: 'Efficient Fine-Tuning with LoRA'                              ║")
+            print(f"[NOISER] ║             - Sebastian Raschka: 'Practical Tips for Finetuning LLMs Using LoRA'         ║")
+            print(f"[NOISER] ║  Practice:  LoRA on projections only, bias='none', freeze SSM/LayerNorm                  ║")
+            print(f"[NOISER] ╚══════════════════════════════════════════════════════════════════════════════════════════╝")
+
+            # Print comparison table
+            print(f"[NOISER]")
+            print(f"[NOISER] ┌───────────────────────┬─────────────────┬───────────┬───────────┬──────────┐")
+            print(f"[NOISER] │       Parameter       │      Shape      │   LORA    │ LORA_V1.5 │ LORA_V2  │")
+            print(f"[NOISER] ├───────────────────────┼─────────────────┼───────────┼───────────┼──────────┤")
+            print(f"[NOISER] │ Projections           │                 │           │           │          │")
+            print(f"[NOISER] │ out2/weight           │ (2048, 2048)    │ LoRA      │ LoRA      │ LoRA     │")
+            print(f"[NOISER] │ input_proj/weight     │ (2048, 4096)    │ Frozen    │ LoRA  ←   │ LoRA     │")
+            print(f"[NOISER] │ proj/weight           │ (2048, 503)     │ Frozen    │ LoRA  ←   │ LoRA     │")
+            print(f"[NOISER] ├───────────────────────┼─────────────────┼───────────┼───────────┼──────────┤")
+            print(f"[NOISER] │ SSM Parameters        │                 │           │           │          │")
+            print(f"[NOISER] │ ssm/B, C, D, log_step │ varies          │ Frozen    │ Frozen ←  │ FULL     │")
+            print(f"[NOISER] ├───────────────────────┼─────────────────┼───────────┼───────────┼──────────┤")
+            print(f"[NOISER] │ Other                 │                 │           │           │          │")
+            print(f"[NOISER] │ norm/weight, bias     │ varies          │ Frozen    │ Frozen    │ FULL     │")
+            print(f"[NOISER] │ Lambda, decoder, emb  │ varies          │ Fixed     │ Fixed     │ Fixed    │")
+            print(f"[NOISER] └───────────────────────┴─────────────────┴───────────┴───────────┴──────────┘")
+            print(f"[NOISER]")
+
+            from ..models.common import EXCLUDED
+            SSM_PATTERNS = ('ssm/B', 'ssm/C', 'ssm/D', 'ssm/log_step')
+
+            def remap_ssm_to_excluded(map_tree, path=""):
+                if isinstance(map_tree, dict):
+                    return {k: remap_ssm_to_excluded(v, f"{path}/{k}" if path else k) for k, v in map_tree.items()}
+                else:
+                    for pattern in SSM_PATTERNS:
+                        if path.endswith(pattern):
+                            print(f"[NOISER]   > Freezing {path} (SSM parameter)")
+                            return EXCLUDED
+                    return map_tree
+
+            self.lobs5_init.es_map = remap_ssm_to_excluded(self.lobs5_init.es_map)
+            print(f"[NOISER]")
 
         self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
             self.lobs5_init.params,
