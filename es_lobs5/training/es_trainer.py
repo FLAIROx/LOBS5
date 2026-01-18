@@ -914,17 +914,18 @@ class ESTrainer:
 
     def _log_detailed_param_stats(self, params, es_map, config, freeze_nonlora):
         """Log detailed parameter structure with status for each tensor."""
-        print(f"\n[NOISER] {'='*100}")
-        print(f"[NOISER] {'Parameter Name':<60} | {'Shape':<15} | {'Type':<10} | {'Status':<12} | {'Eff. Params':>12}")
-        print(f"[NOISER] {'-'*100}")
+        print(f"\n[NOISER] {'='*120}")
+        print(f"[NOISER] {'Parameter Name':<60} | {'Shape':<15} | {'Type':<6} | {'Status':<12} | {'Physical':>12} | {'Effective':>12}")
+        print(f"[NOISER] {'-'*120}")
 
         total_physical = 0
+        total_trainable = 0
         total_effective = 0
-        
+
         # Flatten with paths to iterate
         flat_params, tree_def = jax.tree_util.tree_flatten_with_path(params)
         flat_map = jax.tree_util.tree_flatten(es_map)[0]
-        
+
         # Helper to format path
         def path_to_str(path):
             # path is a tuple of (DictKey, SequenceKey, etc)
@@ -935,11 +936,12 @@ class ESTrainer:
             shape = str(param.shape)
             physical_size = param.size
             total_physical += physical_size
-            
+
             # map: 0=FULL, 1=LORA, 2=FIXED, 3=FIXED
             if map_val == 1: # LORA
                 p_type = "LORA"
                 status = "[Trainable]"
+                total_trainable += physical_size
                 # LoRA DoF = (in + out) * rank (assuming 2D)
                 if param.ndim == 2:
                     eff_size = (param.shape[0] + param.shape[1]) * config.lora_rank
@@ -952,22 +954,24 @@ class ESTrainer:
                     eff_size = 0
                 else:
                     status = "[Trainable]"
+                    total_trainable += physical_size
                     eff_size = physical_size
             else: # FIXED
                 p_type = "FIXED"
                 status = "[Fixed]"
                 eff_size = 0
-            
-            total_effective += eff_size
-            
-            # Print row
-            print(f"[NOISER] {name:<60} | {shape:<15} | {p_type:<10} | {status:<12} | {eff_size:>12,}")
 
-        print(f"[NOISER] {'='*100}")
+            total_effective += eff_size
+
+            # Print row
+            print(f"[NOISER] {name:<60} | {shape:<15} | {p_type:<6} | {status:<12} | {physical_size:>12,} | {eff_size:>12,}")
+
+        print(f"[NOISER] {'='*120}")
         print(f"[NOISER] SUMMARY:")
-        print(f"[NOISER]   Total Physical Params:  {total_physical:,}")
-        print(f"[NOISER]   Total Effective Params: {total_effective:,} ({(total_effective/total_physical)*100:.4f}%)")
-        print(f"[NOISER] {'='*100}\n")
+        print(f"[NOISER]   Total Physical Params:  {total_physical:>15,}")
+        print(f"[NOISER]   Total Trainable Params: {total_trainable:>15,} ({(total_trainable/total_physical)*100:.2f}%)")
+        print(f"[NOISER]   Total Effective Params: {total_effective:>15,} ({(total_effective/total_physical)*100:.2f}%)")
+        print(f"[NOISER] {'='*120}\n")
 
 
     def _init_noiser(self):
