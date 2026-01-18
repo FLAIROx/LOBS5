@@ -183,7 +183,7 @@ printf "│ Paths      │ CHECKPOINT                        │ %-78s │\n" "$
 printf "│            │ DATA_DIR                          │ %-78s │\n" "${DATA_DIR}"
 printf "│            │ CHECKPOINT_DIR                    │ %-78s │\n" "${CHECKPOINT_DIR}"
 echo "├────────────┼───────────────────────────────────┼────────────────┬─────────────────────────────────────────────────────────────┤"
-printf "│            │ FILE_IDX                          │ %-14s │ %-59s │\n" "${FILE_IDX}" "Data file index (empty = random, number = fixed)"
+printf "│            │ FILE_IDX                          │ %-14s │ %-59s │\n" "${FILE_IDX}" "Data file index (random = random selection)"
 echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
 printf "│ Logging    │ WANDB_PROJECT                     │ %-14s │ %-59s │\n" "${WANDB_PROJECT}" "Weights & Biases project name"
 printf "│            │ WANDB_ENTITY                      │ %-14s │ %-59s │\n" "${WANDB_ENTITY}" "Weights & Biases entity/username"
