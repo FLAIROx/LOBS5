@@ -115,9 +115,9 @@ N_EPOCHS="${N_EPOCHS:-1000}"
 PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-32}"
 # N_PERTURBATIONS is deprecated but kept for backward compatibility if set explicitly
 N_PERTURBATIONS="${N_PERTURBATIONS:-}" 
-N_STEPS="${N_STEPS:-100}"
-N_WARMUP="${N_WARMUP:-500}"
-BG_MSGS="${BG_MSGS:-100}"
+N_STEPS="${N_STEPS:-10}"
+N_WARMUP="${N_WARMUP:-0}"
+BG_MSGS="${BG_MSGS:-50}"
 
 # ES hyperparameters
 SIGMA="${SIGMA:-0.01}"
