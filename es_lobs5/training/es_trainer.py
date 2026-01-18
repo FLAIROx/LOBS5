@@ -1032,13 +1032,13 @@ class ESTrainer:
         # ========================================================================
         lora_v2 = getattr(config, 'lora_v2', False)
         if lora_v2 and use_lora:
-            print(f"\n[NOISER] ╔══════════════════════════════════════════════════════════════════════════════════════════╗")
-            print(f"[NOISER] ║                                  LORA v2 MODE ENABLED                                     ║")
-            print(f"[NOISER] ╠══════════════════════════════════════════════════════════════════════════════════════════╣")
-            print(f"[NOISER] ║  Reference: 'Parameter-Efficient Fine-Tuning of State Space Models'                      ║")
-            print(f"[NOISER] ║             ICLR 2025 | arXiv:2410.09016                                                  ║")
-            print(f"[NOISER] ║  Finding:   LoRA effective on projection matrices, fails on SSM modules (B, C, Δ)        ║")
-            print(f"[NOISER] ╚══════════════════════════════════════════════════════════════════════════════════════════╝")
+            print(f"\n[NOISER] ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+            print(f"[NOISER] ║                                       LORA v2 MODE ENABLED                                                ║")
+            print(f"[NOISER] ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════╣")
+            print(f"[NOISER] ║  Reference: 'Parameter-Efficient Fine-Tuning of State Space Models'                                      ║")
+            print(f"[NOISER] ║             ICLR 2025 | https://arxiv.org/abs/2410.09016                                                 ║")
+            print(f"[NOISER] ║  Finding:   LoRA effective on projection matrices, fails on SSM modules (B, C, Δ)                        ║")
+            print(f"[NOISER] ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
 
             from ..models.common import PARAM, MM_PARAM, LORA_V2_PATTERNS
 
@@ -1090,19 +1090,21 @@ class ESTrainer:
 
         # ========================================================================
         # [NEW] FREEZE SSM Mode (LORA_V1.5 = LORA_V2 + FREEZE_SSM)
-        # Based on standard PEFT best practices
+        # Based on standard PEFT best practices:
+        # - Databricks: https://www.databricks.com/blog/efficient-fine-tuning-lora-guide-llms
+        # - Sebastian Raschka: https://magazine.sebastianraschka.com/p/practical-tips-for-finetuning-llms
         # ========================================================================
         freeze_ssm = getattr(config, 'freeze_ssm', False)
         if freeze_ssm:
-            print(f"\n[NOISER] ╔══════════════════════════════════════════════════════════════════════════════════════════╗")
-            print(f"[NOISER] ║                                 LORA v1.5 MODE ENABLED                                    ║")
-            print(f"[NOISER] ║                         (LORA_V2 + FREEZE_SSM)                                            ║")
-            print(f"[NOISER] ╠══════════════════════════════════════════════════════════════════════════════════════════╣")
-            print(f"[NOISER] ║  Reference: Standard PEFT best practices for fine-tuning                                 ║")
-            print(f"[NOISER] ║             - Databricks: 'Efficient Fine-Tuning with LoRA'                              ║")
-            print(f"[NOISER] ║             - Sebastian Raschka: 'Practical Tips for Finetuning LLMs Using LoRA'         ║")
-            print(f"[NOISER] ║  Practice:  LoRA on projections only, bias='none', freeze SSM/LayerNorm                  ║")
-            print(f"[NOISER] ╚══════════════════════════════════════════════════════════════════════════════════════════╝")
+            print(f"\n[NOISER] ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+            print(f"[NOISER] ║                                      LORA v1.5 MODE ENABLED                                               ║")
+            print(f"[NOISER] ║                                    (LORA_V2 + FREEZE_SSM)                                                 ║")
+            print(f"[NOISER] ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════╣")
+            print(f"[NOISER] ║  Reference: Standard PEFT best practices for fine-tuning                                                 ║")
+            print(f"[NOISER] ║    [1] Databricks: https://www.databricks.com/blog/efficient-fine-tuning-lora-guide-llms                 ║")
+            print(f"[NOISER] ║    [2] Sebastian Raschka: https://magazine.sebastianraschka.com/p/practical-tips-for-finetuning-llms     ║")
+            print(f"[NOISER] ║  Practice:  LoRA on projections only, bias='none', freeze SSM/LayerNorm                                  ║")
+            print(f"[NOISER] ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
 
             # Print comparison table
             print(f"[NOISER]")
