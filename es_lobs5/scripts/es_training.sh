@@ -148,6 +148,7 @@ SEED="${SEED:-2026}"
 # Token mode and training mode
 TOKEN_MODE="${TOKEN_MODE:-24}"
 FREEZE_NONLORA="${FREEZE_NONLORA:-False}"
+LORA_V2="${LORA_V2:-False}"
 
 # Print configuration table
 echo ""
@@ -174,15 +175,18 @@ printf "│            │ NOISER                            │ %-14s │ %-59s
 printf "│            │ LORA_RANK                         │ %-14s │ %-59s │\n" "${LORA_RANK}" "Rank for LoRA adapters"
 printf "│            │ USE_LORA                          │ %-14s │ %-59s │\n" "${USE_LORA:-False}" "Whether to use LoRA (Low-Rank Adaptation)"
 printf "│            │ FREEZE_NONLORA                    │ %-14s │ %-59s │\n" "${FREEZE_NONLORA}" "Freeze non-LoRA params (if True: LoRA-only training)"
-# Compute training mode based on USE_LORA and FREEZE_NONLORA
+printf "│            │ LORA_V2                           │ %-14s │ %-59s │\n" "${LORA_V2}" "LORA v2: Expand LoRA to all projections (ICLR 2025)"
+# Compute training mode based on USE_LORA, FREEZE_NONLORA, and LORA_V2
 if [ "${USE_LORA:-False}" = "False" ]; then
     TRAINING_MODE="FULL"
+elif [ "${LORA_V2}" = "True" ]; then
+    TRAINING_MODE="LORA-v2"
 elif [ "${FREEZE_NONLORA}" = "True" ]; then
     TRAINING_MODE="LORA-only"
 else
     TRAINING_MODE="LORA+SSM"
 fi
-printf "│            │ TRAINING_MODE                     │ %-14s │ %-59s │\n" "${TRAINING_MODE}" "Derived: FULL / LORA+SSM / LORA-only"
+printf "│            │ TRAINING_MODE                     │ %-14s │ %-59s │\n" "${TRAINING_MODE}" "Derived: FULL / LORA-v2 / LORA+SSM / LORA-only"
 echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
 printf "│ System     │ CHECKPOINT_EVERY                  │ %-14s │ %-59s │\n" "${CHECKPOINT_EVERY}" "Epoch frequency to save checkpoints"
 printf "│            │ TOKEN_MODE                        │ %-14s │ %-59s │\n" "${TOKEN_MODE}" "Token vocabulary mode (24 = base-100 encoding)"
@@ -239,6 +243,7 @@ python es_lobs5/scripts/es_training.py \
     --wandb_entity "${WANDB_ENTITY}" \
     --freeze_nonlora ${FREEZE_NONLORA} \
     --use_lora "${USE_LORA:-False}" \
+    --lora_v2 "${LORA_V2}" \
     --seed ${SEED} \
     ${FILE_IDX_ARG} \
     "$@"

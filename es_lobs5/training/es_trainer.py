@@ -402,6 +402,8 @@ def create_es_config():
     parser.add_argument('--use_lora', type=str2bool, default=False, help='Use LORA (Low-Rank Adaptation). Default: False')
     parser.add_argument('--freeze_nonlora', type=str2bool, default=False,
                         help='Freeze non-LORA params (embeddings, base model). Default: False (train log_step, B, C, D)')
+    parser.add_argument('--lora_v2', type=str2bool, default=False,
+                        help='LORA v2: Expand LoRA to all projection matrices (input_proj, proj, out2). Based on ICLR 2025 research.')
 
     # Training configuration
     parser.add_argument('--pergpu_perturbations', type=int, default=32,
@@ -1015,6 +1017,68 @@ class ESTrainer:
                 print(f"[NOISER]   > Overriding freeze_nonlora=True -> False (required for clean full mode)")
                 freeze_nonlora = False
                 config.freeze_nonlora = False
+
+        # ========================================================================
+        # [NEW] LORA v2 Mode Handler (Expand LoRA to all projection matrices)
+        # Based on ICLR 2025: "Parameter-Efficient Fine-Tuning of State Space Models"
+        # Research finding: LoRA effective on projections, not on SSM modules
+        # ========================================================================
+        lora_v2 = getattr(config, 'lora_v2', False)
+        if lora_v2 and use_lora:
+            print(f"\n[NOISER] ╔══════════════════════════════════════════════════════════════════════════════╗")
+            print(f"[NOISER] ║                           LORA v2 MODE ENABLED                               ║")
+            print(f"[NOISER] ║  Based on ICLR 2025: LoRA effective on projections, not on SSM modules       ║")
+            print(f"[NOISER] ╚══════════════════════════════════════════════════════════════════════════════╝")
+
+            from ..models.common import PARAM, MM_PARAM, LORA_V2_PATTERNS
+
+            # Print the LORA v2 scope table
+            print(f"[NOISER]")
+            print(f"[NOISER] ┌───────────────────┬─────────────────┬──────┬─────────┬───────────────────────┐")
+            print(f"[NOISER] │       参数        │      Shape      │ 当前 │ LORA v2 │         原因          │")
+            print(f"[NOISER] ├───────────────────┼─────────────────┼──────┼─────────┼───────────────────────┤")
+            print(f"[NOISER] │ out2/weight       │ (2048, 2048)    │ LoRA │ LoRA ✅ │ 投影矩阵              │")
+            print(f"[NOISER] ├───────────────────┼─────────────────┼──────┼─────────┼───────────────────────┤")
+            print(f"[NOISER] │ input_proj/weight │ (2048, 4096)    │ FULL │ LoRA ✅ │ 投影矩阵，扩展到v2    │")
+            print(f"[NOISER] ├───────────────────┼─────────────────┼──────┼─────────┼───────────────────────┤")
+            print(f"[NOISER] │ proj/weight       │ (2048, 503)     │ FULL │ LoRA ✅ │ 投影矩阵，扩展到v2    │")
+            print(f"[NOISER] ├───────────────────┼─────────────────┼──────┼─────────┼───────────────────────┤")
+            print(f"[NOISER] │ ssm/B             │ (1024, 2048, 2) │ FULL │ FULL ❌ │ SSM参数 + 离散化干扰  │")
+            print(f"[NOISER] ├───────────────────┼─────────────────┼──────┼─────────┼───────────────────────┤")
+            print(f"[NOISER] │ ssm/C             │ (2048, 1024, 2) │ FULL │ FULL ❌ │ SSM参数 + 离散化干扰  │")
+            print(f"[NOISER] └───────────────────┴─────────────────┴──────┴─────────┴───────────────────────┘")
+            print(f"[NOISER]")
+
+            # Helper to check if path matches any LORA_V2 pattern
+            def matches_lora_v2_pattern(path_str):
+                for pattern in LORA_V2_PATTERNS:
+                    if path_str.endswith(pattern):
+                        return True
+                return False
+
+            # Helper to remap es_map for LORA v2
+            def remap_for_lora_v2(map_tree, params_tree, path=""):
+                if isinstance(map_tree, dict):
+                    return {
+                        k: remap_for_lora_v2(map_tree[k], params_tree[k], f"{path}/{k}" if path else k)
+                        for k in map_tree
+                    }
+                else:
+                    # Leaf node - check if this path should be converted to LoRA
+                    if map_tree == PARAM and matches_lora_v2_pattern(path):
+                        # Check if the parameter is 2D (suitable for LoRA)
+                        if hasattr(params_tree, 'ndim') and params_tree.ndim == 2:
+                            print(f"[NOISER]   > Converting {path} from FULL to LoRA (v2)")
+                            return MM_PARAM
+                    return map_tree
+
+            self.lobs5_init.es_map = remap_for_lora_v2(
+                self.lobs5_init.es_map,
+                self.lobs5_init.params
+            )
+            print(f"[NOISER]")
+        elif lora_v2 and not use_lora:
+            print(f"[NOISER] WARNING: lora_v2=True but use_lora=False. LORA v2 requires use_lora=True. Ignoring.")
 
         self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
             self.lobs5_init.params,
