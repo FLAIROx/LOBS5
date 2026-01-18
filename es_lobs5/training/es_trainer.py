@@ -1764,7 +1764,7 @@ class ESTrainer:
         def step_fn(carry, step_idx):
             """Single step: Background messages -> Policy action."""
             (key, msg_history, hiddens_world, hiddens_policy,
-             sim_state, book_feat, world_oid_offset, quant_executed, accum_revenue) = carry
+             sim_state, book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades) = carry
 
             key, key_world, key_policy = jax.random.split(key, 3)
 
@@ -2017,12 +2017,18 @@ class ESTrainer:
             best_ask, best_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
 
             # Track trades (count)
+            # Track trades (count)
             step_trades = jnp.sum(is_policy_in_trade)
             accum_trades = accum_trades + step_trades
+            
+            # Track submitted quantity (for execution probability calc)
+            # sim_msg[2] is the truncated quantity (can actually be processed by book)
+            step_submitted = sim_msg[2]
+            accum_submitted = accum_submitted + step_submitted
 
             # Return policy_msg for order analysis (shape: (msg_len,))
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-                    book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades), (policy_msg, best_bid, best_ask)
+                    book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_submitted), (policy_msg, best_bid, best_ask)
 
         # Run episode
         # H2: Apply pvary to initial carry values when inside shard_map
@@ -2038,9 +2044,12 @@ class ESTrainer:
             maybe_pvary(jnp.int32(0)),
             maybe_pvary(jnp.float32(0)),
             maybe_pvary(jnp.int32(0)),
+            maybe_pvary(jnp.float32(0)),
+            maybe_pvary(jnp.int32(0)),
+            maybe_pvary(jnp.int32(0)), # accum_submitted
         )
         # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
-        (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue, final_trades), (policy_msgs_all, bid_trace, ask_trace) = jax.lax.scan(
+        (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue, final_trades, final_submitted), (policy_msgs_all, bid_trace, ask_trace) = jax.lax.scan(
             step_fn,
             main_scan_init,
             jnp.arange(config.n_steps),
@@ -2164,6 +2173,7 @@ class ESTrainer:
             'model_quantity': model_quantity,          # executed by model orders (Normal)
             'liquidation_quantity': liquidation_quantity,  # executed by force_market_order (Market)
             'doom_quantity': doom_quantity,    # NOT executed (Doom)
+            'submitted_quantity': final_submitted, # Total quantity submitted by model (post-truncation)
             'agent_trades': agent_trades,
             'total_trades': total_trades,
             'init_mid_price': init_mid_price,
@@ -2543,11 +2553,16 @@ class ESTrainer:
                 model_qty = float(epoch_info.get('model_quantity', 0))
                 liquidation_qty = float(epoch_info.get('liquidation_quantity', 0))
                 doom_qty = float(epoch_info.get('doom_quantity', 0))
+                submitted_qty = float(epoch_info.get('submitted_quantity', 0))
 
                 fill_rate = agent_qty / task_size                    # Total fill rate (may be < 1.0!)
                 model_fill_rate = model_qty / task_size              # Model orders fill rate
                 liquidation_fill_rate = liquidation_qty / task_size  # Force market order fill rate
                 unfill_rate = doom_qty / task_size               # Unfilled rate (book depth insufficient)
+                
+                # Execution Probability (Filled / Submitted)
+                # Avoid division by zero
+                exec_prob = model_qty / (submitted_qty + 1e-9)
 
                 # Generate Best Bid/Ask Price Plot (Market Data Only)
                 if 'example_gt_bid_trace' in epoch_info and 'example_gt_ask_trace' in epoch_info:
@@ -2600,6 +2615,8 @@ class ESTrainer:
                     # Section 1: Normal Orders (Model Steps)
                     'normal_order/quantity': model_qty,
                     'normal_order/fill_rate': model_fill_rate,
+                    'normal_order/submitted_quantity': submitted_qty,
+                    'normal_order/execution_prob': exec_prob,
                     
                     # Section 2: Market Orders (Liquidation Step)
                     'market_order/quantity': liquidation_qty,
