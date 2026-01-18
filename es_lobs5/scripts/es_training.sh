@@ -145,10 +145,47 @@ CHECKPOINT_DIR="${CHECKPOINT_DIR:-/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/L
 # Random seed
 SEED="${SEED:-2026}"
 
-# Token mode and training mode
+# Token mode
 TOKEN_MODE="${TOKEN_MODE:-24}"
-FREEZE_NONLORA="${FREEZE_NONLORA:-False}"
-LORA_V2="${LORA_V2:-False}"
+
+# =============================================================================
+# Training Mode (single variable to control all LoRA settings)
+# =============================================================================
+# MODE options:
+#   FULL     - Full parameter training (no LoRA)
+#   LORA     - LoRA-only training (freeze non-LoRA params)
+#   LORA+SSM - LoRA + SSM params training
+#   LORA_V2  - LoRA v2: Expand LoRA to all projection matrices (ICLR 2025)
+# =============================================================================
+MODE="${MODE:-FULL}"
+
+# Derive internal flags from MODE
+case "${MODE}" in
+    FULL)
+        USE_LORA="False"
+        FREEZE_NONLORA="False"
+        LORA_V2="False"
+        ;;
+    LORA)
+        USE_LORA="True"
+        FREEZE_NONLORA="True"
+        LORA_V2="False"
+        ;;
+    LORA+SSM)
+        USE_LORA="True"
+        FREEZE_NONLORA="False"
+        LORA_V2="False"
+        ;;
+    LORA_V2)
+        USE_LORA="True"
+        FREEZE_NONLORA="False"
+        LORA_V2="True"
+        ;;
+    *)
+        echo "ERROR: Unknown MODE '${MODE}'. Valid options: FULL, LORA, LORA+SSM, LORA_V2"
+        exit 1
+        ;;
+esac
 
 # Print configuration table
 echo ""
@@ -173,20 +210,7 @@ printf "│            │ SIGMA                             │ %-14s │ %-59s
 printf "│            │ LR                                │ %-14s │ %-59s │\n" "${LR}" "Learning rate"
 printf "│            │ NOISER                            │ %-14s │ %-59s │\n" "${NOISER}" "Type of noise strategy used"
 printf "│            │ LORA_RANK                         │ %-14s │ %-59s │\n" "${LORA_RANK}" "Rank for LoRA adapters"
-printf "│            │ USE_LORA                          │ %-14s │ %-59s │\n" "${USE_LORA:-False}" "Whether to use LoRA (Low-Rank Adaptation)"
-printf "│            │ FREEZE_NONLORA                    │ %-14s │ %-59s │\n" "${FREEZE_NONLORA}" "Freeze non-LoRA params (if True: LoRA-only training)"
-printf "│            │ LORA_V2                           │ %-14s │ %-59s │\n" "${LORA_V2}" "LORA v2: Expand LoRA to all projections (ICLR 2025)"
-# Compute training mode based on USE_LORA, FREEZE_NONLORA, and LORA_V2
-if [ "${USE_LORA:-False}" = "False" ]; then
-    TRAINING_MODE="FULL"
-elif [ "${LORA_V2}" = "True" ]; then
-    TRAINING_MODE="LORA-v2"
-elif [ "${FREEZE_NONLORA}" = "True" ]; then
-    TRAINING_MODE="LORA-only"
-else
-    TRAINING_MODE="LORA+SSM"
-fi
-printf "│            │ TRAINING_MODE                     │ %-14s │ %-59s │\n" "${TRAINING_MODE}" "Derived: FULL / LORA-v2 / LORA+SSM / LORA-only"
+printf "│            │ MODE                              │ %-14s │ %-59s │\n" "${MODE}" "Training mode: FULL / LORA / LORA+SSM / LORA_V2"
 echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
 printf "│ System     │ CHECKPOINT_EVERY                  │ %-14s │ %-59s │\n" "${CHECKPOINT_EVERY}" "Epoch frequency to save checkpoints"
 printf "│            │ TOKEN_MODE                        │ %-14s │ %-59s │\n" "${TOKEN_MODE}" "Token vocabulary mode (24 = base-100 encoding)"
