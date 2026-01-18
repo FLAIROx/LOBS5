@@ -112,7 +112,7 @@ DATA_DIR="${DATA_DIR:-/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_prepr
 
 # Training scale
 N_EPOCHS="${N_EPOCHS:-1000}"
-PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-32}"
+PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-56}"
 # N_PERTURBATIONS is deprecated but kept for backward compatibility if set explicitly
 N_PERTURBATIONS="${N_PERTURBATIONS:-}" 
 N_STEPS="${N_STEPS:-10}"
