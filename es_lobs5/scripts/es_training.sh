@@ -116,7 +116,7 @@ PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-32}"
 # N_PERTURBATIONS is deprecated but kept for backward compatibility if set explicitly
 N_PERTURBATIONS="${N_PERTURBATIONS:-}" 
 N_STEPS="${N_STEPS:-10}"
-N_WARMUP="${N_WARMUP:-0}"
+N_WARMUP="${N_WARMUP:-10}"
 BG_MSGS="${BG_MSGS:-50}"
 
 # ES hyperparameters
@@ -140,6 +140,9 @@ WANDB_ENTITY="${WANDB_ENTITY:-kang-oxford}"
 # Checkpointing
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-100}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/es_runs/${SLURM_JOB_ID}}"
+
+# Random seed
+SEED="${SEED:-2026}"
 
 # Print configuration
 echo ""
@@ -201,6 +204,7 @@ python es_lobs5/scripts/es_training.py \
     --wandb_entity "${WANDB_ENTITY}" \
     --freeze_nonlora False \
     --use_lora "${USE_LORA:-False}" \
+    --seed ${SEED} \
     ${FILE_IDX_ARG} \
     "$@"
 

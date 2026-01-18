@@ -447,7 +447,7 @@ def create_es_config():
                         help='Path to LOBSTER data directory for initial state')
 
     # Other
-    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--seed', type=int, default=2026)
     parser.add_argument('--output_dir', type=str, default='./es_checkpoints')
     parser.add_argument('--checkpoint_dir', type=str, default='./es_checkpoints',
                         help='Directory to save ES checkpoints')
