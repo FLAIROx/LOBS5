@@ -399,7 +399,7 @@ def create_es_config():
     parser.add_argument('--sigma', type=float, default=0.01, help='Noise std')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--lora_rank', type=int, default=4, help='LORA rank')
-    parser.add_argument('--use_lora', type=str2bool, default=True, help='Use LORA (Low-Rank Adaptation). Default: True')
+    parser.add_argument('--use_lora', type=str2bool, default=False, help='Use LORA (Low-Rank Adaptation). Default: False')
     parser.add_argument('--freeze_nonlora', type=str2bool, default=False,
                         help='Freeze non-LORA params (embeddings, base model). Default: False (train log_step, B, C, D)')
 
@@ -451,7 +451,7 @@ def create_es_config():
     parser.add_argument('--output_dir', type=str, default='./es_checkpoints')
     parser.add_argument('--checkpoint_dir', type=str, default='./es_checkpoints',
                         help='Directory to save ES checkpoints')
-    parser.add_argument('--checkpoint_every', type=int, default=50,
+    parser.add_argument('--checkpoint_every', type=int, default=100,
                         help='Save checkpoint every N epochs')
 
     # W&B logging
