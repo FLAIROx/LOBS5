@@ -17,6 +17,12 @@
 # Max Stable:  14,336 (Total 57,344) - Job 1921017 - RUNNING
 # First Fail:  16,384 (Total 65,536) - Job 1920937 - FAILED (OOM/Aborted)
 #
+# PERGPU_PERTURBATIONS Scaling Test Results (2026-01-18, LORA_V2):
+# ------------------------------------------------------
+# Job ID    Per-GPU Perturbations  Total Population  Status     Result/Error
+# 1927436   64                     256               COMPLETED  ✅ Success (Timed out after 40m)
+# 1927437   128                    512               FAILED     ❌ OOM (Alloc 71GB)
+#
 # Jobs 18,432+ all fail with OOM (RESOURCE_EXHAUSTED ~48-80GB allocation)
 # The "Aborted" status indicates XLA runtime forced abort to prevent deadlock
 # after one replica hit OOM during distributed computation.
@@ -160,7 +166,7 @@ TOKEN_MODE="${TOKEN_MODE:-24}"
 #   LORA_V2   - LoRA v2: Expand LoRA to all projections + train SSM/norm
 # =============================================================================
 FREEZE_SSM="False"
-MODE="${MODE:-FULL}"
+MODE="${MODE:-LORA_V1.5}"
 
 # Derive internal flags from MODE
 case "${MODE}" in
