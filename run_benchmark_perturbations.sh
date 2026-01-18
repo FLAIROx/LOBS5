@@ -1,85 +1,36 @@
 #!/bin/bash
-#SBATCH --job-name=es-benchmark-pert
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:4
-#SBATCH --mem=0
-#SBATCH --time=04:00:00
-#SBATCH --output=logs/benchmark_perturbations_%j.out
-#SBATCH --error=logs/benchmark_perturbations_%j.err
-#SBATCH --partition=workq
+# Submit jobs for PERGPU_PERTURBATIONS scaling test
+# Values requested: 64 128 256 512 1024 2048 4096 8192
 
-# ==============================================================================
-# Benchmark: Find Maximum n_perturbations for Different n_steps
-# ==============================================================================
-#
-# Usage:
-#   # Test default (n_steps=10,100, threads 64-8192)
-#   sbatch run_benchmark_perturbations.sh
-#
-#   # Test specific n_steps
-#   N_STEPS="10 50 100" sbatch run_benchmark_perturbations.sh
-#
-#   # Custom thread range
-#   MIN_THREADS=128 MAX_THREADS=4096 sbatch run_benchmark_perturbations.sh
-#
-# ==============================================================================
+# Array of values to test
+VALUES=(64 128 256 512 1024 2048 4096 8192)
 
-set -e
+echo "=================================================="
+echo "Submitting PERGPU_PERTURBATIONS Benchmark Jobs"
+echo "=================================================="
 
-echo "============================================================"
-echo "ES-LOBS5 Max Perturbations Benchmark"
-echo "============================================================"
-echo "Job ID:     $SLURM_JOB_ID"
-echo "Node:       $SLURMD_NODENAME"
-echo "Start time: $(date)"
-echo "------------------------------------------------------------"
+for VAL in "${VALUES[@]}"; do
+    JOB_NAME="es_bench_${VAL}"
+    
+    # We use a short duration (N_EPOCHS=10) to quickly verify if it runs without OOM.
+    # We assume OOM checks happen early (JIT compilation or first step).
+    
+    echo "Submitting job for PERGPU_PERTURBATIONS=$VAL..."
+    
+    # Submit using sbatch and capture the output
+    # passing environment variables to override defaults and set job name
+    OUTPUT=$(PERGPU_PERTURBATIONS=$VAL \
+             N_EPOCHS=10 \
+             WANDB_PROJECT="es-lobs5-benchmark" \
+             sbatch --job-name="${JOB_NAME}" es_lobs5/scripts/es_training.sh)
+             
+    echo "  -> $OUTPUT"
+    
+    # Small delay between submissions to avoid slamming the scheduler?
+    sleep 1
+done
 
-mkdir -p logs
-
-# Activate environment
-source /lus/lfs1aip2/home/s5e/kangli.s5e/miniforge3/etc/profile.d/conda.sh
-conda activate lobs5
-
-cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
-
-# Add JaxMARL-HFT (gymnax_exchange) to PYTHONPATH - required for ESTrainer
-export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/JaxMARL-HFT:$PYTHONPATH"
-
-# XLA flags
-# XLA_FLAGS removed - triton flags incompatible with current JAX
-export JAX_TRACEBACK_FILTERING=off
-
-# Show GPU info
-echo ""
-nvidia-smi --query-gpu=name,memory.total --format=csv
-echo ""
-
-# Configuration
-N_STEPS="${N_STEPS:-10 100}"
-MIN_THREADS="${MIN_THREADS:-64}"
-MAX_THREADS="${MAX_THREADS:-8192}"
-STEP_MULT="${STEP_MULT:-2.0}"
-OUTPUT="benchmark_perturbations_${SLURM_JOB_ID}.json"
-
-echo "Configuration:"
-echo "  N_STEPS:     $N_STEPS"
-echo "  MIN_THREADS: $MIN_THREADS"
-echo "  MAX_THREADS: $MAX_THREADS"
-echo "  STEP_MULT:   $STEP_MULT"
-echo "  OUTPUT:      $OUTPUT"
-echo "============================================================"
-
-# Run benchmark
-python benchmark_max_perturbations.py \
-    --n_steps $N_STEPS \
-    --min_threads $MIN_THREADS \
-    --max_threads $MAX_THREADS \
-    --step_multiplier $STEP_MULT \
-    --output $OUTPUT
-
-echo ""
-echo "============================================================"
-echo "Benchmark Complete!"
-echo "End time: $(date)"
-echo "============================================================"
+echo "=================================================="
+echo "All jobs submitted. Monitor with 'squeue -u $USER'"
+echo "Check logs/es_train_*.out for results."
+echo "=================================================="
