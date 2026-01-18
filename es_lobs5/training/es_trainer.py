@@ -2445,6 +2445,7 @@ class ESTrainer:
         print(" [Fill Rates]    : quantity / task_size")
         print(" [Agent Trades]  : agent_trades         (Count of distinct trade executions/fills)")
         print(" [Agent Qty]     : agent_quantity       (Total filled quantity = Normal + Market. Range: [0, task_size])")
+        print(" [Total Trades]  : total_trades         (Trades in final step buffer (Diagnostic). Avg ~1-2 if sweeping)")
         print("="*60)
 
         # Resume from checkpoint if specified
