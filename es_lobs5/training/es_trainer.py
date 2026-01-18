@@ -1018,7 +1018,6 @@ class ESTrainer:
 
         self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
             self.lobs5_init.params,
-            self.lobs5_init.es_map,
             sigma=config.sigma,
             lr=config.lr,
             rank=config.lora_rank,
