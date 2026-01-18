@@ -2444,6 +2444,7 @@ class ESTrainer:
         print(" [Doom Orders]   : doom_quantity        (Unfilled quantity, subject to penalty)")
         print(" [Fill Rates]    : quantity / task_size")
         print(" [Agent Trades]  : agent_trades         (Count of distinct trade executions/fills)")
+        print(" [Agent Qty]     : agent_quantity       (Total filled quantity = Normal + Market. Range: [0, task_size])")
         print("="*60)
 
         # Resume from checkpoint if specified
