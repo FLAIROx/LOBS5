@@ -2575,6 +2575,7 @@ class ESTrainer:
                     except Exception as e:
                         print(f"[WARN] Failed to generate price plot: {e}")
 
+                # Log to W&B
                 wandb_run.log({
                     'epoch': epoch,
                     'fitness/mean': float(mean_fitness),
@@ -2583,13 +2584,21 @@ class ESTrainer:
                     'fitness/max': fitness_max,
                     'fitness/min': fitness_min,
                     'pnl/mean': float(epoch_info['pnl']),
-                    # Execution quantities
-                    'execution/agent_quantity': agent_qty,             # Total filled = normal + market
-                    'execution/normal_order_quantity': model_qty,      # Normal orders (model steps)
-                    'execution/market_order_quantity': liquidation_qty,# Market orders (liquidation step)
-                    'execution/doom_order_quantity': doom_qty,     # Doom orders (unfilled penalty)
                     
-                    # Rates and Counts
+                    # Section 1: Normal Orders (Model Steps)
+                    'normal_order/quantity': model_qty,
+                    'normal_order/fill_rate': model_fill_rate,
+                    
+                    # Section 2: Market Orders (Liquidation Step)
+                    'market_order/quantity': liquidation_qty,
+                    'market_order/fill_rate': liquidation_fill_rate,
+                    
+                    # Section 3: Doom Orders (Unfilled Penalty)
+                    'doom_order/quantity': doom_qty,
+                    'doom_order/fill_rate': unfill_rate,
+
+                    # Section 4: Execution Summary
+                    'execution/agent_quantity': agent_qty,
                     'execution/fill_rate': fill_rate,
                     'execution/agent_trades': float(epoch_info['agent_trades']),
                     'execution/total_trades': float(epoch_info['total_trades']),
