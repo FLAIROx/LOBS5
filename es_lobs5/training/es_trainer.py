@@ -2016,9 +2016,13 @@ class ESTrainer:
             # Get best bid/ask for plotting
             best_ask, best_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
 
+            # Track trades (count)
+            step_trades = jnp.sum(is_policy_in_trade)
+            accum_trades = accum_trades + step_trades
+
             # Return policy_msg for order analysis (shape: (msg_len,))
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-                    book_feat, world_oid_offset, quant_executed, accum_revenue), (policy_msg, best_bid, best_ask)
+                    book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades), (policy_msg, best_bid, best_ask)
 
         # Run episode
         # H2: Apply pvary to initial carry values when inside shard_map
@@ -2033,9 +2037,10 @@ class ESTrainer:
             maybe_pvary(jnp.int32(0)),
             maybe_pvary(jnp.int32(0)),
             maybe_pvary(jnp.float32(0)),
+            maybe_pvary(jnp.int32(0)),
         )
         # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
-        (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue), (policy_msgs_all, bid_trace, ask_trace) = jax.lax.scan(
+        (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue, final_trades), (policy_msgs_all, bid_trace, ask_trace) = jax.lax.scan(
             step_fn,
             main_scan_init,
             jnp.arange(config.n_steps),
@@ -2130,16 +2135,19 @@ class ESTrainer:
         pnl = jnp.tanh(pnl_normalized)  # squash to -1 to 1, 0 = executed at mid price
 
         total_trades = jnp.sum(valid_trades)
-        agent_trades = -1 # Trades count lost due to buffer clearing, but quantity/pnl is exact
+        
+        # agent_trades = trades from model steps + trades from liquidation step
+        liquidation_trades = jnp.sum(is_liquidation)
+        agent_trades = final_trades + liquidation_trades
 
         # Calculate execution breakdown
-        # model_quantity: executed by model orders during regular steps
-        # liquidation_quantity: executed by force_market_order at end
-        # unfilled_quantity: not executed due to insufficient book depth
+        # model_quantity: executed by model orders during regular steps (Normal Orders)
+        # liquidation_quantity: executed by force_market_order at end (Market Orders)
+        # doom_quantity: not executed due to insufficient book depth (Doom Orders)
         # NOTE: agent_quantity should never exceed task_size due to truncation
         liquidation_quantity = agent_quantity - model_quantity
-        # Clamp unfilled_quantity to >= 0 (should not be negative if tracking is correct)
-        unfilled_quantity = jnp.maximum(0, task_size - agent_quantity)
+        # Clamp doom_quantity to >= 0 (should not be negative if tracking is correct)
+        doom_quantity = jnp.maximum(0, task_size - agent_quantity)
 
         # Final fitness = PnL (only counts what was actually filled)
         # Unfilled quantity has no revenue and no cost, so PnL is naturally
@@ -2153,9 +2161,9 @@ class ESTrainer:
             'pnl_normalized': pnl_normalized,  # before tanh (in "ticks")
             # Execution breakdown
             'agent_quantity': agent_quantity,          # total executed = model + liquidation (may be < task_size!)
-            'model_quantity': model_quantity,          # executed by model orders
-            'liquidation_quantity': liquidation_quantity,  # executed by force_market_order
-            'unfilled_quantity': unfilled_quantity,    # NOT executed (book depth insufficient)
+            'model_quantity': model_quantity,          # executed by model orders (Normal)
+            'liquidation_quantity': liquidation_quantity,  # executed by force_market_order (Market)
+            'doom_quantity': doom_quantity,    # NOT executed (Doom)
             'agent_trades': agent_trades,
             'total_trades': total_trades,
             'init_mid_price': init_mid_price,
@@ -2522,12 +2530,12 @@ class ESTrainer:
                 agent_qty = float(epoch_info['agent_quantity'])
                 model_qty = float(epoch_info.get('model_quantity', 0))
                 liquidation_qty = float(epoch_info.get('liquidation_quantity', 0))
-                unfilled_qty = float(epoch_info.get('unfilled_quantity', 0))
+                doom_qty = float(epoch_info.get('doom_quantity', 0))
 
                 fill_rate = agent_qty / task_size                    # Total fill rate (may be < 1.0!)
                 model_fill_rate = model_qty / task_size              # Model orders fill rate
                 liquidation_fill_rate = liquidation_qty / task_size  # Force market order fill rate
-                unfill_rate = unfilled_qty / task_size               # Unfilled rate (book depth insufficient)
+                unfill_rate = doom_qty / task_size               # Unfilled rate (book depth insufficient)
 
                 # Generate Best Bid/Ask Price Plot (Market Data Only)
                 if 'example_gt_bid_trace' in epoch_info and 'example_gt_ask_trace' in epoch_info:
@@ -2576,22 +2584,20 @@ class ESTrainer:
                     'fitness/min': fitness_min,
                     'pnl/mean': float(epoch_info['pnl']),
                     # Execution quantities
-                    'execution/agent_quantity': agent_qty,             # Total filled = model + liquidation
-                    'execution/model_quantity': model_qty,             # Filled by model orders
-                    'execution/liquidation_quantity': liquidation_qty, # Filled by force_market_order
-                    'execution/unfilled_quantity': unfilled_qty,       # NOT filled (book depth insufficient)
-                    # Execution rates
-                    'execution/fill_rate': fill_rate,                  # Total fill rate (may be < 1.0!)
-                    'execution/model_fill_rate': model_fill_rate,      # Model orders fill rate
-                    'execution/liquidation_fill_rate': liquidation_fill_rate,  # Force market order fill rate
-                    'execution/unfill_rate': unfill_rate,              # Unfilled rate
+                    'execution/agent_quantity': agent_qty,             # Total filled = normal + market
+                    'execution/normal_order_quantity': model_qty,      # Normal orders (model steps)
+                    'execution/market_order_quantity': liquidation_qty,# Market orders (liquidation step)
+                    'execution/doom_order_quantity': doom_qty,     # Doom orders (unfilled penalty)
+                    
+                    # Rates and Counts
+                    'execution/fill_rate': fill_rate,
                     'execution/agent_trades': float(epoch_info['agent_trades']),
                     'execution/total_trades': float(epoch_info['total_trades']),
                 })
 
-                # Print warning if unfilled > 0
-                if unfilled_qty > 0:
-                    print(f"[WARNING] Epoch {epoch}: {unfilled_qty:.0f} shares unfilled (unfill_rate={unfill_rate:.1%})")
+                # Print warning if doom_qty > 0
+                if doom_qty > 0:
+                    print(f"[WARNING] Epoch {epoch}: {doom_qty:.0f} shares unfilled (unfill_rate={unfill_rate:.1%})")
 
             if epoch % 10 == 0:
                 print(f"Epoch {epoch}: mean={mean_fitness:.4f}, best={best_fitness:.4f}, std={jnp.std(fitnesses):.4f}")
