@@ -2097,12 +2097,10 @@ class ESTrainer:
             maybe_pvary_tree(hiddens_policy),
             maybe_pvary_tree(sim_state),
             maybe_pvary(book_feat),
-            maybe_pvary(jnp.int32(0)),
-            maybe_pvary(jnp.int32(0)),
-            maybe_pvary(jnp.float32(0)),
-            maybe_pvary(jnp.int32(0)),
-            maybe_pvary(jnp.float32(0)),
-            maybe_pvary(jnp.int32(0)),
+            maybe_pvary(jnp.int32(0)), # world_oid_offset
+            maybe_pvary(jnp.int32(0)), # quant_executed
+            maybe_pvary(jnp.float32(0)), # accum_revenue
+            maybe_pvary(jnp.int32(0)), # accum_trades
             maybe_pvary(jnp.int32(0)), # accum_submitted
         )
         # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
