@@ -220,6 +220,7 @@ class ES_LobBookModel(Model):
                 frozen_params=common_params.frozen_params.get(f'pre_layer_{i}', {}),
                 params=common_params.params[f'pre_layer_{i}'],
                 es_tree_key=common_params.es_tree_key[f'pre_layer_{i}'],
+                es_map=common_params.es_map[f'pre_layer_{i}'],
             )
             hidden_i, x = ES_SequenceLayer._forward_rnn(
                 layer_params, pre_hiddens[i], x, resets
@@ -235,6 +236,7 @@ class ES_LobBookModel(Model):
                 frozen_params=common_params.frozen_params.get(f'post_layer_{i}', {}),
                 params=common_params.params[f'post_layer_{i}'],
                 es_tree_key=common_params.es_tree_key[f'post_layer_{i}'],
+                es_map=common_params.es_map[f'post_layer_{i}'],
             )
             hidden_i, x = ES_SequenceLayer._forward_rnn(
                 layer_params, post_hiddens[i], x, resets
@@ -562,6 +564,7 @@ class ES_PaddedLobPredModel(Model):
             frozen_params=common_params.frozen_params.get('message_encoder', {}),
             params=common_params.params['message_encoder'],
             es_tree_key=common_params.es_tree_key['message_encoder'],
+            es_map=common_params.es_map['message_encoder'],
         )
         n_msg_layers = msg_params.frozen_params.get('n_layers', 0)
 
@@ -576,6 +579,7 @@ class ES_PaddedLobPredModel(Model):
                 frozen_params=msg_params.frozen_params.get(f'layer_{i}', {}),
                 params=msg_params.params[f'layer_{i}'],
                 es_tree_key=msg_params.es_tree_key[f'layer_{i}'],
+                es_map=msg_params.es_map[f'layer_{i}'],
             )
             hidden_i, x_m_emb = ES_SequenceLayer._forward_rnn(
                 layer_params, message_hiddens[i], x_m_emb, resets
@@ -587,6 +591,7 @@ class ES_PaddedLobPredModel(Model):
             frozen_params=common_params.frozen_params.get('book_encoder', {}),
             params=common_params.params['book_encoder'],
             es_tree_key=common_params.es_tree_key['book_encoder'],
+            es_map=common_params.es_map['book_encoder'],
         )
         new_book_hiddens, x_b_enc = ES_LobBookModel._forward_rnn(
             book_params, book_hiddens, x_b, resets
@@ -606,6 +611,7 @@ class ES_PaddedLobPredModel(Model):
             frozen_params=common_params.frozen_params.get('fused_encoder', {}),
             params=common_params.params['fused_encoder'],
             es_tree_key=common_params.es_tree_key['fused_encoder'],
+            es_map=common_params.es_map['fused_encoder'],
         )
         new_fused_hiddens, x_fused = ES_StackedEncoder._forward_rnn(
             fused_params, fused_hiddens, x_concat, resets
@@ -714,6 +720,7 @@ def _forward_message_encoder(common_params: CommonParams, x, integration_timeste
         frozen_params=common_params.frozen_params.get('message_encoder', {}),
         params=common_params.params['message_encoder'],
         es_tree_key=common_params.es_tree_key['message_encoder'],
+        es_map=common_params.es_map['message_encoder'],
     )
 
     n_layers = msg_params.frozen_params.get('n_layers', 0)

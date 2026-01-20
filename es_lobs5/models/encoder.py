@@ -187,6 +187,7 @@ class ES_StackedEncoder(Model):
                 frozen_params=fp.get(layer_key, {}) if isinstance(fp, dict) else {},
                 params=common_params.params[layer_key],
                 es_tree_key=common_params.es_tree_key.get(layer_key, common_params.es_tree_key) if isinstance(common_params.es_tree_key, dict) else common_params.es_tree_key,
+                es_map=common_params.es_map.get(layer_key, common_params.es_map) if isinstance(common_params.es_map, dict) else common_params.es_map,
             )
             hidden_i, x = ES_SequenceLayer._forward_rnn(
                 layer_params, hiddens[i], x, resets

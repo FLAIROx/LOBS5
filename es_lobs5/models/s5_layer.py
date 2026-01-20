@@ -259,6 +259,7 @@ class ES_SequenceLayer(Model):
             frozen_params=ssm_frozen,
             params=common_params.params['ssm'],
             es_tree_key=common_params.es_tree_key.get('ssm', common_params.es_tree_key) if isinstance(common_params.es_tree_key, dict) else common_params.es_tree_key,
+            es_map=common_params.es_map.get('ssm', common_params.es_map) if isinstance(common_params.es_map, dict) else common_params.es_map,
         )
         hidden, x = S5SSMParams._forward_rnn(ssm_params, hidden, x, resets)
 
