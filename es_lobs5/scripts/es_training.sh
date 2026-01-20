@@ -95,6 +95,9 @@ cd ${BASE_DIR}/AlphaTrade/LOBS5
 source ${CONDA_PATH}/etc/profile.d/conda.sh
 conda activate lobs5
 
+# WandB configuration
+export WANDB_API_KEY="41f4ee88a220359a48d63a1a4239c83862288bb0"
+
 # Debug: verify conda activate worked
 echo "DEBUG: Python after conda activate: $(which python)"
 echo "DEBUG: CONDA_DEFAULT_ENV: $CONDA_DEFAULT_ENV"
