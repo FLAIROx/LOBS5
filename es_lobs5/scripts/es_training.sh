@@ -84,7 +84,10 @@ echo "=============================================="
 # -----------------------------------------------------------------------------
 # Environment Setup
 # -----------------------------------------------------------------------------
-cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+# Get project root directory (2 levels up from this script)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${PROJECT_ROOT}"
 
 source /lus/lfs1aip2/home/s5e/kangli.s5e/miniforge3/etc/profile.d/conda.sh
 conda activate lobs5
