@@ -63,10 +63,12 @@
 # -----------------------------------------------------------------------------
 # Git Version Info (captured at submission time)
 # -----------------------------------------------------------------------------
-GIT_BRANCH=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 branch --show-current 2>/dev/null || echo "unknown")
-GIT_COMMIT_SHORT=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 rev-parse --short HEAD 2>/dev/null || echo "unknown")
-GIT_COMMIT_FULL=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 rev-parse HEAD 2>/dev/null || echo "unknown")
-GIT_COMMIT_MSG=$(git -C /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5 log -1 --format='%s' 2>/dev/null || echo "unknown")
+# Note: BASE_DIR not available here (before script runs), use absolute path
+REPO_PATH="/lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5"
+GIT_BRANCH=$(git -C ${REPO_PATH} branch --show-current 2>/dev/null || echo "unknown")
+GIT_COMMIT_SHORT=$(git -C ${REPO_PATH} rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_COMMIT_FULL=$(git -C ${REPO_PATH} rev-parse HEAD 2>/dev/null || echo "unknown")
+GIT_COMMIT_MSG=$(git -C ${REPO_PATH} log -1 --format='%s' 2>/dev/null || echo "unknown")
 
 echo "=============================================="
 echo " ES Training - Production"
@@ -84,12 +86,13 @@ echo "=============================================="
 # -----------------------------------------------------------------------------
 # Environment Setup
 # -----------------------------------------------------------------------------
-# Get project root directory (2 levels up from this script)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-cd "${PROJECT_ROOT}"
+# Base paths (adjust if needed)
+BASE_DIR="/lus/lfs1aip2/projects/s5e/quant"
+CONDA_PATH="/projects/s5e/quant/miniforge3"
 
-source /lus/lfs1aip2/home/s5e/kangli.s5e/miniforge3/etc/profile.d/conda.sh
+cd ${BASE_DIR}/AlphaTrade/LOBS5
+
+source ${CONDA_PATH}/etc/profile.d/conda.sh
 conda activate lobs5
 
 # -----------------------------------------------------------------------------
@@ -104,7 +107,7 @@ mkdir -p "$JAX_COMPILATION_CACHE_DIR"
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTHONDONTWRITEBYTECODE=1
-export PYTHONPATH="/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/AlphaTrade:$PYTHONPATH"
+export PYTHONPATH="${BASE_DIR}/AlphaTrade/AlphaTrade:$PYTHONPATH"
 export PYTHONUNBUFFERED=1
 
 # -----------------------------------------------------------------------------
@@ -116,8 +119,8 @@ mkdir -p checkpoints/es_runs
 # -----------------------------------------------------------------------------
 # Default Parameters (override via environment variables)
 # -----------------------------------------------------------------------------
-CHECKPOINT="${CHECKPOINT:-/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/}"
-DATA_DIR="${DATA_DIR:-/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc}"
+CHECKPOINT="${CHECKPOINT:-${BASE_DIR}/AlphaTrade/LOBS5/checkpoints/logical-serenity-19_4dhsl6me/}"
+DATA_DIR="${DATA_DIR:-${BASE_DIR}/JAN2023/GOOG_24tok_preproc}"
 
 # Training scale
 N_EPOCHS="${N_EPOCHS:-1000}"
@@ -150,7 +153,7 @@ WANDB_ENTITY="${WANDB_ENTITY:-kang-oxford}"
 
 # Checkpointing
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-100}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/es_runs/${SLURM_JOB_ID}}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${BASE_DIR}/AlphaTrade/LOBS5/checkpoints/es_runs/${SLURM_JOB_ID}}"
 
 # Random seed
 SEED="${SEED:-2026}"
