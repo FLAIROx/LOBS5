@@ -883,3 +883,128 @@ Epoch 0: mean=0.2699  # All processes see same aggregated result
 - `482dfb7` fix(es-trainer): adopt HyperscaleES multi-node pattern (4 tasks per node)
 - `7171b09` revert: remove CUDA_VISIBLE_DEVICES override (breaks JAX distributed)
 - `f4295c3` fix(es-trainer): partition perturbations across processes in multi-node mode
+
+---
+
+## 2026-01-20
+
+### LORA v1.5/v2 Memory OOM Bug: Missing es_map in Forward Pass
+
+#### Problem
+
+On Jan 18, **all** LORA_V1.5 configurations experienced OOM, even with just 32 perturbations per GPU (previously 14,336 worked on Jan 17).
+
+**Symptoms:**
+```
+Jan 17:  MODE=LORA (freeze_nonlora=True)  → 14,336 per GPU ✅
+Jan 18:  MODE=LORA_V1.5 (freeze_ssm=True) → 32 per GPU ❌ OOM
+```
+
+Despite `freeze_ssm=True` setting SSM parameters to `EXCLUDED` in `es_map`, they were **still receiving noise** during forward pass, causing 11× memory increase per perturbation.
+
+#### Root Cause: es_map Not Propagated to get_noisy_standard
+
+**The broken data flow:**
+
+```
+Initialization: es_map created in CommonInit ✓
+               ↓
+Forward Pass:  Model.forward(...) → CommonParams(...)
+               ↓
+               Missing: es_map NOT passed! ✗
+               ↓
+Forward Pass:  get_noisy_standard(param, ...)
+               ↓
+               Cannot check if param is EXCLUDED! ✗
+               ↓
+Result:        All 1D params get full noise (even if EXCLUDED)
+```
+
+**Memory impact per perturbation:**
+
+| Config | SSM params noise | Memory per perturbation |
+|--------|------------------|------------------------|
+| `freeze_nonlora=True` | None | ~0.5M (LoRA only) ✅ |
+| `freeze_nonlora=False` + `freeze_ssm=True` (before fix) | **Still added!** | ~5.5M ❌ |
+| `freeze_nonlora=False` + `freeze_ssm=True` (after fix) | None | ~1.5M (LoRA + non-SSM 1D) ✓ |
+
+This **11× memory inflation** reduced capacity from 14,336 → 32 perturbations.
+
+#### Solution: Propagate es_map Through the Entire Pipeline
+
+**Modified files:**
+
+1. **HyperscaleES/src/hyperscalees/models/base_model.py**
+   - Added `es_map` field to `CommonParams` NamedTuple
+   - Updated `Model.forward()` signature to accept `es_map` parameter
+
+2. **HyperscaleES/src/hyperscalees/noiser/eggroll.py**
+   - Modified `get_noisy_standard()` signature to accept `map_classification`
+   - Added logic to skip noise for `EXCLUDED (3)` and `FIXED (2)` parameters:
+     ```python
+     if map_classification in (2, 3):  # FIXED or EXCLUDED
+         return param  # No noise!
+     ```
+
+3. **es_lobs5/adapters/ssm_adapter.py**
+   - Updated both `get_param()` helpers to query `es_map[name]` and pass to `get_noisy_standard()`
+
+4. **es_lobs5/models/common.py**
+   - Updated `ES_Parameter._forward()` to pass `es_map` to `get_noisy_standard()`
+
+5. **es_lobs5/training/es_trainer.py**
+   - Added `es_map=self.lobs5_init.es_map` to all `CommonParams()` instantiations
+   - Captured `es_map` in eval_thread closure
+
+**Fixed data flow:**
+
+```
+Initialization: es_map created ✓
+               ↓
+Closure:       es_map captured in eval_thread ✓
+               ↓
+Forward:       CommonParams(..., es_map=es_map, ...) ✓
+               ↓
+SSM Layer:     es_map_val = common_params.es_map[name] ✓
+               ↓
+Noise:         get_noisy_standard(..., map_classification=es_map_val, ...) ✓
+               ↓
+Check:         if map_classification in (2, 3): return param ✓
+```
+
+#### Key Insights
+
+1. **`freeze_nonlora` vs `freeze_ssm` are Independent:**
+   - `freeze_nonlora=True`: Skip noise for ALL non-LoRA params (controlled by `get_noisy_standard`)
+   - `freeze_ssm=True`: Mark SSM params as `EXCLUDED` in `es_map` (controlled by `checkpoint_adapter`)
+   - The bug: `get_noisy_standard` **never checked es_map**, making `freeze_ssm` ineffective!
+
+2. **ES Memory Complexity:**
+   ```
+   Total Memory = O(n_perturbations × trainable_params)
+   ```
+   - LoRA compresses 2D weights: `d_in × d_out` → `(d_in + d_out) × rank` (~32× reduction)
+   - But 1D params (SSM, norm, bias) can't compress
+   - If SSM params (~5M) incorrectly get noise → memory explodes
+
+3. **LORA_V1.5 = LORA_V2 + freeze_ssm:**
+   - LORA_V2: Expand LoRA to all projections (input_proj, proj, out2)
+   - freeze_ssm: Mark SSM params (`B`, `C`, `D`, `log_step`) as `EXCLUDED`
+   - This hybrid approach reduces trainable params while maintaining projection expressiveness
+
+4. **map_classification Values:**
+   - `0 (PARAM)`: Normal 1D param (bias, norm) → apply noise if `freeze_nonlora=False`
+   - `1 (MM_PARAM)`: 2D weight → use LoRA (do_mm/do_Tmm)
+   - `2 (FIXED)`: Frozen for numerical stability (e.g., Lambda eigenvalues)
+   - `3 (EXCLUDED)`: User-excluded from training (e.g., embedding, decoder, SSM with freeze_ssm)
+
+#### Test Status
+
+- **Test job submitted:** 1940291 (MODE=LORA_V1.5, 512 per GPU, 5 epochs)
+- **Expected result:** Should complete successfully (previously OOM at 32)
+- **Target capacity:** Restore to ~10K-14K per GPU range
+
+#### Commits
+
+- HyperscaleES: `cd7baa0` fix(noiser): add es_map parameter to get_noisy_standard to respect EXCLUDED/FIXED classifications
+- LOBS5: `8f9d674` fix(es_trainer): propagate es_map through CommonParams to enable EXCLUDED parameter filtering
