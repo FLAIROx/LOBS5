@@ -1,0 +1,20 @@
+帮我再新加一个section 在 Reasoning Fine-tuning Experiments: GSM8K 之后
+
+
+(base) kangli.s5e@login44:/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/ICML_EGGROLL/Hyperscale_ES> pwd
+/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/ICML_EGGROLL/Hyperscale_ES
+(base) kangli.s5e@login44:/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/ICML_EGGROLL/Hyperscale_ES> ls
+algorithmic.sty  algorithm.sty  fancyhdr.sty  Figures  Hyperscale_ES.bib  icml2026.bst  icml2026.sty  main.tex  Sections
+(base) kangli.s5e@login44:/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/ICML_EGGROLL/Hyperscale_ES> 
+(base) kangli.s5e@login44:/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/ICML_EGGROLL/Hyperscale_ES> 
+
+
+\subsection{Reasoning Fine-tuning Experiments: GSM8K}
+
+
+在下面加一个
+
+\subsection{Multi-agent Reinforcement Learning with Real World Data}
+
+详细的细节写到这里
+
