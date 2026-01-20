@@ -289,13 +289,14 @@ class S5SSMParams(Model):
             """Apply noise to param if iterinfo is provided (ES training)."""
             param = common_params.params[name]
             es_key = common_params.es_tree_key[name]
+            es_map_val = common_params.es_map[name]
             if common_params.iterinfo is None:
                 # Inference mode - no noise
                 return param
             return noiser.get_noisy_standard(
                 common_params.frozen_noiser_params,
                 common_params.noiser_params,
-                param, es_key, common_params.iterinfo
+                param, es_key, es_map_val, common_params.iterinfo
             )
 
         # Get parameters (with potential ES noise)
@@ -376,12 +377,13 @@ class S5SSMParams(Model):
         def get_param(name):
             param = common_params.params[name]
             es_key = common_params.es_tree_key[name]
+            es_map_val = common_params.es_map[name]
             if common_params.iterinfo is None:
                 return param
             return noiser.get_noisy_standard(
                 common_params.frozen_noiser_params,
                 common_params.noiser_params,
-                param, es_key, common_params.iterinfo
+                param, es_key, es_map_val, common_params.iterinfo
             )
 
         # Get parameters

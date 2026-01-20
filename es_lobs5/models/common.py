@@ -83,6 +83,7 @@ class ES_Parameter(Model):
             common_params.noiser_params,
             common_params.params,
             common_params.es_tree_key,
+            common_params.es_map,
             common_params.iterinfo
         )
 

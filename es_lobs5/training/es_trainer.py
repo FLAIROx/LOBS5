@@ -1373,6 +1373,7 @@ class ESTrainer:
             noiser_params=self.noiser_params,
             params=self.lobs5_init.params,
             es_tree_key=self.es_tree_key,
+            es_map=self.lobs5_init.es_map,
             frozen_params=self.lobs5_init.frozen_params,
             iterinfo=None,  # No noise for World Model
         )
@@ -1387,6 +1388,7 @@ class ESTrainer:
             noiser_params=self.noiser_params,
             params=self.lobs5_init.params,
             es_tree_key=self.es_tree_key,
+            es_map=self.lobs5_init.es_map,
             frozen_params=self.lobs5_init.frozen_params,
             iterinfo=iterinfo,
         )
@@ -1422,6 +1424,7 @@ class ESTrainer:
         noiser_cls = self.noiser_cls
         frozen_noiser_params = self.frozen_noiser_params
         es_tree_key = self.es_tree_key
+        es_map = self.lobs5_init.es_map
         frozen_params = self.lobs5_init.frozen_params
         CommonParams = _get_common_params()
 
@@ -1449,6 +1452,7 @@ class ESTrainer:
                 noiser_params=noiser_params,
                 params=params,
                 es_tree_key=es_tree_key,
+                es_map=es_map,
                 frozen_params=frozen_params,
                 iterinfo=None,  # World Model has no ES noise
             )
@@ -1460,6 +1464,7 @@ class ESTrainer:
                 noiser_params=noiser_params,
                 params=params,
                 es_tree_key=es_tree_key,
+                es_map=es_map,
                 frozen_params=frozen_params,
                 iterinfo=iterinfo,
             )
