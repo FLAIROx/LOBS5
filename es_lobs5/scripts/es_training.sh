@@ -95,6 +95,11 @@ cd ${BASE_DIR}/AlphaTrade/LOBS5
 source ${CONDA_PATH}/etc/profile.d/conda.sh
 conda activate lobs5
 
+# Debug: verify conda activate worked
+echo "DEBUG: Python after conda activate: $(which python)"
+echo "DEBUG: CONDA_DEFAULT_ENV: $CONDA_DEFAULT_ENV"
+python -c "import sys; print(f'DEBUG: sys.executable = {sys.executable}')"
+
 # -----------------------------------------------------------------------------
 # JAX Compilation Cache (must be set BEFORE Python/JAX starts)
 # Caches XLA compilation results to disk for fast warm start (~20min → <2min)
