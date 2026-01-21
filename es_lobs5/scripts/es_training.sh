@@ -172,44 +172,19 @@ TOKEN_MODE="${TOKEN_MODE:-24}"
 # =============================================================================
 # Training Mode (single variable to control all LoRA settings)
 # =============================================================================
-# MODE options:
+# MODE options (handled by Python's training_modes.py):
 #   FULL      - Full parameter training (no LoRA)
 #   LORA      - LoRA-only training (freeze non-LoRA params)
-#   LORA+SSM  - LoRA + SSM params training
-#   LORA_V1.5 - LoRA v1.5: Expand LoRA to all projections, freeze SSM/norm
-#   LORA_V2   - LoRA v2: Expand LoRA to all projections + train SSM/norm
+#   LORA+SSM  - LoRA + SSM params training (legacy)
+#   LORA_V1.5 - LoRA on all projections, freeze SSM, train norms [Recommended]
+#   LORA_V2   - LoRA on all projections + train SSM/norms
 # =============================================================================
-FREEZE_SSM="False"
 MODE="${MODE:-LORA_V1.5}"
 
-# Derive internal flags from MODE
+# Validate MODE (Python will also validate, but fail fast here)
 case "${MODE}" in
-    FULL)
-        USE_LORA="False"
-        FREEZE_NONLORA="False"
-        LORA_V2="False"
-        ;;
-    LORA)
-        USE_LORA="True"
-        FREEZE_NONLORA="True"
-        LORA_V2="False"
-        ;;
-    LORA+SSM)
-        USE_LORA="True"
-        FREEZE_NONLORA="False"
-        LORA_V2="False"
-        ;;
-    LORA_V1.5)
-        USE_LORA="True"
-        FREEZE_NONLORA="False"
-        LORA_V2="True"
-        FREEZE_SSM="True"
-        ;;
-    LORA_V2)
-        USE_LORA="True"
-        FREEZE_NONLORA="False"
-        LORA_V2="True"
-        ;;
+    FULL|LORA|LORA+SSM|LORA_V1.5|LORA_V2)
+        ;;  # Valid mode
     *)
         echo "ERROR: Unknown MODE '${MODE}'. Valid options: FULL, LORA, LORA+SSM, LORA_V1.5, LORA_V2"
         exit 1
@@ -294,10 +269,7 @@ ${CONDA_PATH}/envs/lobs5/bin/python es_lobs5/scripts/es_training.py \
     --checkpoint_dir "${CHECKPOINT_DIR}" \
     --wandb_project "${WANDB_PROJECT}" \
     --wandb_entity "${WANDB_ENTITY}" \
-    --freeze_nonlora ${FREEZE_NONLORA} \
-    --use_lora "${USE_LORA:-False}" \
-    --freeze_ssm "${FREEZE_SSM}" \
-    --lora_v2 "${LORA_V2}" \
+    --mode "${MODE}" \
     --seed ${SEED} \
     ${FILE_IDX_ARG} \
     "$@"

@@ -118,6 +118,28 @@ _CommonParams = None
 _simple_es_tree_key = None
 _load_checkpoint_for_es = None
 
+# Training mode configuration (lazy loaded)
+_training_modes = None
+
+
+def _get_training_modes():
+    """Lazy load training modes configuration."""
+    global _training_modes
+    if _training_modes is None:
+        from .training_modes import (
+            get_mode_config, get_param_classifier, apply_es_map_classification,
+            print_mode_config, is_lora_mode, get_all_modes
+        )
+        _training_modes = {
+            'get_mode_config': get_mode_config,
+            'get_param_classifier': get_param_classifier,
+            'apply_es_map_classification': apply_es_map_classification,
+            'print_mode_config': print_mode_config,
+            'is_lora_mode': is_lora_mode,
+            'get_all_modes': get_all_modes,
+        }
+    return _training_modes
+
 
 def _get_all_noisers():
     """Lazy load noisers."""
@@ -399,13 +421,23 @@ def create_es_config():
     parser.add_argument('--sigma', type=float, default=0.01, help='Noise std')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--lora_rank', type=int, default=4, help='LORA rank')
-    parser.add_argument('--use_lora', type=str2bool, default=False, help='Use LORA (Low-Rank Adaptation). Default: False')
-    parser.add_argument('--freeze_nonlora', type=str2bool, default=False,
-                        help='Freeze non-LORA params (embeddings, base model). Default: False (train log_step, B, C, D)')
-    parser.add_argument('--lora_v2', type=str2bool, default=False,
-                        help='LORA v2: Expand LoRA to all projection matrices (input_proj, proj, out2). Based on ICLR 2025 research.')
-    parser.add_argument('--freeze_ssm', type=str2bool, default=False,
-                        help='Freeze SSM parameters (B, C, D, log_step). Used with LORA_V2 for LORA_V1.5 mode.')
+
+    # Training mode (replaces use_lora, freeze_nonlora, lora_v2, freeze_ssm)
+    parser.add_argument('--mode', type=str, default='LORA_V1.5',
+                        choices=['LORA', 'LORA_V1.5', 'LORA_V2', 'FULL', 'LORA+SSM'],
+                        help='Training mode: LORA (out2 only), LORA_V1.5 (all projections, freeze SSM), '
+                             'LORA_V2 (all projections + SSM), FULL (no LoRA). Default: LORA_V1.5')
+
+    # [DEPRECATED] Legacy boolean flags - kept for backwards compatibility
+    # These are now ignored; use --mode instead
+    parser.add_argument('--use_lora', type=str2bool, default=None,
+                        help='[DEPRECATED] Use --mode instead. This flag is ignored.')
+    parser.add_argument('--freeze_nonlora', type=str2bool, default=None,
+                        help='[DEPRECATED] Use --mode instead. This flag is ignored.')
+    parser.add_argument('--lora_v2', type=str2bool, default=None,
+                        help='[DEPRECATED] Use --mode instead. This flag is ignored.')
+    parser.add_argument('--freeze_ssm', type=str2bool, default=None,
+                        help='[DEPRECATED] Use --mode instead. This flag is ignored.')
 
     # Training configuration
     parser.add_argument('--pergpu_perturbations', type=int, default=32,
@@ -977,178 +1009,50 @@ class ESTrainer:
 
 
     def _init_noiser(self):
-        """Initialize EGGROLL noiser for Policy."""
+        """Initialize EGGROLL noiser for Policy using declarative mode configuration.
+
+        Training modes are defined in training_modes.py. The mode parameter
+        replaces the old boolean flags (use_lora, freeze_nonlora, lora_v2, freeze_ssm).
+        """
         config = self.config
         all_noisers = _get_all_noisers()
         NOISER = all_noisers[config.noiser]
-
         self.noiser_cls = NOISER
 
         # Get group_size from config (required for EggRollBS, default 0 for EggRoll)
         group_size = getattr(config, 'group_size', 0)
 
-        # freeze_nonlora=True: Only train LORA parameters (out2), freeze everything else
-        # freeze_nonlora=False: Train log_step, B, C, D, norm, bias + LORA (recommended)
-        # Note: Lambda eigenvalues are ALWAYS frozen for stability (hardcoded in checkpoint_adapter.py)
-        freeze_nonlora = getattr(config, 'freeze_nonlora', False)  # Default: train SSM params
-
         # ========================================================================
-        # [MODIFIED] Full Mode Handler (Disable LoRA)
+        # MODE-BASED CONFIGURATION (replaces scattered boolean flags)
         # ========================================================================
-        use_lora = getattr(config, 'use_lora', False)
-        if not use_lora:
-            print(f"[NOISER] use_lora=False DETECTED: Switching to FULL FINE-TUNING mode")
-            
-            # 1. Remap all MM_PARAM (1) to PARAM (0) in es_map
-            # This treats 2D weights as full parameters instead of LoRA candidates
-            # es_map uses: 0=PARAM (full), 1=MM_PARAM (lora), 3=EXCLUDED
-            from ..models.common import PARAM, MM_PARAM
-            
-            def remap_to_full(map_tree):
-                if isinstance(map_tree, dict):
-                    return {k: remap_to_full(v) for k, v in map_tree.items()}
-                else:
-                    # If it's a leaf value and it's MM_PARAM, switch to PARAM
-                    # Leave EXCLUDED (3) and FIXED (2) alone
-                    if map_tree == MM_PARAM:
-                        return PARAM
-                    return map_tree
-            
-            self.lobs5_init.es_map = remap_to_full(self.lobs5_init.es_map)
-            print(f"[NOISER]   > All LoRA parameters (MM_PARAM) remapped to FULL (PARAM)")
-            
-            # 2. Force freeze_nonlora=False
-            # Full mode implies training everything (except EXCLUDED stability params)
-            if freeze_nonlora:
-                print(f"[NOISER]   > Overriding freeze_nonlora=True -> False (required for clean full mode)")
-                freeze_nonlora = False
-                config.freeze_nonlora = False
+        training_modes = _get_training_modes()
+        mode = getattr(config, 'mode', 'LORA_V1.5')
 
-        # ========================================================================
-        # [NEW] LORA v2 Mode Handler (Expand LoRA to all projection matrices)
-        # Based on ICLR 2025: "Parameter-Efficient Fine-Tuning of State Space Models"
-        # arXiv: https://arxiv.org/abs/2410.09016
-        # Research finding: LoRA effective on projections, not on SSM modules
-        # ========================================================================
-        lora_v2 = getattr(config, 'lora_v2', False)
-        if lora_v2 and use_lora:
-            print(f"\n[NOISER] ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
-            print(f"[NOISER] ║                                       LORA v2 MODE ENABLED                                                ║")
-            print(f"[NOISER] ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════╣")
-            print(f"[NOISER] ║  Reference: 'Parameter-Efficient Fine-Tuning of State Space Models'                                      ║")
-            print(f"[NOISER] ║             ICLR 2025 | https://arxiv.org/abs/2410.09016                                                 ║")
-            print(f"[NOISER] ║  Finding:   LoRA effective on projection matrices, fails on SSM modules (B, C, Δ)                        ║")
-            print(f"[NOISER] ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
+        # Warn if deprecated flags are used
+        deprecated_flags = ['use_lora', 'freeze_nonlora', 'lora_v2', 'freeze_ssm']
+        used_deprecated = [f for f in deprecated_flags if getattr(config, f, None) is not None]
+        if used_deprecated:
+            print(f"[NOISER] WARNING: Deprecated flags ignored: {used_deprecated}")
+            print(f"[NOISER]          Use --mode instead. Current mode: {mode}")
 
-            from ..models.common import PARAM, MM_PARAM, LORA_V2_PATTERNS
+        # Get mode configuration
+        mode_config = training_modes['get_mode_config'](mode)
 
-            # Print the LORA v2 scope table
-            print(f"[NOISER]")
-            print(f"[NOISER] ┌───────────────────┬─────────────────┬────────┬─────────┬──────────────────────────────────────────┐")
-            print(f"[NOISER] │     Parameter     │      Shape      │ Before │ LORA v2 │                  Reason                  │")
-            print(f"[NOISER] ├───────────────────┼─────────────────┼────────┼─────────┼──────────────────────────────────────────┤")
-            print(f"[NOISER] │ out2/weight       │ (2048, 2048)    │ LoRA   │ LoRA    │ Output projection matrix                 │")
-            print(f"[NOISER] │ input_proj/weight │ (2048, 4096)    │ FULL   │ LoRA    │ Input projection (expanded in v2)        │")
-            print(f"[NOISER] │ proj/weight       │ (2048, 503)     │ FULL   │ LoRA    │ Book encoder projection (expanded in v2) │")
-            print(f"[NOISER] ├───────────────────┼─────────────────┼────────┼─────────┼──────────────────────────────────────────┤")
-            print(f"[NOISER] │ ssm/B             │ (1024, 2048, 2) │ FULL   │ FULL    │ SSM input matrix (discretization issue)  │")
-            print(f"[NOISER] │ ssm/C             │ (2048, 1024, 2) │ FULL   │ FULL    │ SSM output matrix (discretization issue) │")
-            print(f"[NOISER] └───────────────────┴─────────────────┴────────┴─────────┴──────────────────────────────────────────┘")
-            print(f"[NOISER]")
+        # Print mode configuration table
+        training_modes['print_mode_config'](mode)
 
-            # Helper to check if path matches any LORA_V2 pattern
-            def matches_lora_v2_pattern(path_str):
-                for pattern in LORA_V2_PATTERNS:
-                    if path_str.endswith(pattern):
-                        return True
-                return False
+        # Apply es_map classification based on mode
+        classifier = training_modes['get_param_classifier'](mode)
+        self.lobs5_init.es_map = training_modes['apply_es_map_classification'](
+            self.lobs5_init.es_map,
+            self.lobs5_init.params,
+            classifier
+        )
 
-            # Helper to remap es_map for LORA v2
-            def remap_for_lora_v2(map_tree, params_tree, path=""):
-                if isinstance(map_tree, dict):
-                    return {
-                        k: remap_for_lora_v2(map_tree[k], params_tree[k], f"{path}/{k}" if path else k)
-                        for k in map_tree
-                    }
-                else:
-                    # Leaf node - check if this path should be converted to LoRA
-                    if map_tree == PARAM and matches_lora_v2_pattern(path):
-                        # Check if the parameter is 2D (suitable for LoRA)
-                        if hasattr(params_tree, 'ndim') and params_tree.ndim == 2:
-                            print(f"[NOISER]   > Converting {path} from FULL to LoRA (v2)")
-                            return MM_PARAM
-                    return map_tree
+        # Get freeze_nonlora from mode config
+        freeze_nonlora = mode_config.freeze_nonlora
 
-            self.lobs5_init.es_map = remap_for_lora_v2(
-                self.lobs5_init.es_map,
-                self.lobs5_init.params
-            )
-            print(f"[NOISER]")
-        elif lora_v2 and not use_lora:
-            print(f"[NOISER] WARNING: lora_v2=True but use_lora=False. LORA v2 requires use_lora=True. Ignoring.")
-
-
-        # ========================================================================
-        # [NEW] FREEZE SSM Mode (LORA_V1.5 = LORA_V2 + FREEZE_SSM)
-        # Based on standard PEFT best practices:
-        # - Databricks: https://www.databricks.com/blog/efficient-fine-tuning-lora-guide-llms
-        # - Sebastian Raschka: https://magazine.sebastianraschka.com/p/practical-tips-for-finetuning-llms
-        # ========================================================================
-        freeze_ssm = getattr(config, 'freeze_ssm', False)
-        if freeze_ssm:
-            print(f"\n[NOISER] ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
-            print(f"[NOISER] ║                                      LORA v1.5 MODE ENABLED                                               ║")
-            print(f"[NOISER] ║                                    (LORA_V2 + FREEZE_SSM)                                                 ║")
-            print(f"[NOISER] ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════╣")
-            print(f"[NOISER] ║  References:                                                                                              ║")
-            print(f"[NOISER] ║    [1] Hu et al. 'LoRA' ICLR 2022: https://arxiv.org/abs/2106.09685                                       ║")
-            print(f"[NOISER] ║    [2] Galim et al. 'PEFT of SSMs' ICML 2025: https://arxiv.org/abs/2410.09016                            ║")
-            print(f"[NOISER] ║  Practice:  LoRA on projections, freeze SSM (B,C,D), train LayerNorm/bias for extra performance          ║")
-            print(f"[NOISER] ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
-
-            # Print comparison table
-            # Research refs:
-            #   [1] Hu et al. "LoRA" ICLR 2022: bias='none' default, but "training biases might squeeze out extra performance"
-            #   [2] Galim et al. "PEFT of SSMs" ICML 2025: LoRA effective on projections, fails on SSM modules (B,C,D)
-            #   [3] https://arxiv.org/abs/2106.09685 (LoRA), https://arxiv.org/abs/2410.09016 (SSM-PEFT)
-            print(f"[NOISER]")
-            print(f"[NOISER] ┌───────────────────────┬─────────────────┬───────────┬───────────┬──────────┐")
-            print(f"[NOISER] │       Parameter       │      Shape      │   LORA    │ LORA_V1.5 │ LORA_V2  │")
-            print(f"[NOISER] ├───────────────────────┼─────────────────┼───────────┼───────────┼──────────┤")
-            print(f"[NOISER] │ Projections           │                 │           │           │          │")
-            print(f"[NOISER] │ out2/weight           │ (2048, 2048)    │ LoRA      │ LoRA      │ LoRA     │")
-            print(f"[NOISER] │ input_proj/weight     │ (2048, 4096)    │ Frozen    │ LoRA  ←   │ LoRA     │")
-            print(f"[NOISER] │ proj/weight           │ (2048, 503)     │ Frozen    │ LoRA  ←   │ LoRA     │")
-            print(f"[NOISER] ├───────────────────────┼─────────────────┼───────────┼───────────┼──────────┤")
-            print(f"[NOISER] │ SSM Parameters        │                 │           │  [2]      │          │")
-            print(f"[NOISER] │ ssm/B, C, D, log_step │ varies          │ Frozen    │ Frozen ←  │ FULL     │")
-            print(f"[NOISER] ├───────────────────────┼─────────────────┼───────────┼───────────┼──────────┤")
-            print(f"[NOISER] │ Other                 │                 │           │  [1]      │          │")
-            print(f"[NOISER] │ norm/weight, bias     │ varies          │ Frozen    │ FULL  ←   │ FULL     │")
-            print(f"[NOISER] │ Lambda, decoder, emb  │ varies          │ Fixed     │ Fixed     │ Fixed    │")
-            print(f"[NOISER] └───────────────────────┴─────────────────┴───────────┴───────────┴──────────┘")
-            print(f"[NOISER]")
-            print(f"[NOISER] Notes:")
-            print(f"[NOISER]   [1] LoRA paper: LayerNorm/bias training left to future work; default='none' but can help")
-            print(f"[NOISER]   [2] SSM-PEFT paper: LoRA fails on SSM modules, freeze recommended")
-            print(f"[NOISER]")
-
-            from ..models.common import EXCLUDED
-            SSM_PATTERNS = ('ssm/B', 'ssm/C', 'ssm/D', 'ssm/log_step')
-
-            def remap_ssm_to_excluded(map_tree, path=""):
-                if isinstance(map_tree, dict):
-                    return {k: remap_ssm_to_excluded(v, f"{path}/{k}" if path else k) for k, v in map_tree.items()}
-                else:
-                    for pattern in SSM_PATTERNS:
-                        if path.endswith(pattern):
-                            print(f"[NOISER]   > Freezing {path} (SSM parameter)")
-                            return EXCLUDED
-                    return map_tree
-
-            self.lobs5_init.es_map = remap_ssm_to_excluded(self.lobs5_init.es_map)
-            print(f"[NOISER]")
-
+        # Initialize noiser
         self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
             self.lobs5_init.params,
             sigma=config.sigma,
@@ -1160,16 +1064,14 @@ class ESTrainer:
             solver=None,  # Uses default optax.sgd
         )
 
-        # Log training mode
-        if not use_lora:
-            print(f"[NOISER] Full fine-tuning (LoRA Disabled): use_lora=False")
+        # Log training mode summary
+        is_lora = training_modes['is_lora_mode'](mode)
+        if not is_lora:
+            print(f"[NOISER] Full fine-tuning mode: {mode}")
             print(f"[NOISER] All valid parameters will be updated directly")
-        elif freeze_nonlora:
-            print(f"[NOISER] LORA-only training: freeze_nonlora=True, rank={config.lora_rank}")
-            print(f"[NOISER] Only LORA parameters will be updated (embeddings & base model frozen)")
         else:
-            print(f"[NOISER] Hybrid training: LoRA + SSM fine-tuning (freeze_nonlora=False), rank={config.lora_rank}")
-            print(f"[NOISER] WARNING: ALL parameters will be updated (including embeddings)")
+            print(f"[NOISER] LoRA training mode: {mode}, rank={config.lora_rank}")
+            print(f"[NOISER] freeze_nonlora={freeze_nonlora}")
 
         # Detailed Parameter Logging
         self._log_detailed_param_stats(self.lobs5_init.params, self.lobs5_init.es_map, config, freeze_nonlora)
