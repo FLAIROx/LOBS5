@@ -20,9 +20,13 @@
 # Results (2026-01-20, LORA_V1.5 with dots_with_no_batch_dims_saveable):
 #   160 per-GPU (640 total) -> COMPLETED (confirmed working)
 #
-# Current Test (2026-01-21): Exponential scaling test
-#   Testing with dots_with_no_batch_dims_saveable checkpoint policy
-#   Goal: Find max stable PERGPU value
+# Results (2026-01-21, LORA_V1.5 exponential scaling test):
+#   256 per-GPU (1,024 total)  -> COMPLETED (0.19h)
+#   512 per-GPU (2,048 total)  -> COMPLETED (0.20h) ★ NEW MAX STABLE
+#   1024 per-GPU (4,096 total) -> OOM (~17.7GB alloc)
+#   2048+ per-GPU              -> OOM (scales linearly)
+#
+# Summary: 4x improvement over default remat (128 -> 512 per-GPU)
 # =============================================================================
 
 set -e

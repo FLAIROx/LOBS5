@@ -23,6 +23,16 @@
 # 1927436   64                     256               COMPLETED  ✅ Success (Timed out after 40m)
 # 1927437   128                    512               FAILED     ❌ OOM (Alloc 71GB)
 #
+# PERGPU_PERTURBATIONS Scaling Test Results (2026-01-21, LORA_V1.5):
+# ------------------------------------------------------
+# With dots_with_no_batch_dims_saveable checkpoint policy:
+# Job ID    Per-GPU Perturbations  Total Population  Status     Result/Error
+# 1950636   256                    1,024             COMPLETED  ✅ Success (0.19h)
+# 1950637   512                    2,048             COMPLETED  ✅ Success (0.20h) ★ MAX STABLE
+# 1950638   1024                   4,096             FAILED     ❌ OOM (~17.7GB alloc)
+#
+# Summary: 4x improvement over default remat (128 -> 512 per-GPU)
+#
 # Jobs 18,432+ all fail with OOM (RESOURCE_EXHAUSTED ~48-80GB allocation)
 # The "Aborted" status indicates XLA runtime forced abort to prevent deadlock
 # after one replica hit OOM during distributed computation.
