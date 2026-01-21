@@ -59,6 +59,11 @@ LORA_V1_PATTERNS = ('out2/weight',)  # Default LoRA: only out2
 LORA_V2_PATTERNS = ('out2/weight', 'input_proj/weight', 'proj/weight')  # Expanded LoRA
 SSM_PATTERNS = ('ssm/B', 'ssm/C', 'ssm/D', 'ssm/log_step')  # SSM parameters
 
+# Parameters that should NEVER be trained (per HyperscaleES best practice)
+# From eggroll.py: "Lambda, decoder, embeddings: Fixed (FIXED)"
+# These create full-rank noise tensors (~33 MB/perturbation) with no benefit
+NEVER_TRAIN_PATTERNS = ('decoder', 'embedding')
+
 
 # =============================================================================
 # TRAINING MODES CONFIGURATION MATRIX
@@ -79,12 +84,22 @@ TRAINING_MODES: Dict[str, ModeConfig] = {
 
     "LORA_V1.5": ModeConfig(
         name="LORA_V1.5",
-        description="LoRA on all projections, freeze SSM, train norms [Recommended]",
+        description="LoRA on all projections, freeze SSM, train norms",
         projections=ParamBehavior.LORA,      # All projections get LoRA
         ssm_params=ParamBehavior.FROZEN,     # B, C, D, log_step frozen [2]
         norm_bias=ParamBehavior.FULL,        # LayerNorm trainable [1]
         freeze_nonlora=False,                # Allow non-LoRA param updates
         lora_patterns=LORA_V2_PATTERNS,
+    ),
+
+    "LORA_V1.6": ModeConfig(
+        name="LORA_V1.6",
+        description="LoRA on all projections, freeze SSM/norms [High Capacity, Recommended]",
+        projections=ParamBehavior.LORA,      # All projections get LoRA
+        ssm_params=ParamBehavior.FROZEN,     # B, C, D, log_step frozen [2]
+        norm_bias=ParamBehavior.FROZEN,      # LayerNorm FROZEN (not FULL!)
+        freeze_nonlora=True,                 # Freeze non-LoRA params
+        lora_patterns=LORA_V2_PATTERNS,      # Same patterns as V1.5
     ),
 
     "LORA_V2": ModeConfig(
@@ -192,6 +207,12 @@ def get_param_classifier(mode: str) -> Callable[[str, Any], int]:
                 return ESMapType.EXCLUDED
             return ESMapType.PARAM
 
+        # CRITICAL: decoder/embedding should ALWAYS be EXCLUDED
+        # Per HyperscaleES best practice (eggroll.py: "decoder, embeddings: Fixed")
+        # These create full-rank noise tensors (~33 MB/perturbation) with no benefit
+        if any(pattern in path for pattern in NEVER_TRAIN_PATTERNS):
+            return ESMapType.EXCLUDED
+
         # Default behavior for other params
         if config.freeze_nonlora:
             return ESMapType.EXCLUDED
@@ -276,6 +297,7 @@ __all__ = [
     'SSM_PATTERNS',
     'LORA_V1_PATTERNS',
     'LORA_V2_PATTERNS',
+    'NEVER_TRAIN_PATTERNS',
     'get_mode_config',
     'is_lora_mode',
     'get_param_classifier',

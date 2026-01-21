@@ -187,17 +187,18 @@ TOKEN_MODE="${TOKEN_MODE:-24}"
 #   FULL      - Full parameter training (no LoRA)
 #   LORA      - LoRA-only training (freeze non-LoRA params)
 #   LORA+SSM  - LoRA + SSM params training (legacy)
-#   LORA_V1.5 - LoRA on all projections, freeze SSM, train norms [Recommended]
+#   LORA_V1.5 - LoRA on all projections, freeze SSM, train norms
+#   LORA_V1.6 - LoRA on all projections, freeze SSM/norms [High Capacity, Recommended]
 #   LORA_V2   - LoRA on all projections + train SSM/norms
 # =============================================================================
-MODE="${MODE:-LORA_V1.5}"
+MODE="${MODE:-LORA_V1.6}"
 
 # Validate MODE (Python will also validate, but fail fast here)
 case "${MODE}" in
-    FULL|LORA|LORA+SSM|LORA_V1.5|LORA_V2)
+    FULL|LORA|LORA+SSM|LORA_V1.5|LORA_V1.6|LORA_V2)
         ;;  # Valid mode
     *)
-        echo "ERROR: Unknown MODE '${MODE}'. Valid options: FULL, LORA, LORA+SSM, LORA_V1.5, LORA_V2"
+        echo "ERROR: Unknown MODE '${MODE}'. Valid options: FULL, LORA, LORA+SSM, LORA_V1.5, LORA_V1.6, LORA_V2"
         exit 1
         ;;
 esac
@@ -225,7 +226,7 @@ printf "│            │ SIGMA                             │ %-14s │ %-59s
 printf "│            │ LR                                │ %-14s │ %-59s │\n" "${LR}" "Learning rate"
 printf "│            │ NOISER                            │ %-14s │ %-59s │\n" "${NOISER}" "Type of noise strategy used"
 printf "│            │ LORA_RANK                         │ %-14s │ %-59s │\n" "${LORA_RANK}" "Rank for LoRA adapters"
-printf "│            │ MODE                              │ %-14s │ %-59s │\n" "${MODE}" "Training mode: FULL / LORA / LORA+SSM / LORA_V1.5 / LORA_V2"
+printf "│            │ MODE                              │ %-14s │ %-59s │\n" "${MODE}" "Training mode (V1.6=high capacity, V1.5=train norms)"
 echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
 printf "│ System     │ CHECKPOINT_EVERY                  │ %-14s │ %-59s │\n" "${CHECKPOINT_EVERY}" "Epoch frequency to save checkpoints"
 printf "│            │ TOKEN_MODE                        │ %-14s │ %-59s │\n" "${TOKEN_MODE}" "Token vocabulary mode (24 = base-100 encoding)"
