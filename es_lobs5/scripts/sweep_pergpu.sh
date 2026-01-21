@@ -32,8 +32,18 @@
 #
 # Results (2026-01-21, LORA_V1.6 scaling test):
 #   Commit: bf3b9a7 (feat: add LORA_V1.6 mode and fix decoder/embedding bug)
-#   Expected: ~14,336 per-GPU (same as LORA mode due to freeze_nonlora=True)
-#   Jobs: TBD
+#   Config: N_EPOCHS=1000, TIME_LIMIT=02:00:00, freeze_nonlora=True
+#
+#   | PERGPU | Total  | Job ID  | Status  | Speed    | Log File                      |
+#   |--------|--------|---------|---------|----------|-------------------------------|
+#   | 512    | 2,048  | 1951459 | RUNNING | 3.04s/it | logs/es_train_1951459.out     |
+#   | 1024   | 4,096  | 1951460 | RUNNING | 3.78s/it | logs/es_train_1951460.out     |
+#   | 2048   | 8,192  | 1951461 | RUNNING | 5.46s/it | logs/es_train_1951461.out     |
+#   | 4096   | 16,384 | 1951462 | RUNNING | 9.33s/it | logs/es_train_1951462.out     |
+#   | 8192   | 32,768 | 1951463 | RUNNING | 16.70s/it| logs/es_train_1951463.out     |
+#   | 14336  | 57,344 | 1951464 | RUNNING | 28.69s/it| logs/es_train_1951464.out     |
+#
+#   ★ ALL 6 JOBS RUNNING - 28x improvement over LORA_V1.5 (512 -> 14336 per-GPU)
 # =============================================================================
 
 set -e
