@@ -21,12 +21,14 @@
 #   160 per-GPU (640 total) -> COMPLETED (confirmed working)
 #
 # Results (2026-01-21, LORA_V1.5 exponential scaling test):
-#   256 per-GPU (1,024 total)  -> COMPLETED (0.19h)
-#   512 per-GPU (2,048 total)  -> COMPLETED (0.20h) ★ NEW MAX STABLE
-#   1024 per-GPU (4,096 total) -> OOM (~17.7GB alloc)
-#   2048+ per-GPU              -> OOM (scales linearly)
+#   Checkpoint policy: dots_with_no_batch_dims_saveable (commit 2a9e899)
+#   256 per-GPU (1,024 total)  -> COMPLETED (0.19h) Job 1950636
+#   512 per-GPU (2,048 total)  -> COMPLETED (0.20h) Job 1950637 ★ NEW MAX STABLE
+#   1024 per-GPU (4,096 total) -> OOM (~17.7GB alloc) Job 1950638
+#   2048+ per-GPU              -> OOM (scales linearly) Jobs 1950639-1950642
 #
 # Summary: 4x improvement over default remat (128 -> 512 per-GPU)
+# Commits: 9ec0d2d (sweep script), 987a042 (results docs)
 # =============================================================================
 
 set -e
