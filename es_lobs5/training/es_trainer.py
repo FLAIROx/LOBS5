@@ -423,10 +423,11 @@ def create_es_config():
     parser.add_argument('--lora_rank', type=int, default=4, help='LORA rank')
 
     # Training mode (replaces use_lora, freeze_nonlora, lora_v2, freeze_ssm)
-    parser.add_argument('--mode', type=str, default='LORA_V1.5',
-                        choices=['LORA', 'LORA_V1.5', 'LORA_V2', 'FULL', 'LORA+SSM'],
-                        help='Training mode: LORA (out2 only), LORA_V1.5 (all projections, freeze SSM), '
-                             'LORA_V2 (all projections + SSM), FULL (no LoRA). Default: LORA_V1.5')
+    parser.add_argument('--mode', type=str, default='LORA_V1.6',
+                        choices=['LORA', 'LORA_V1.5', 'LORA_V1.6', 'LORA_V2', 'FULL', 'LORA+SSM'],
+                        help='Training mode: LORA (out2 only), LORA_V1.5 (all proj, train norms), '
+                             'LORA_V1.6 (all proj, freeze norms), LORA_V2 (all proj + SSM), '
+                             'FULL (no LoRA). Default: LORA_V1.6')
 
     # [DEPRECATED] Legacy boolean flags - kept for backwards compatibility
     # These are now ignored; use --mode instead
