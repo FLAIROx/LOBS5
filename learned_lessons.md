@@ -1008,3 +1008,79 @@ Check:         if map_classification in (2, 3): return param ✓
 
 - HyperscaleES: `cd7baa0` fix(noiser): add es_map parameter to get_noisy_standard to respect EXCLUDED/FIXED classifications
 - LOBS5: `8f9d674` fix(es_trainer): propagate es_map through CommonParams to enable EXCLUDED parameter filtering
+
+---
+
+## 2026-01-21
+
+### PERGPU Perturbations Scaling Test with dots_with_no_batch_dims_saveable
+
+#### Background
+
+Testing the maximum PERGPU_PERTURBATIONS supported with the new `dots_with_no_batch_dims_saveable` checkpoint policy in LORA_V1.5 mode.
+
+**Historical Context:**
+- Previous max (default remat): PERGPU=128 (512 total)
+- With LORA (frozen) mode: PERGPU=14,336 (57,344 total)
+- With dots_with_no_batch_dims_saveable (Jan 20): PERGPU=160 (640 total) confirmed
+
+#### Test Configuration
+
+- **MODE:** LORA_V1.5
+- **N_EPOCHS:** 3 (short validation runs)
+- **Checkpoint policy:** `dots_with_no_batch_dims_saveable`
+
+Exponential scaling test values:
+| PERGPU | Total Population | Test Purpose |
+|--------|------------------|--------------|
+| 256 | 1,024 | 2x baseline |
+| 512 | 2,048 | 4x baseline |
+| 1024 | 4,096 | 8x baseline |
+| 2048 | 8,192 | 16x baseline |
+| 4096 | 16,384 | 32x baseline |
+| 8192 | 32,768 | 64x baseline |
+| 14336 | 57,344 | Historical max |
+
+#### Results
+
+| Job ID | PERGPU | Total | Status | Memory/Notes |
+|--------|--------|-------|--------|--------------|
+| 1950636 | 256 | 1,024 | ✅ SUCCESS | Completed in 0.19h |
+| 1950637 | 512 | 2,048 | ✅ SUCCESS | Completed in 0.20h ★ **NEW MAX STABLE** |
+| 1950638 | 1024 | 4,096 | ❌ OOM | ~17.7 GB allocation failed |
+| 1950639 | 2048 | 8,192 | ❌ OOM | ~35.4 GB allocation failed |
+| 1950640 | 4096 | 16,384 | ❌ OOM | ~48 GB allocation failed |
+| 1950641 | 8192 | 32,768 | ❌ OOM | ~89 GB allocation failed |
+| 1950642 | 14336 | 57,344 | ❌ OOM | ~150 GB allocation failed |
+
+#### Key Insights
+
+1. **4x Improvement Over Default Remat:**
+   - Previous max: PERGPU=128 → New max: PERGPU=512
+   - Total population: 512 → 2,048
+
+2. **Memory Scaling Is Roughly Linear:**
+   - 1024 perturbations → ~17.7 GB OOM
+   - 2048 perturbations → ~35.4 GB OOM (2x)
+   - 4096 perturbations → ~48 GB OOM (less than 2x, some fixed overhead)
+
+3. **LORA_V1.5 vs LORA (frozen) Trade-off:**
+   - LORA (frozen): 14,336 per GPU (only LoRA params trainable)
+   - LORA_V1.5: 512 per GPU (LoRA + norms trainable)
+   - Training norms adds ~28x memory overhead per perturbation
+
+4. **Checkpoint Policy Impact:**
+   - `dots_with_no_batch_dims_saveable` saves activations at dot product boundaries
+   - Reduces peak memory during backpropagation
+   - Enables larger batch sizes than default rematerialization
+
+#### Recommendations
+
+- **For maximum throughput:** Use PERGPU=512 with LORA_V1.5
+- **For maximum expressiveness at smaller scale:** Use LORA_V2 at PERGPU=64
+- **For exploration runs:** Start with PERGPU=256 (safe margin)
+
+#### Commits
+
+- `9ec0d2d` feat(scripts): add pergpu perturbations sweep script
+- `987a042` docs(scripts): add LORA_V1.5 scaling test results
