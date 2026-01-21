@@ -101,7 +101,7 @@ export WANDB_API_KEY="41f4ee88a220359a48d63a1a4239c83862288bb0"
 # Debug: verify conda activate worked
 echo "DEBUG: Python after conda activate: $(which python)"
 echo "DEBUG: CONDA_DEFAULT_ENV: $CONDA_DEFAULT_ENV"
-python -c "import sys; print(f'DEBUG: sys.executable = {sys.executable}')"
+${CONDA_PATH}/envs/lobs5/bin/python -c "import sys; print(f'DEBUG: sys.executable = {sys.executable}')"
 
 # -----------------------------------------------------------------------------
 # JAX Compilation Cache (must be set BEFORE Python/JAX starts)
@@ -273,7 +273,7 @@ else
     PERTURBATION_ARG="--pergpu_perturbations ${PERGPU_PERTURBATIONS}"
 fi
 
-python es_lobs5/scripts/es_training.py \
+${CONDA_PATH}/envs/lobs5/bin/python es_lobs5/scripts/es_training.py \
     --lobs5_checkpoint "${CHECKPOINT}" \
     --replay_data_path "${DATA_DIR}" \
     --n_epochs ${N_EPOCHS} \

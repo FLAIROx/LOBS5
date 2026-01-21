@@ -1100,13 +1100,17 @@ class ESTrainer:
             print(f"[NOISER] ║                                      LORA v1.5 MODE ENABLED                                               ║")
             print(f"[NOISER] ║                                    (LORA_V2 + FREEZE_SSM)                                                 ║")
             print(f"[NOISER] ╠══════════════════════════════════════════════════════════════════════════════════════════════════════════╣")
-            print(f"[NOISER] ║  Reference: Standard PEFT best practices for fine-tuning                                                 ║")
-            print(f"[NOISER] ║    [1] Databricks: https://www.databricks.com/blog/efficient-fine-tuning-lora-guide-llms                 ║")
-            print(f"[NOISER] ║    [2] Sebastian Raschka: https://magazine.sebastianraschka.com/p/practical-tips-for-finetuning-llms     ║")
-            print(f"[NOISER] ║  Practice:  LoRA on projections only, bias='none', freeze SSM/LayerNorm                                  ║")
+            print(f"[NOISER] ║  References:                                                                                              ║")
+            print(f"[NOISER] ║    [1] Hu et al. 'LoRA' ICLR 2022: https://arxiv.org/abs/2106.09685                                       ║")
+            print(f"[NOISER] ║    [2] Galim et al. 'PEFT of SSMs' ICML 2025: https://arxiv.org/abs/2410.09016                            ║")
+            print(f"[NOISER] ║  Practice:  LoRA on projections, freeze SSM (B,C,D), train LayerNorm/bias for extra performance          ║")
             print(f"[NOISER] ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
 
             # Print comparison table
+            # Research refs:
+            #   [1] Hu et al. "LoRA" ICLR 2022: bias='none' default, but "training biases might squeeze out extra performance"
+            #   [2] Galim et al. "PEFT of SSMs" ICML 2025: LoRA effective on projections, fails on SSM modules (B,C,D)
+            #   [3] https://arxiv.org/abs/2106.09685 (LoRA), https://arxiv.org/abs/2410.09016 (SSM-PEFT)
             print(f"[NOISER]")
             print(f"[NOISER] ┌───────────────────────┬─────────────────┬───────────┬───────────┬──────────┐")
             print(f"[NOISER] │       Parameter       │      Shape      │   LORA    │ LORA_V1.5 │ LORA_V2  │")
@@ -1116,13 +1120,17 @@ class ESTrainer:
             print(f"[NOISER] │ input_proj/weight     │ (2048, 4096)    │ Frozen    │ LoRA  ←   │ LoRA     │")
             print(f"[NOISER] │ proj/weight           │ (2048, 503)     │ Frozen    │ LoRA  ←   │ LoRA     │")
             print(f"[NOISER] ├───────────────────────┼─────────────────┼───────────┼───────────┼──────────┤")
-            print(f"[NOISER] │ SSM Parameters        │                 │           │           │          │")
+            print(f"[NOISER] │ SSM Parameters        │                 │           │  [2]      │          │")
             print(f"[NOISER] │ ssm/B, C, D, log_step │ varies          │ Frozen    │ Frozen ←  │ FULL     │")
             print(f"[NOISER] ├───────────────────────┼─────────────────┼───────────┼───────────┼──────────┤")
-            print(f"[NOISER] │ Other                 │                 │           │           │          │")
-            print(f"[NOISER] │ norm/weight, bias     │ varies          │ Frozen    │ Frozen    │ FULL     │")
+            print(f"[NOISER] │ Other                 │                 │           │  [1]      │          │")
+            print(f"[NOISER] │ norm/weight, bias     │ varies          │ Frozen    │ FULL  ←   │ FULL     │")
             print(f"[NOISER] │ Lambda, decoder, emb  │ varies          │ Fixed     │ Fixed     │ Fixed    │")
             print(f"[NOISER] └───────────────────────┴─────────────────┴───────────┴───────────┴──────────┘")
+            print(f"[NOISER]")
+            print(f"[NOISER] Notes:")
+            print(f"[NOISER]   [1] LoRA paper: LayerNorm/bias training left to future work; default='none' but can help")
+            print(f"[NOISER]   [2] SSM-PEFT paper: LoRA fails on SSM modules, freeze recommended")
             print(f"[NOISER]")
 
             from ..models.common import EXCLUDED
