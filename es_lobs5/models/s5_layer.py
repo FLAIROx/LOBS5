@@ -176,7 +176,11 @@ class ES_SequenceLayer(Model):
 
         # H1: Gradient Checkpointing (Rematerialization)
         # Rematerialize the internal layer computation to save activation memory
-        @jax.remat
+        # Policy: dots_with_no_batch_dims_saveable (same as HyperscaleES RWKV models)
+        # - Saves: matmul results without batch dimensions (weight-related computations)
+        # - Discards: activations with batch dimensions
+        # This reduces peak memory in jax.lax.scan even without backward pass
+        @partial(jax.remat, policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable)
         def _internal_block(x):
             # Pre-normalization
             if prenorm:
