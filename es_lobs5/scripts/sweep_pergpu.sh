@@ -16,6 +16,13 @@
 #   LORA (frozen) Mode:
 #     14,336 per-GPU (57,344 total) -> Max stable
 #     16,384 per-GPU (65,536 total) -> OOM
+#
+# Results (2026-01-20, LORA_V1.5 with dots_with_no_batch_dims_saveable):
+#   160 per-GPU (640 total) -> COMPLETED (confirmed working)
+#
+# Current Test (2026-01-21): Exponential scaling test
+#   Testing with dots_with_no_batch_dims_saveable checkpoint policy
+#   Goal: Find max stable PERGPU value
 # =============================================================================
 
 set -e
@@ -23,12 +30,21 @@ cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5
 
 # Configuration
 MODE="${MODE:-LORA_V1.5}"
-N_EPOCHS=5                    # Short runs for sweep exploration
+N_EPOCHS=3                    # Short runs for sweep exploration
 CHECKPOINT_EVERY=10           # Don't checkpoint during sweep
 
 # PERGPU values to test (will be multiplied by 4 GPUs for total population)
-# Testing powers of 2 and some intermediate values
-PERGPU_VALUES=(32 48 64 80 96 112 128)
+# Exponential scaling: 2x, 4x, 8x, 16x, 32x, 64x baseline, + historical max
+# | PERGPU | Total   | Notes           |
+# |--------|---------|-----------------|
+# | 256    | 1,024   | 2x baseline     |
+# | 512    | 2,048   | 4x baseline     |
+# | 1024   | 4,096   | 8x baseline     |
+# | 2048   | 8,192   | 16x baseline    |
+# | 4096   | 16,384  | 32x baseline    |
+# | 8192   | 32,768  | 64x baseline    |
+# | 14336  | 57,344  | Historical max  |
+PERGPU_VALUES=(256 512 1024 2048 4096 8192 14336)
 
 echo "=============================================="
 echo " PERGPU_PERTURBATIONS Sweep"
