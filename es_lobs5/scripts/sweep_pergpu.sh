@@ -29,34 +29,40 @@
 #
 # Summary: 4x improvement over default remat (128 -> 512 per-GPU)
 # Commits: 9ec0d2d (sweep script), 987a042 (results docs)
+#
+# Results (2026-01-21, LORA_V1.6 scaling test):
+#   Commit: bf3b9a7 (feat: add LORA_V1.6 mode and fix decoder/embedding bug)
+#   Expected: ~14,336 per-GPU (same as LORA mode due to freeze_nonlora=True)
+#   Jobs: TBD
 # =============================================================================
 
 set -e
 cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5
 
 # Configuration
-MODE="${MODE:-LORA_V1.5}"
-N_EPOCHS=3                    # Short runs for sweep exploration
-CHECKPOINT_EVERY=10           # Don't checkpoint during sweep
+MODE="${MODE:-LORA_V1.6}"
+N_EPOCHS="${N_EPOCHS:-1000}"
+TIME_LIMIT="${TIME_LIMIT:-02:00:00}"
+CHECKPOINT_EVERY=100
 
 # PERGPU values to test (will be multiplied by 4 GPUs for total population)
-# Exponential scaling: 2x, 4x, 8x, 16x, 32x, 64x baseline, + historical max
+# Exponential scaling: 4x, 8x, 16x, 32x, 64x baseline, + historical max
 # | PERGPU | Total   | Notes           |
 # |--------|---------|-----------------|
-# | 256    | 1,024   | 2x baseline     |
 # | 512    | 2,048   | 4x baseline     |
 # | 1024   | 4,096   | 8x baseline     |
 # | 2048   | 8,192   | 16x baseline    |
 # | 4096   | 16,384  | 32x baseline    |
 # | 8192   | 32,768  | 64x baseline    |
 # | 14336  | 57,344  | Historical max  |
-PERGPU_VALUES=(256 512 1024 2048 4096 8192 14336)
+PERGPU_VALUES=(512 1024 2048 4096 8192 14336)
 
 echo "=============================================="
 echo " PERGPU_PERTURBATIONS Sweep"
 echo "=============================================="
 echo "MODE: ${MODE}"
 echo "N_EPOCHS: ${N_EPOCHS}"
+echo "TIME_LIMIT: ${TIME_LIMIT}"
 echo "PERGPU values: ${PERGPU_VALUES[*]}"
 echo "=============================================="
 echo ""
@@ -81,7 +87,7 @@ for pergpu in "${PERGPU_VALUES[@]}"; do
     echo "Job Name: ${job_name}"
 
     if $DRY_RUN; then
-        echo "[DRY-RUN] Would submit: MODE=${MODE} PERGPU_PERTURBATIONS=${pergpu} N_EPOCHS=${N_EPOCHS}"
+        echo "[DRY-RUN] Would submit: MODE=${MODE} PERGPU_PERTURBATIONS=${pergpu} N_EPOCHS=${N_EPOCHS} TIME=${TIME_LIMIT}"
     else
         # Submit job and capture job ID
         JOB_ID=$(MODE=${MODE} \
@@ -89,6 +95,7 @@ for pergpu in "${PERGPU_VALUES[@]}"; do
                  N_EPOCHS=${N_EPOCHS} \
                  CHECKPOINT_EVERY=${CHECKPOINT_EVERY} \
                  sbatch --job-name=${job_name} \
+                        --time=${TIME_LIMIT} \
                         --parsable \
                         es_lobs5/scripts/es_training.sh)
 
