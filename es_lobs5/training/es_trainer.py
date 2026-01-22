@@ -2383,19 +2383,25 @@ class ESTrainer:
             self.noiser_params = noiser_params_updated
             self.lobs5_init.params = updated_params
 
-        # Extract one example trace for plotting (from first perturbation)
+        # =========================================================================
+        # Select example perturbation for visualization
+        # Use best fitness perturbation instead of first (more likely to have trades)
+        # =========================================================================
+        best_idx = jnp.argmax(fitnesses)
+
+        # Extract one example trace for plotting (from best perturbation)
         # We must pull this out BEFORE averaging, as averaging traces is meaningless/expensive
         # Note: infos['bid_trace'] shape is (n_perturbations, n_steps)
-        example_bid_trace = infos['bid_trace'][0]
-        example_ask_trace = infos['ask_trace'][0]
-        
-        # Ground Truth Traces (High Res)
+        example_bid_trace = infos['bid_trace'][best_idx]
+        example_ask_trace = infos['ask_trace'][best_idx]
+
+        # Ground Truth Traces (High Res) - same across perturbations, use [0]
         example_gt_bid_trace = infos['gt_bid_trace'][0]
         example_gt_ask_trace = infos['gt_ask_trace'][0]
 
-        # Trade traces for visualization (from first perturbation)
-        example_trade_vwap_trace = infos['trade_vwap_trace'][0]
-        example_trade_qty_trace = infos['trade_qty_trace'][0]
+        # Trade traces for visualization (from best perturbation)
+        example_trade_vwap_trace = infos['trade_vwap_trace'][best_idx]
+        example_trade_qty_trace = infos['trade_qty_trace'][best_idx]
 
         # Filter out heavy/non-scalar items before averaging
         infos_for_mean = {
