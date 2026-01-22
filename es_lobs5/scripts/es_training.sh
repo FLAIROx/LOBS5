@@ -1,12 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=es-train
-#SBATCH --nodes=1
+#SBATCH --nodes=1                # Override with sbatch --nodes=N for multi-node
+#SBATCH --ntasks-per-node=1      # One task per node (for multi-node srun)
+#SBATCH --gpus-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
 #SBATCH --time=00:40:00
 #SBATCH --output=logs/es_train_%j.out
 #SBATCH --error=logs/es_train_%j.err
 #SBATCH --partition=workq
+#SBATCH --contiguous             # Ensure contiguous node allocation for multi-node
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
 
 # =============================================================================
 # ES Training - Production Script
@@ -49,8 +53,14 @@
 # =============================================================================
 #
 # Usage:
-#   # Default configuration
+#   # Default configuration (single node, 4 GPUs)
 #   sbatch es_lobs5/scripts/es_training.sh
+#
+#   # Multi-node training (2 nodes, 8 GPUs total)
+#   sbatch --nodes=2 es_lobs5/scripts/es_training.sh
+#
+#   # Multi-node training (4 nodes, 16 GPUs total)
+#   sbatch --nodes=4 --time=02:00:00 es_lobs5/scripts/es_training.sh
 #
 #   # Custom parameters (via environment variables)
 #   N_EPOCHS=2000 N_PERTURBATIONS=256 sbatch es_lobs5/scripts/es_training.sh
@@ -85,14 +95,35 @@ echo "=============================================="
 echo " ES Training - Production"
 echo "=============================================="
 echo "Job ID: ${SLURM_JOB_ID}"
-echo "Node: ${SLURM_NODELIST}"
-echo "GPUs: 4"
+echo "Node(s): ${SLURM_NODELIST}"
+echo "Nodes: ${SLURM_NNODES:-1}"
+echo "GPUs per node: 4"
+echo "Total GPUs: $((${SLURM_NNODES:-1} * 4))"
 echo "Start time: $(date)"
 echo "----------------------------------------------"
 echo "Git Branch: ${GIT_BRANCH}"
 echo "Git Commit: ${GIT_COMMIT_SHORT} (${GIT_COMMIT_FULL})"
 echo "Commit Msg: ${GIT_COMMIT_MSG}"
 echo "=============================================="
+
+# -----------------------------------------------------------------------------
+# Multi-Node Detection & Setup
+# -----------------------------------------------------------------------------
+NNODES=${SLURM_NNODES:-1}
+GPUS_PER_NODE=4
+TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
+
+if [ "$NNODES" -gt 1 ]; then
+    MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
+    MASTER_PORT=29500
+    export JAX_COORDINATOR_ADDRESS="$MASTER_ADDR:$MASTER_PORT"
+    export MASTER_ADDR
+    export MASTER_PORT
+    echo "[*] Multi-node mode: $NNODES nodes, $TOTAL_GPUS total GPUs"
+    echo "[*] Coordinator: $JAX_COORDINATOR_ADDRESS"
+else
+    echo "[*] Single-node mode: $TOTAL_GPUS GPUs"
+fi
 
 # -----------------------------------------------------------------------------
 # Environment Setup
@@ -260,9 +291,10 @@ else
     PERTURBATION_ARG="--pergpu_perturbations ${PERGPU_PERTURBATIONS}"
 fi
 
-${CONDA_PATH}/envs/lobs5/bin/python es_lobs5/scripts/es_training.py \
-    --lobs5_checkpoint "${CHECKPOINT}" \
-    --replay_data_path "${DATA_DIR}" \
+# Build the common Python command arguments
+PYTHON_ARGS="es_lobs5/scripts/es_training.py \
+    --lobs5_checkpoint '${CHECKPOINT}' \
+    --replay_data_path '${DATA_DIR}' \
     --n_epochs ${N_EPOCHS} \
     ${PERTURBATION_ARG} \
     --n_steps ${N_STEPS} \
@@ -278,13 +310,112 @@ ${CONDA_PATH}/envs/lobs5/bin/python es_lobs5/scripts/es_training.py \
     --tick_size ${TICK_SIZE} \
     --token_mode ${TOKEN_MODE} \
     --checkpoint_every ${CHECKPOINT_EVERY} \
-    --checkpoint_dir "${CHECKPOINT_DIR}" \
-    --wandb_project "${WANDB_PROJECT}" \
-    --wandb_entity "${WANDB_ENTITY}" \
-    --mode "${MODE}" \
+    --checkpoint_dir '${CHECKPOINT_DIR}' \
+    --wandb_project '${WANDB_PROJECT}' \
+    --wandb_entity '${WANDB_ENTITY}' \
+    --mode '${MODE}' \
     --seed ${SEED} \
-    ${FILE_IDX_ARG} \
-    "$@"
+    ${FILE_IDX_ARG}"
+
+if [ "$NNODES" -gt 1 ]; then
+    # ==========================================================================
+    # Multi-Node Execution via srun with inline bash wrapper
+    # ==========================================================================
+    # Each node needs its own environment setup (conda, CUDA, LD_LIBRARY_PATH)
+    # The wrapper runs identically on all nodes but with different SLURM_PROCID
+    echo "[*] Launching multi-node training with srun..."
+
+    srun --nodes=$NNODES \
+         --ntasks=$NNODES \
+         --ntasks-per-node=1 \
+         --gres=gpu:$GPUS_PER_NODE \
+         --gpu-bind=map_gpu:0,1,2,3 \
+         --output=logs/es_train_${SLURM_JOB_ID}_node%n.log \
+         --export=ALL \
+         bash -c '
+# ========== Inline Wrapper (runs on each node) ==========
+echo "========================================"
+echo "[Wrapper] Running on node: $(hostname)"
+echo "[Wrapper] SLURM_NODEID: ${SLURM_NODEID:-N/A}"
+echo "[Wrapper] SLURM_PROCID: ${SLURM_PROCID:-N/A}"
+echo "[Wrapper] CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-all}"
+echo "========================================"
+
+# Source conda (must re-source in each srun process)
+source '"${CONDA_PATH}"'/etc/profile.d/conda.sh
+conda activate lobs5
+
+# Load CUDA module for multi-node communication
+module load cuda/12.6
+
+# Set LD_LIBRARY_PATH for NVIDIA libraries (NCCL, cuDNN, etc.)
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+
+# JAX environment for multi-node
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+export JAX_COORDINATOR_TIMEOUT_MS=600000
+export JAX_PLATFORMS="cuda"
+export TF_GPU_ALLOCATOR=cuda_malloc_async
+
+# NCCL timeout: 1 hour (prevents infinite hang on communication deadlock)
+export NCCL_TIMEOUT=3600
+
+# Multi-node JAX config (critical for distributed mesh)
+if [ -n "$JAX_COORDINATOR_ADDRESS" ]; then
+    echo "[Wrapper] Multi-node coordinator: $JAX_COORDINATOR_ADDRESS"
+    export JAX_PROCESS_COUNT=${SLURM_NNODES:-1}
+    export JAX_PROCESS_INDEX=${SLURM_PROCID:-0}
+    export JAX_LOCAL_PROCESS_COUNT=1
+    export JAX_LOCAL_PROCESS_INDEX=0
+    echo "[Wrapper] JAX_PROCESS_COUNT=${JAX_PROCESS_COUNT}"
+    echo "[Wrapper] JAX_PROCESS_INDEX=${JAX_PROCESS_INDEX}"
+fi
+
+# CUDA config
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+mkdir -p "$HOME/.nv/ComputeCache" || true
+
+echo "[Wrapper] Available GPUs:"
+nvidia-smi --list-gpus | head -4
+
+# Run training
+cd '"${BASE_DIR}"'/AlphaTrade/LOBS5
+export PYTHONPATH="'"${BASE_DIR}"'/AlphaTrade/AlphaTrade:$PYTHONPATH"
+export PYTHONUNBUFFERED=1
+
+python -u -B '"${PYTHON_ARGS}"'
+'
+else
+    # ==========================================================================
+    # Single-Node Execution (direct Python call, existing behavior)
+    # ==========================================================================
+    ${CONDA_PATH}/envs/lobs5/bin/python es_lobs5/scripts/es_training.py \
+        --lobs5_checkpoint "${CHECKPOINT}" \
+        --replay_data_path "${DATA_DIR}" \
+        --n_epochs ${N_EPOCHS} \
+        ${PERTURBATION_ARG} \
+        --n_steps ${N_STEPS} \
+        --n_warmup_msgs ${N_WARMUP} \
+        --background_msgs_per_step ${BG_MSGS} \
+        --sigma ${SIGMA} \
+        --lr ${LR} \
+        --lora_rank ${LORA_RANK} \
+        --noiser ${NOISER} \
+        --background_mode historical_replay \
+        --task ${TASK} \
+        --task_size ${TASK_SIZE} \
+        --tick_size ${TICK_SIZE} \
+        --token_mode ${TOKEN_MODE} \
+        --checkpoint_every ${CHECKPOINT_EVERY} \
+        --checkpoint_dir "${CHECKPOINT_DIR}" \
+        --wandb_project "${WANDB_PROJECT}" \
+        --wandb_entity "${WANDB_ENTITY}" \
+        --mode "${MODE}" \
+        --seed ${SEED} \
+        ${FILE_IDX_ARG} \
+        "$@"
+fi
 
 EXIT_CODE=$?
 
