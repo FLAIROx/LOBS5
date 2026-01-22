@@ -2558,18 +2558,35 @@ class ESTrainer:
                         # Handle invalid (zero) values if necessary, but plotting usually handles nans/zeros ok visually 
                         # or we can mask them. For now, plot direct values.
                         
-                        gt_steps = list(range(len(gt_bid)))
-                        
+                        # Get configuration for X-axis labeling
+                        n_warmup = getattr(self.config, 'n_warmup_msgs', 10)
+                        n_bg = getattr(self.config, 'background_msgs_per_step', 50)
+                        n_steps = self.config.n_steps
+
+                        # X-axis from -n_warmup (warmup phase is negative)
+                        gt_steps = list(range(-n_warmup, len(gt_bid) - n_warmup))
+
                         # Create static plot
                         fig, ax = plt.subplots(figsize=(12, 6))
-                        
+
                         # Plot GT
                         ax.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
                         ax.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
                         ax.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
-                        
+
+                        # Add vertical separator lines
+                        ax.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
+                        for i in range(1, n_steps + 1):
+                            ax.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+
+                        # Set custom X-axis ticks at warmup start, 0, and each step boundary
+                        ticks = [-n_warmup, 0]
+                        for i in range(1, n_steps + 1):
+                            ticks.append(i * n_bg)
+                        ax.set_xticks(ticks)
+
                         ax.set_title(f"Market Trace (Data Window) - Epoch {epoch}")
-                        ax.set_xlabel("Message Index (Time)")
+                        ax.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
                         ax.set_ylabel("Price")
                         ax.legend()
                         ax.grid(True, alpha=0.3)
