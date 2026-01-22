@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
-#SBATCH --time=00:40:00
+#SBATCH --time=24:00:00
 #SBATCH --output=logs/es_train_%j.out
 #SBATCH --error=logs/es_train_%j.err
 #SBATCH --partition=workq
@@ -173,8 +173,8 @@ CHECKPOINT="${CHECKPOINT:-${BASE_DIR}/AlphaTrade/LOBS5/checkpoints/logical-seren
 DATA_DIR="${DATA_DIR:-${BASE_DIR}/JAN2023/GOOG_24tok_preproc}"
 
 # Training scale
-N_EPOCHS="${N_EPOCHS:-1000}"
-PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-56}"
+N_EPOCHS="${N_EPOCHS:-1000000}"
+PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-2048}"
 # PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-56}" # for FULL mode
 # N_PERTURBATIONS is deprecated but kept for backward compatibility if set explicitly
 N_PERTURBATIONS="${N_PERTURBATIONS:-}" 
