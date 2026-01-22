@@ -1982,10 +1982,19 @@ class ESTrainer:
             quant_executed = quant_executed + step_executed
 
             # Track revenue (accumulate Price * Qty)
-            step_revenue = jnp.sum(jnp.where(is_policy_in_trade, 
-                                            trades[:, 0] * jnp.abs(trades[:, 1]), 
+            step_revenue = jnp.sum(jnp.where(is_policy_in_trade,
+                                            trades[:, 0] * jnp.abs(trades[:, 1]),
                                             0)).astype(jnp.float32)
             accum_revenue = accum_revenue + step_revenue
+
+            # Compute VWAP for this step (for trade visualization)
+            # step_executed already computed above = sum(qty) where policy is involved
+            # step_revenue = sum(price * qty) for policy trades
+            step_vwap = jnp.where(
+                step_executed > 0,
+                step_revenue / step_executed.astype(jnp.float32),
+                0.0
+            )
 
             # Update state
             book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
@@ -2005,8 +2014,10 @@ class ESTrainer:
             accum_submitted = accum_submitted + step_submitted
 
             # Return policy_msg for order analysis (shape: (msg_len,))
+            # Also return trade info for visualization: VWAP, qty, and bid/ask at trade time
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-                    book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_submitted), (policy_msg, best_bid, best_ask)
+                    book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_submitted), \
+                   (policy_msg, best_bid, best_ask, step_vwap, step_executed.astype(jnp.float32))
 
         # Run episode
         # H2: Apply pvary to initial carry values when inside shard_map
@@ -2025,7 +2036,9 @@ class ESTrainer:
             maybe_pvary(jnp.int32(0)), # accum_submitted
         )
         # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
-        (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue, final_trades, final_submitted), (policy_msgs_all, bid_trace, ask_trace) = jax.lax.scan(
+        # Also capture trade traces: vwap, qty, bid, ask at each step for visualization
+        (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue, final_trades, final_submitted), \
+            (policy_msgs_all, bid_trace, ask_trace, trade_vwap_trace, trade_qty_trace) = jax.lax.scan(
             step_fn,
             main_scan_init,
             jnp.arange(config.n_steps),
@@ -2156,6 +2169,9 @@ class ESTrainer:
             'policy_msgs': policy_msgs_all,    # shape: (n_steps, msg_len) for order analysis
             'bid_trace': bid_trace,
             'ask_trace': ask_trace,
+            # Trade visualization traces (shape: (n_steps,))
+            'trade_vwap_trace': trade_vwap_trace,   # VWAP of agent trades per step
+            'trade_qty_trace': trade_qty_trace,     # Quantity executed per step
         }
 
         # H4: Add Ground Truth Trace for "Whole Data Window" Plot
@@ -2377,10 +2393,15 @@ class ESTrainer:
         example_gt_bid_trace = infos['gt_bid_trace'][0]
         example_gt_ask_trace = infos['gt_ask_trace'][0]
 
+        # Trade traces for visualization (from first perturbation)
+        example_trade_vwap_trace = infos['trade_vwap_trace'][0]
+        example_trade_qty_trace = infos['trade_qty_trace'][0]
+
         # Filter out heavy/non-scalar items before averaging
         infos_for_mean = {
-            k: v for k, v in infos.items() 
-            if k not in ['bid_trace', 'ask_trace', 'policy_msgs', 'gt_bid_trace', 'gt_ask_trace']
+            k: v for k, v in infos.items()
+            if k not in ['bid_trace', 'ask_trace', 'policy_msgs', 'gt_bid_trace', 'gt_ask_trace',
+                         'trade_vwap_trace', 'trade_qty_trace']
         }
         aggregated_info = {k: jnp.mean(v) for k, v in infos_for_mean.items()}
 
@@ -2389,6 +2410,8 @@ class ESTrainer:
         aggregated_info['example_ask_trace'] = example_ask_trace
         aggregated_info['example_gt_bid_trace'] = example_gt_bid_trace
         aggregated_info['example_gt_ask_trace'] = example_gt_ask_trace
+        aggregated_info['example_trade_vwap_trace'] = example_trade_vwap_trace
+        aggregated_info['example_trade_qty_trace'] = example_trade_qty_trace
 
         return jnp.mean(fitnesses), fitnesses, aggregated_info
 
@@ -2593,6 +2616,104 @@ class ESTrainer:
                         # Log to WandB
                         wandb_run.log({"market_data_trace": wandb.Image(fig)}, commit=False)
                         plt.close(fig)
+
+                        # Second chart: Market Data with Trade Markers
+                        if 'example_trade_vwap_trace' in epoch_info:
+                            fig2, ax2 = plt.subplots(figsize=(12, 6))
+
+                            # Plot GT (same as first chart)
+                            ax2.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
+                            ax2.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                            ax2.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
+
+                            # Add vertical separator lines
+                            ax2.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
+                            for i in range(1, n_steps + 1):
+                                ax2.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+
+                            # Get trade traces
+                            trade_vwap = epoch_info['example_trade_vwap_trace']
+                            trade_qty = epoch_info['example_trade_qty_trace']
+
+                            # Get bid/ask traces for execution quality comparison
+                            bid_trace_data = epoch_info['example_bid_trace']
+                            ask_trace_data = epoch_info['example_ask_trace']
+
+                            # Add trade markers
+                            # Determine task type for color logic
+                            is_sell_task = getattr(self.config, 'task', 'sell') == 'sell'
+
+                            for step_idx in range(n_steps):
+                                qty = float(trade_qty[step_idx])
+                                if qty > 0:  # Trade occurred
+                                    # X position: at step boundary (end of step)
+                                    x_pos = (step_idx + 1) * n_bg
+                                    price = float(trade_vwap[step_idx])
+                                    bid = float(bid_trace_data[step_idx])
+                                    ask = float(ask_trace_data[step_idx])
+
+                                    # Determine execution quality color
+                                    if is_sell_task:
+                                        # Sell: higher is better (green=at ask, red=at bid)
+                                        if price >= ask:
+                                            color = 'limegreen'  # At Ask (best for sell)
+                                            marker = '^'         # Up triangle
+                                        elif price > bid:
+                                            color = 'gold'       # In spread
+                                            marker = 'o'         # Circle
+                                        else:
+                                            color = 'orangered'  # At/Below Bid (worst for sell)
+                                            marker = 'v'         # Down triangle
+                                    else:
+                                        # Buy: lower is better (green=at bid, red=at ask)
+                                        if price <= bid:
+                                            color = 'limegreen'  # At Bid (best for buy)
+                                            marker = 'v'         # Down triangle
+                                        elif price < ask:
+                                            color = 'gold'       # In spread
+                                            marker = 'o'         # Circle
+                                        else:
+                                            color = 'orangered'  # At/Above Ask (worst for buy)
+                                            marker = '^'         # Up triangle
+
+                                    # Marker size proportional to quantity
+                                    size = 50 + qty * 3
+                                    ax2.scatter(x_pos, price, c=color, s=size, marker=marker,
+                                               edgecolors='black', linewidths=0.5, zorder=5)
+
+                            # Add trade legend
+                            from matplotlib.lines import Line2D
+                            if is_sell_task:
+                                legend_elements = [
+                                    Line2D([0], [0], marker='^', color='w', markerfacecolor='limegreen',
+                                           markersize=10, label='At Ask (Best Sell)'),
+                                    Line2D([0], [0], marker='o', color='w', markerfacecolor='gold',
+                                           markersize=10, label='In Spread'),
+                                    Line2D([0], [0], marker='v', color='w', markerfacecolor='orangered',
+                                           markersize=10, label='At/Below Bid'),
+                                ]
+                            else:
+                                legend_elements = [
+                                    Line2D([0], [0], marker='v', color='w', markerfacecolor='limegreen',
+                                           markersize=10, label='At Bid (Best Buy)'),
+                                    Line2D([0], [0], marker='o', color='w', markerfacecolor='gold',
+                                           markersize=10, label='In Spread'),
+                                    Line2D([0], [0], marker='^', color='w', markerfacecolor='orangered',
+                                           markersize=10, label='At/Above Ask'),
+                                ]
+                            # Combine with line legends
+                            handles, labels = ax2.get_legend_handles_labels()
+                            ax2.legend(handles=legend_elements + handles, loc='upper left')
+
+                            ax2.set_title(f"Market Trace with Trades - Epoch {epoch}")
+                            ax2.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
+                            ax2.set_ylabel("Price")
+                            ax2.set_xticks(ticks)
+                            ax2.grid(True, alpha=0.3)
+
+                            wandb_run.log({"market_data_trace_with_trades": wandb.Image(fig2)}, commit=False)
+                            plt.close(fig2)
+
                     except Exception as e:
                         print(f"[WARN] Failed to generate price plot: {e}")
 
