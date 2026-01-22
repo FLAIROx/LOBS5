@@ -2182,7 +2182,7 @@ class ESTrainer:
              n_warmup = getattr(config, 'n_warmup_msgs', 10)
              n_bg = getattr(config, 'background_msgs_per_step', 10)
              total_msgs = n_warmup + config.n_steps * n_bg
-             
+
              # Extract GT trace (Best Ask, Best Bid)
              # Extract GT trace (Best Ask, Best Bid)
              # replay_book_data has header cols 0,1,2.
@@ -2191,10 +2191,41 @@ class ESTrainer:
              gt_trace_full = replay_book_data[:total_msgs, [3, 5]]
              info['gt_bid_trace'] = gt_trace_full[:, 1] # Bid P1 (was ind 5)
              info['gt_ask_trace'] = gt_trace_full[:, 0] # Ask P1 (was ind 3)
+
+             # ================================================================
+             # H5: Extract Historical Trades from replay_data_raw
+             # LOBSTER message format: [event_type, side, quantity, price, ...]
+             # event_type = 4 means EXECUTION (historical trade)
+             # ================================================================
+             if replay_data_raw is not None:
+                 # Get messages for this episode window
+                 msg_window = replay_data_raw[:total_msgs]
+
+                 # Extract event_type (col 0), side (col 1), qty (col 2), price (col 3)
+                 event_types = msg_window[:, 0]
+                 sides = msg_window[:, 1]      # 1 = buy, -1 = sell
+                 quantities = msg_window[:, 2]
+                 prices = msg_window[:, 3]
+
+                 # Create mask for executions (event_type = 4)
+                 is_execution = (event_types == 4)
+
+                 # Store historical trade data (sparse representation)
+                 # Shape: (total_msgs,) - non-zero where trade occurred
+                 info['gt_trade_price'] = jnp.where(is_execution, prices, 0)
+                 info['gt_trade_qty'] = jnp.where(is_execution, quantities, 0)
+                 info['gt_trade_side'] = jnp.where(is_execution, sides, 0)
+             else:
+                 info['gt_trade_price'] = jnp.zeros((1,), dtype=jnp.int32)
+                 info['gt_trade_qty'] = jnp.zeros((1,), dtype=jnp.int32)
+                 info['gt_trade_side'] = jnp.zeros((1,), dtype=jnp.int32)
         else:
              # Placeholder for World Model mode
              info['gt_bid_trace'] = jnp.zeros((1,), dtype=jnp.int32)
              info['gt_ask_trace'] = jnp.zeros((1,), dtype=jnp.int32)
+             info['gt_trade_price'] = jnp.zeros((1,), dtype=jnp.int32)
+             info['gt_trade_qty'] = jnp.zeros((1,), dtype=jnp.int32)
+             info['gt_trade_side'] = jnp.zeros((1,), dtype=jnp.int32)
 
         return fitness, info
 
@@ -2403,11 +2434,17 @@ class ESTrainer:
         example_trade_vwap_trace = infos['trade_vwap_trace'][best_idx]
         example_trade_qty_trace = infos['trade_qty_trace'][best_idx]
 
+        # Historical trade traces (same across perturbations, use [0])
+        example_gt_trade_price = infos['gt_trade_price'][0]
+        example_gt_trade_qty = infos['gt_trade_qty'][0]
+        example_gt_trade_side = infos['gt_trade_side'][0]
+
         # Filter out heavy/non-scalar items before averaging
         infos_for_mean = {
             k: v for k, v in infos.items()
             if k not in ['bid_trace', 'ask_trace', 'policy_msgs', 'gt_bid_trace', 'gt_ask_trace',
-                         'trade_vwap_trace', 'trade_qty_trace']
+                         'trade_vwap_trace', 'trade_qty_trace',
+                         'gt_trade_price', 'gt_trade_qty', 'gt_trade_side']
         }
         aggregated_info = {k: jnp.mean(v) for k, v in infos_for_mean.items()}
 
@@ -2418,6 +2455,10 @@ class ESTrainer:
         aggregated_info['example_gt_ask_trace'] = example_gt_ask_trace
         aggregated_info['example_trade_vwap_trace'] = example_trade_vwap_trace
         aggregated_info['example_trade_qty_trace'] = example_trade_qty_trace
+        # Historical trade traces
+        aggregated_info['example_gt_trade_price'] = example_gt_trade_price
+        aggregated_info['example_gt_trade_qty'] = example_gt_trade_qty
+        aggregated_info['example_gt_trade_side'] = example_gt_trade_side
 
         return jnp.mean(fitnesses), fitnesses, aggregated_info
 
@@ -2719,6 +2760,74 @@ class ESTrainer:
 
                             wandb_run.log({"market_data_trace_with_trades": wandb.Image(fig2)}, commit=False)
                             plt.close(fig2)
+
+                        # ==========================================================
+                        # Third chart: Market Data with Historical Trades Only
+                        # Shows trades from the original LOBSTER data (event_type=4)
+                        # ==========================================================
+                        if 'example_gt_trade_price' in epoch_info:
+                            gt_trade_price = epoch_info['example_gt_trade_price']
+                            gt_trade_qty = epoch_info['example_gt_trade_qty']
+                            gt_trade_side = epoch_info['example_gt_trade_side']
+
+                            # Check if we have any historical trades
+                            has_trades = jnp.sum(gt_trade_qty > 0) > 0
+
+                            if has_trades:
+                                fig3, ax3 = plt.subplots(figsize=(12, 6))
+
+                                # Plot GT (same as other charts)
+                                ax3.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
+                                ax3.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                                ax3.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
+
+                                # Add vertical separator lines
+                                ax3.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
+                                for i in range(1, n_steps + 1):
+                                    ax3.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+
+                                # Plot historical trades
+                                # gt_trade_price, gt_trade_qty, gt_trade_side have shape (total_msgs,)
+                                # Plot at message index positions (X-axis = gt_steps)
+                                for msg_idx in range(len(gt_trade_price)):
+                                    qty = float(gt_trade_qty[msg_idx])
+                                    if qty > 0:  # Trade occurred
+                                        x_pos = gt_steps[msg_idx]  # Message index position
+                                        price = float(gt_trade_price[msg_idx])
+                                        side = int(gt_trade_side[msg_idx])
+
+                                        # Color by side: Buy = blue, Sell = purple
+                                        if side == 1:  # Buy
+                                            color = 'dodgerblue'
+                                            marker = '^'  # Up triangle
+                                        else:  # Sell (side == -1)
+                                            color = 'mediumorchid'
+                                            marker = 'v'  # Down triangle
+
+                                        # Marker size proportional to quantity
+                                        size = 30 + qty * 2
+                                        ax3.scatter(x_pos, price, c=color, s=size, marker=marker,
+                                                   edgecolors='black', linewidths=0.3, alpha=0.7, zorder=5)
+
+                                # Add historical trade legend
+                                from matplotlib.lines import Line2D
+                                legend_elements = [
+                                    Line2D([0], [0], marker='^', color='w', markerfacecolor='dodgerblue',
+                                           markersize=10, label='Historical Buy'),
+                                    Line2D([0], [0], marker='v', color='w', markerfacecolor='mediumorchid',
+                                           markersize=10, label='Historical Sell'),
+                                ]
+                                handles, labels = ax3.get_legend_handles_labels()
+                                ax3.legend(handles=legend_elements + handles, loc='upper left')
+
+                                ax3.set_title(f"Market Trace with Historical Trades - Epoch {epoch}")
+                                ax3.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
+                                ax3.set_ylabel("Price")
+                                ax3.set_xticks(ticks)
+                                ax3.grid(True, alpha=0.3)
+
+                                wandb_run.log({"market_data_trace_historical_trades": wandb.Image(fig3)}, commit=False)
+                                plt.close(fig3)
 
                     except Exception as e:
                         print(f"[WARN] Failed to generate price plot: {e}")
