@@ -2112,12 +2112,13 @@ class ESTrainer:
             total_cost = final_revenue + liquidation_revenue # Revenu accum is always P*Q
             pnl_raw = init_mid_price * agent_quantity - total_cost
 
-        # Normalize PnL to -1 to 1 range using tanh
-        # pnl_normalized = "number of ticks improvement for full task execution"
-        # e.g., if you execute all task_size shares 1 tick better than mid, pnl_normalized = 1.0
+        # PnL = raw profit/loss in cents (has real economic meaning)
+        pnl = pnl_raw
+
+        # Fitness = normalized PnL (ticks per share improvement)
+        # No tanh - linear fitness preserves gradient information for ES optimization
         normalization_scale = config.task_size * config.tick_size
-        pnl_normalized = pnl_raw / jnp.maximum(normalization_scale, 1.0)
-        pnl = jnp.tanh(pnl_normalized)  # squash to -1 to 1, 0 = executed at mid price
+        fitness_raw = pnl / jnp.maximum(normalization_scale, 1.0)
 
         total_trades = jnp.sum(valid_trades)
         
@@ -2134,16 +2135,14 @@ class ESTrainer:
         # Clamp doom_quantity to >= 0 (should not be negative if tracking is correct)
         doom_quantity = jnp.maximum(0, task_size - agent_quantity)
 
-        # Final fitness = PnL (only counts what was actually filled)
+        # Final fitness = normalized PnL (ticks/share improvement)
         # Unfilled quantity has no revenue and no cost, so PnL is naturally
         # lower when fill is incomplete (agent receives less for sell task)
-        fitness = jnp.where(jnp.isfinite(pnl), pnl, 0.0)
+        fitness = jnp.where(jnp.isfinite(fitness_raw), fitness_raw, 0.0)
 
         info = {
-            'fitness': fitness,
-            'pnl': pnl,                        # normalized to -1 to 1 (tanh)
-            'pnl_raw': pnl_raw,                # raw value in cents
-            'pnl_normalized': pnl_normalized,  # before tanh (in "ticks")
+            'fitness': fitness,                # normalized PnL (ticks/share improvement)
+            'pnl': pnl,                        # raw value in cents
             # Execution breakdown
             'agent_quantity': agent_quantity,          # total executed = model + liquidation (may be < task_size!)
             'model_quantity': model_quantity,          # executed by model orders (Normal)
