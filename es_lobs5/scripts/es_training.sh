@@ -205,6 +205,9 @@ WANDB_ENTITY="${WANDB_ENTITY:-kang-oxford}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-100}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-${BASE_DIR}/AlphaTrade/LOBS5/checkpoints/es_runs/${SLURM_JOB_ID}}"
 
+# Resume training (optional)
+RESUME_FROM="${RESUME_FROM:-}"
+
 # Random seed
 SEED="${SEED:-2026}"
 
@@ -284,6 +287,13 @@ else
     FILE_IDX_ARG=""
 fi
 
+# Build optional resume_from argument
+if [ -n "${RESUME_FROM}" ]; then
+    RESUME_FROM_ARG="--resume_from '${RESUME_FROM}'"
+else
+    RESUME_FROM_ARG=""
+fi
+
 # Determine perturbation argument
 if [ -n "${N_PERTURBATIONS}" ]; then
     PERTURBATION_ARG="--n_perturbations ${N_PERTURBATIONS}"
@@ -315,7 +325,8 @@ PYTHON_ARGS="es_lobs5/scripts/es_training.py \
     --wandb_entity '${WANDB_ENTITY}' \
     --mode '${MODE}' \
     --seed ${SEED} \
-    ${FILE_IDX_ARG}"
+    ${FILE_IDX_ARG} \
+    ${RESUME_FROM_ARG}"
 
 if [ "$NNODES" -gt 1 ]; then
     # ==========================================================================

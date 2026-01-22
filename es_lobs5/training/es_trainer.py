@@ -490,6 +490,8 @@ def create_es_config():
                         help='Directory to save ES checkpoints')
     parser.add_argument('--checkpoint_every', type=int, default=100,
                         help='Save checkpoint every N epochs')
+    parser.add_argument('--resume_from', type=str, default=None,
+                        help='Path to checkpoint directory to resume training from')
 
     # W&B logging
     parser.add_argument('--wandb_project', type=str, default=None,
