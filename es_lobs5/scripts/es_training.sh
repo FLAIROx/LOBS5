@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=es-train
-#SBATCH --nodes=1                # Override with sbatch --nodes=N for multi-node
+#SBATCH --nodes=8                # Override with sbatch --nodes=N for multi-node
 #SBATCH --ntasks-per-node=1      # One task per node (for multi-node srun)
 #SBATCH --gpus-per-node=4
 #SBATCH --gres=gpu:4
