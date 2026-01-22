@@ -384,7 +384,8 @@ cd '"${BASE_DIR}"'/AlphaTrade/LOBS5
 export PYTHONPATH="'"${BASE_DIR}"'/AlphaTrade/AlphaTrade:$PYTHONPATH"
 export PYTHONUNBUFFERED=1
 
-python -u -B '"${PYTHON_ARGS}"'
+# Use explicit path to lobs5 python (conda activate may not work in srun subshell)
+'"${CONDA_PATH}"'/envs/lobs5/bin/python -u -B '"${PYTHON_ARGS}"'
 '
 else
     # ==========================================================================
