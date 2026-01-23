@@ -439,7 +439,11 @@ def create_es_config():
     # ES configuration
     parser.add_argument('--noiser', type=str, default='eggroll',
                         choices=['open_es', 'eggroll', 'eggrollbs', 'sparse'])
-    parser.add_argument('--sigma', type=float, default=0.01, help='Noise std')
+    parser.add_argument('--sigma', type=float, default=0.2, help='Initial noise std (default: 0.2 for exploration)')
+    parser.add_argument('--sigma_decay', type=float, default=0.9997,
+                        help='Sigma decay rate per epoch (0.9997: 0.2->0.01 over 10k epochs). Default: 0.9997')
+    parser.add_argument('--sigma_min', type=float, default=0.01,
+                        help='Minimum sigma (floor). Default: 0.01')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--lora_rank', type=int, default=4, help='LORA rank')
 
@@ -2577,6 +2581,8 @@ class ESTrainer:
                         'n_steps': self.config.n_steps,
                         'noiser': self.config.noiser,
                         'sigma': self.config.sigma,
+                        'sigma_decay': getattr(self.config, 'sigma_decay', 1.0),
+                        'sigma_min': getattr(self.config, 'sigma_min', 0.01),
                         'lr': self.config.lr,
                         'lora_rank': self.config.lora_rank,
                         'checkpoint': self.config.lobs5_checkpoint,
@@ -2593,8 +2599,20 @@ class ESTrainer:
         initial_sim_state, initial_msg_history = self._create_initial_sim_state()
 
         # Training loop
+        # Sigma decay setup
+        sigma_init = self.config.sigma
+        sigma_decay = getattr(self.config, 'sigma_decay', 1.0)
+        sigma_min = getattr(self.config, 'sigma_min', 0.01)
+
         for epoch in tqdm(range(start_epoch, n_epochs), desc='ES Training', initial=start_epoch, total=n_epochs):
             key, epoch_key = jax.random.split(key)
+
+            # Apply sigma decay: σ_n = max(σ_0 × decay^n, σ_min)
+            if sigma_decay < 1.0:
+                current_sigma = max(sigma_init * (sigma_decay ** epoch), sigma_min)
+                self.noiser_params["sigma"] = current_sigma
+            else:
+                current_sigma = sigma_init
 
             mean_fitness, fitnesses, epoch_info = self.train_epoch(
                 epoch_key, epoch, initial_sim_state, initial_msg_history
@@ -2906,6 +2924,9 @@ class ESTrainer:
                 # Add rank_transform metrics if enabled
                 if transformed_std is not None:
                     metrics['fitness/transformed_std'] = transformed_std
+
+                # Add current sigma (useful for tracking sigma decay)
+                metrics['es/sigma'] = current_sigma
 
                 wandb_run.log(metrics)
 

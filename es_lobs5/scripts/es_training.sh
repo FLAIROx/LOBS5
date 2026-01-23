@@ -183,7 +183,9 @@ N_WARMUP="${N_WARMUP:-10}"
 BG_MSGS="${BG_MSGS:-50}"
 
 # ES hyperparameters
-SIGMA="${SIGMA:-0.01}"
+SIGMA="${SIGMA:-0.2}"             # Initial sigma (0.2 for exploration)
+SIGMA_DECAY="${SIGMA_DECAY:-0.9997}"  # Per-epoch decay (0.9997: 0.2->0.01 over 10k epochs)
+SIGMA_MIN="${SIGMA_MIN:-0.01}"     # Floor value (stop decaying at this value)
 LR="${LR:-0.001}"
 NOISER="${NOISER:-eggroll}"
 LORA_RANK="${LORA_RANK:-4}"
@@ -259,7 +261,9 @@ printf "│            │ N_PERTURBATIONS                   │ %-14s │ %-59s
 else
 printf "│            │ PERGPU_PERTURBATIONS              │ %-14s │ %-59s │\n" "${PERGPU_PERTURBATIONS}" "Population per GPU (Total = ${PERGPU_PERTURBATIONS} x 4 GPUs = $((PERGPU_PERTURBATIONS * 4)))"
 fi
-printf "│            │ SIGMA                             │ %-14s │ %-59s │\n" "${SIGMA}" "Evolution Strategy noise standard deviation"
+printf "│            │ SIGMA                             │ %-14s │ %-59s │\n" "${SIGMA}" "Initial noise std (decays to SIGMA_MIN over epochs)"
+printf "│            │ SIGMA_DECAY                       │ %-14s │ %-59s │\n" "${SIGMA_DECAY}" "Per-epoch decay (0.9997: 0.2->0.01 over 10k epochs)"
+printf "│            │ SIGMA_MIN                         │ %-14s │ %-59s │\n" "${SIGMA_MIN}" "Minimum sigma floor (stop decay at this value)"
 printf "│            │ LR                                │ %-14s │ %-59s │\n" "${LR}" "Learning rate"
 printf "│            │ NOISER                            │ %-14s │ %-59s │\n" "${NOISER}" "Type of noise strategy used"
 printf "│            │ LORA_RANK                         │ %-14s │ %-59s │\n" "${LORA_RANK}" "Rank for LoRA adapters"
@@ -315,6 +319,8 @@ PYTHON_ARGS="es_lobs5/scripts/es_training.py \
     --n_warmup_msgs ${N_WARMUP} \
     --background_msgs_per_step ${BG_MSGS} \
     --sigma ${SIGMA} \
+    --sigma_decay ${SIGMA_DECAY} \
+    --sigma_min ${SIGMA_MIN} \
     --lr ${LR} \
     --lora_rank ${LORA_RANK} \
     --noiser ${NOISER} \
@@ -416,6 +422,8 @@ else
         --n_warmup_msgs ${N_WARMUP} \
         --background_msgs_per_step ${BG_MSGS} \
         --sigma ${SIGMA} \
+        --sigma_decay ${SIGMA_DECAY} \
+        --sigma_min ${SIGMA_MIN} \
         --lr ${LR} \
         --lora_rank ${LORA_RANK} \
         --noiser ${NOISER} \
