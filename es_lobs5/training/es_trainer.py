@@ -2917,6 +2917,7 @@ class ESTrainer:
                     'normal_order/quantity': model_qty,
                     'normal_order/fill_rate': model_fill_rate,
                     'normal_order/submitted_quantity': submitted_qty,
+                    'normal_order/submission_ratio': submitted_qty / task_size,  # 提交倍数
                     'normal_order/execution_prob': exec_prob,
                     
                     # Section 2: Market Orders (Liquidation Step)
