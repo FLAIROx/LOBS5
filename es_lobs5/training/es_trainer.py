@@ -1771,7 +1771,7 @@ class ESTrainer:
         def step_fn(carry, step_idx):
             """Single step: Background messages -> Policy action."""
             (key, msg_history, hiddens_world, hiddens_policy,
-             sim_state, book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_submitted) = carry
+             sim_state, book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_all_trades, accum_submitted) = carry
 
             key, key_world, key_policy = jax.random.split(key, 3)
 
@@ -2036,7 +2036,11 @@ class ESTrainer:
             # Track trades (count)
             step_trades = jnp.sum(is_policy_in_trade)
             accum_trades = accum_trades + step_trades
-            
+
+            # Track ALL trades (for total_trades metric - includes world model trades)
+            step_all_trades = jnp.sum(is_new_trade)
+            accum_all_trades = accum_all_trades + step_all_trades
+
             # Track submitted quantity (for execution probability calc)
             # sim_msg[2] is the truncated quantity (can actually be processed by book)
             step_submitted = sim_msg[2]
@@ -2045,7 +2049,7 @@ class ESTrainer:
             # Return policy_msg for order analysis (shape: (msg_len,))
             # Also return trade info for visualization: VWAP, qty, and bid/ask at trade time
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-                    book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_submitted), \
+                    book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_all_trades, accum_submitted), \
                    (policy_msg, best_bid, best_ask, step_vwap, step_executed.astype(jnp.float32))
 
         # Run episode
@@ -2061,12 +2065,13 @@ class ESTrainer:
             maybe_pvary(jnp.int32(0)), # world_oid_offset
             maybe_pvary(jnp.int32(0)), # quant_executed
             maybe_pvary(jnp.float32(0)), # accum_revenue
-            maybe_pvary(jnp.int32(0)), # accum_trades
+            maybe_pvary(jnp.int32(0)), # accum_trades (policy/agent trades only)
+            maybe_pvary(jnp.int32(0)), # accum_all_trades (all trades including world model)
             maybe_pvary(jnp.int32(0)), # accum_submitted
         )
         # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
         # Also capture trade traces: vwap, qty, bid, ask at each step for visualization
-        (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue, final_trades, final_submitted), \
+        (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue, final_trades, final_all_trades, final_submitted), \
             (policy_msgs_all, bid_trace, ask_trace, trade_vwap_trace, trade_qty_trace) = jax.lax.scan(
             step_fn,
             main_scan_init,
@@ -2162,11 +2167,17 @@ class ESTrainer:
         normalization_scale = config.task_size * config.tick_size
         fitness_raw = pnl / jnp.maximum(normalization_scale, 1.0)
 
-        total_trades = jnp.sum(valid_trades)
-        
+        # buffer_trades: diagnostic metric - trades in final step buffer only (renamed from old total_trades)
+        buffer_trades = jnp.sum(valid_trades)
+
         # agent_trades = trades from model steps + trades from liquidation step
         liquidation_trades = jnp.sum(is_liquidation)
         agent_trades = final_trades + liquidation_trades
+
+        # total_trades: ALL trades throughout the episode (world model + agent + liquidation)
+        # FIX: Use accumulated all trades + liquidation trades from final buffer
+        liquidation_all_trades = jnp.sum(valid_trades)  # All trades in liquidation step buffer
+        total_trades = final_all_trades + liquidation_all_trades
 
         # Calculate execution breakdown
         # model_quantity: executed by model orders during regular steps (Normal Orders)
@@ -2192,7 +2203,8 @@ class ESTrainer:
             'doom_quantity': doom_quantity,    # NOT executed (Doom)
             'submitted_quantity': final_submitted, # Total quantity submitted by model (post-truncation)
             'agent_trades': agent_trades,
-            'total_trades': total_trades,
+            'total_trades': total_trades,      # All trades (world + agent + liquidation)
+            'buffer_trades': buffer_trades,    # Diagnostic: trades in final step buffer only
             'init_mid_price': init_mid_price,
             'init_mid_price': init_mid_price,
             'policy_msgs': policy_msgs_all,    # shape: (n_steps, msg_len) for order analysis
@@ -2536,9 +2548,10 @@ class ESTrainer:
         print(" [Market Orders] : liquidation_quantity (Executed by force_market_order at end)")
         print(" [Doom Orders]   : doom_quantity        (Unfilled quantity, subject to penalty)")
         print(" [Fill Rates]    : quantity / task_size")
-        print(" [Agent Trades]  : agent_trades         (Count of distinct trade executions/fills)")
+        print(" [Agent Trades]  : agent_trades         (Count of agent trade executions/fills)")
+        print(" [Total Trades]  : total_trades         (All trades in episode: world + agent + liquidation)")
+        print(" [Buffer Trades] : buffer_trades        (Diagnostic: trades in final step buffer only)")
         print(" [Agent Qty]     : agent_quantity       (Total filled quantity = Normal + Market. Range: [0, task_size])")
-        print(" [Total Trades]  : total_trades         (Trades in final step buffer (Diagnostic). Avg ~1-2 if sweeping)")
         print("="*60)
 
         # Resume from checkpoint if specified
@@ -2919,6 +2932,7 @@ class ESTrainer:
                     'execution/fill_rate': fill_rate,
                     'execution/agent_trades': float(epoch_info['agent_trades']),
                     'execution/total_trades': float(epoch_info['total_trades']),
+                    'execution/buffer_trades': float(epoch_info['buffer_trades']),  # Diagnostic: trades in final buffer
                 }
 
                 # Add rank_transform metrics if enabled
