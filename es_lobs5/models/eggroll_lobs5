@@ -1,3 +1,5 @@
+这是我目前的实验 /projects/s5e/quant/AlphaTrade/LOBS5/es_lobs5/scripts/es_training.sh 看看背后调用的所有代码
+
 帮我再新加一个section 在 Reasoning Fine-tuning Experiments: GSM8K 之后
 
 
@@ -18,3 +20,9 @@ algorithmic.sty  algorithm.sty  fancyhdr.sty  Figures  Hyperscale_ES.bib  icml20
 
 详细的细节写到这里
 
+这里对于multi agent 的说法可以参考 
+
+每一个都用一个subagent来read 一共 5 个
+(base) kangli.s5e@login41:~/home_s5e_kangli_s5e/overleaf> ls
+6914ab82b7037c7cd2c506ce  69177f474dad087b728e037a  693e9c13d5231b8866f40c3b  csc  proposal
+(base) kangli.s5e@login41:~/home_s5e_kangli_s5e/overleaf> 
