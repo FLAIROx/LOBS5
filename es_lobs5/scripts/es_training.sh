@@ -192,7 +192,7 @@ LORA_RANK="${LORA_RANK:-4}"
 
 # Task configuration
 TASK="${TASK:-sell}"
-TASK_SIZE="${TASK_SIZE:-50}"
+TASK_SIZE="${TASK_SIZE:-30}"
 TICK_SIZE="${TICK_SIZE:-100}"
 
 # Data window control (empty = random, number = fixed)
