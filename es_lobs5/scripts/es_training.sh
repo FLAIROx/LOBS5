@@ -214,6 +214,9 @@ SEED="${SEED:-2026}"
 # Token mode
 TOKEN_MODE="${TOKEN_MODE:-24}"
 
+# Rank transform (helps escape local optima like "no trading")
+RANK_TRANSFORM="${RANK_TRANSFORM:-true}"
+
 # =============================================================================
 # Training Mode (single variable to control all LoRA settings)
 # =============================================================================
@@ -261,6 +264,7 @@ printf "│            │ LR                                │ %-14s │ %-59s
 printf "│            │ NOISER                            │ %-14s │ %-59s │\n" "${NOISER}" "Type of noise strategy used"
 printf "│            │ LORA_RANK                         │ %-14s │ %-59s │\n" "${LORA_RANK}" "Rank for LoRA adapters"
 printf "│            │ MODE                              │ %-14s │ %-59s │\n" "${MODE}" "Training mode (V1.6=high capacity, V1.5=train norms)"
+printf "│            │ RANK_TRANSFORM                    │ %-14s │ %-59s │\n" "${RANK_TRANSFORM}" "Rank-based fitness shaping (escape local optima)"
 echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
 printf "│ System     │ CHECKPOINT_EVERY                  │ %-14s │ %-59s │\n" "${CHECKPOINT_EVERY}" "Epoch frequency to save checkpoints"
 printf "│            │ TOKEN_MODE                        │ %-14s │ %-59s │\n" "${TOKEN_MODE}" "Token vocabulary mode (24 = base-100 encoding)"
@@ -324,6 +328,7 @@ PYTHON_ARGS="es_lobs5/scripts/es_training.py \
     --wandb_project '${WANDB_PROJECT}' \
     --wandb_entity '${WANDB_ENTITY}' \
     --mode '${MODE}' \
+    --rank_transform ${RANK_TRANSFORM} \
     --seed ${SEED} \
     ${FILE_IDX_ARG} \
     ${RESUME_FROM_ARG}"
@@ -424,6 +429,7 @@ else
         --wandb_project "${WANDB_PROJECT}" \
         --wandb_entity "${WANDB_ENTITY}" \
         --mode "${MODE}" \
+        --rank_transform ${RANK_TRANSFORM} \
         --seed ${SEED} \
         ${FILE_IDX_ARG} \
         "$@"

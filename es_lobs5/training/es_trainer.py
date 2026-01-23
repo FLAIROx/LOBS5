@@ -396,6 +396,27 @@ def get_field_masks_from_validation_matrix(token_mode: int, vocab_size: int):
     return additive_mask
 
 
+def rank_transform(x: jax.Array) -> jax.Array:
+    """Convert fitness values to ranks, normalized to [-0.5, 0.5].
+
+    This prevents outliers from dominating and gives minority good
+    strategies a relatively larger weight in gradient estimation.
+    Particularly useful when most perturbations converge to a local
+    optimum (e.g., "no trading") while a few find better strategies.
+
+    Args:
+        x: Fitness array of shape (n_perturbations,)
+
+    Returns:
+        Rank-transformed array in [-0.5, 0.5] range
+
+    Reference:
+        HyperscaleES/rl_experiments/eggroll.py:102-104
+    """
+    ranks = jax.scipy.stats.rankdata(x, axis=-1) - 1.0
+    return ranks / (x.shape[-1] - 1) - 0.5
+
+
 def str2bool(v):
     if isinstance(v, bool):
         return v
@@ -506,6 +527,10 @@ def create_es_config():
                         help='Total number of processes (one per node)')
     parser.add_argument('--proc_id', type=int, default=None,
                         help='Process ID for this node (0-indexed)')
+
+    # Fitness shaping
+    parser.add_argument('--rank_transform', type=str2bool, default=True,
+                        help='Use rank-based fitness shaping (helps escape local optima like "no trading"). Default: True')
 
     return parser
 
@@ -2383,8 +2408,15 @@ class ESTrainer:
         # The fitnesses returned from shard_map are sharded, so params must
         # also be replicated to avoid device mismatch in do_updates
         # ========================================================================
+
+        # Apply rank transform if enabled (helps escape local optima like "no trading")
+        if getattr(self.config, 'rank_transform', False):
+            transformed_fitnesses = rank_transform(fitnesses)
+        else:
+            transformed_fitnesses = fitnesses
+
         normalized_fitnesses = self.noiser_cls.convert_fitnesses(
-            self.frozen_noiser_params, noiser_params_rep, fitnesses
+            self.frozen_noiser_params, noiser_params_rep, transformed_fitnesses
         )
 
         noiser_params_updated, updated_params = self.noiser_cls.do_updates(
@@ -2551,6 +2583,7 @@ class ESTrainer:
                         'background_mode': self.config.background_mode,
                         'n_processes': n_procs,
                         'n_devices_total': len(jax.devices()),
+                        'rank_transform': getattr(self.config, 'rank_transform', False),
                     },
                     resume='allow' if resume_from else None,
                 )
@@ -2593,6 +2626,13 @@ class ESTrainer:
                 fitness_std = float(jnp.std(fitnesses))
                 fitness_max = float(jnp.max(fitnesses))
                 fitness_min = float(jnp.min(fitnesses))
+
+                # Compute transformed fitness std if rank_transform is enabled
+                if getattr(self.config, 'rank_transform', False):
+                    transformed_fitnesses = rank_transform(fitnesses)
+                    transformed_std = float(jnp.std(transformed_fitnesses))
+                else:
+                    transformed_std = None
 
                 # Calculate execution rates
                 task_size = self.config.task_size if self.config.task_size > 0 else 1.0
@@ -2832,8 +2872,8 @@ class ESTrainer:
                     except Exception as e:
                         print(f"[WARN] Failed to generate price plot: {e}")
 
-                # Log to W&B
-                wandb_run.log({
+                # Build base metrics dict
+                metrics = {
                     'epoch': epoch,
                     'fitness/mean': float(mean_fitness),
                     'fitness/best_ever': float(best_fitness),
@@ -2861,7 +2901,13 @@ class ESTrainer:
                     'execution/fill_rate': fill_rate,
                     'execution/agent_trades': float(epoch_info['agent_trades']),
                     'execution/total_trades': float(epoch_info['total_trades']),
-                })
+                }
+
+                # Add rank_transform metrics if enabled
+                if transformed_std is not None:
+                    metrics['fitness/transformed_std'] = transformed_std
+
+                wandb_run.log(metrics)
 
                 # Print warning if doom_qty > 0
                 if doom_qty > 0:
