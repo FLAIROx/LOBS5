@@ -2162,10 +2162,11 @@ class ESTrainer:
         # PnL = raw profit/loss in cents (has real economic meaning)
         pnl = pnl_raw
 
-        # Fitness = normalized PnL (ticks per share improvement)
-        # No tanh - linear fitness preserves gradient information for ES optimization
-        normalization_scale = config.task_size * config.tick_size
-        fitness_raw = pnl / jnp.maximum(normalization_scale, 1.0)
+        # NOTE: Normalization step removed - fitness is now computed as rank_transform(pnl) in train_epoch
+        # Old approach: fitness_raw = pnl / (task_size * tick_size) then rank_transform(fitness_raw)
+        # New approach: fitness = rank_transform(pnl) directly (simpler, cleaner semantics)
+        # normalization_scale = config.task_size * config.tick_size
+        # fitness_raw = pnl / jnp.maximum(normalization_scale, 1.0)
 
         # buffer_trades: diagnostic metric - trades in final step buffer only (renamed from old total_trades)
         buffer_trades = jnp.sum(valid_trades)
@@ -2188,14 +2189,12 @@ class ESTrainer:
         # Clamp doom_quantity to >= 0 (should not be negative if tracking is correct)
         doom_quantity = jnp.maximum(0, task_size - agent_quantity)
 
-        # Final fitness = normalized PnL (ticks/share improvement)
-        # Unfilled quantity has no revenue and no cost, so PnL is naturally
-        # lower when fill is incomplete (agent receives less for sell task)
-        fitness = jnp.where(jnp.isfinite(fitness_raw), fitness_raw, 0.0)
+        # Sanitize pnl: replace non-finite values with 0.0
+        # (fitness = rank_transform(pnl) is computed in train_epoch)
+        pnl = jnp.where(jnp.isfinite(pnl), pnl, 0.0)
 
         info = {
-            'fitness': fitness,                # normalized PnL (ticks/share improvement)
-            'pnl': pnl,                        # raw value in cents
+            'pnl': pnl,                        # raw PnL in cents (fitness computed via rank_transform in train_epoch)
             # Execution breakdown
             'agent_quantity': agent_quantity,          # total executed = model + liquidation (may be < task_size!)
             'model_quantity': model_quantity,          # executed by model orders (Normal)
@@ -2268,7 +2267,7 @@ class ESTrainer:
              info['gt_trade_qty'] = jnp.zeros((1,), dtype=jnp.int32)
              info['gt_trade_side'] = jnp.zeros((1,), dtype=jnp.int32)
 
-        return fitness, info
+        return pnl, info  # Return raw pnl; fitness = rank_transform(pnl) computed in train_epoch
 
     def eval_single_thread(
         self,
@@ -2383,7 +2382,7 @@ class ESTrainer:
             noiser_params_rep = self.noiser_params
             params_rep = self.lobs5_init.params
 
-        fitnesses, infos = self._compiled_eval_batch(
+        pnls, infos = self._compiled_eval_batch(
             noiser_params_rep,
             params_rep,
             keys,
@@ -2394,16 +2393,16 @@ class ESTrainer:
         )
 
         # ========================================================================
-        # Multi-node: Gather fitnesses and infos from all processes
+        # Multi-node: Gather pnls and infos from all processes
         # In distributed mode, each process only has its local shard of results.
         # process_allgather collects all shards to form the complete arrays.
         #
-        # After gathering, we have ALL n_perturbations fitness values.
+        # After gathering, we have ALL n_perturbations pnl values.
         # The iterinfos must use GLOBAL thread_ids [0..n_perturbations-1]
         # for correct gradient computation across all perturbations.
         # ========================================================================
         if self._is_distributed and n_processes > 1:
-            fitnesses = process_allgather(fitnesses, tiled=True)
+            pnls = process_allgather(pnls, tiled=True)
             infos = jax.tree.map(
                 lambda x: process_allgather(x, tiled=True),
                 infos
@@ -2421,18 +2420,17 @@ class ESTrainer:
 
         # ========================================================================
         # H2: Use replicated params for gradient updates in multi-GPU mode
-        # The fitnesses returned from shard_map are sharded, so params must
+        # The pnls returned from shard_map are sharded, so params must
         # also be replicated to avoid device mismatch in do_updates
         # ========================================================================
 
-        # Apply rank transform if enabled (helps escape local optima like "no trading")
-        if getattr(self.config, 'rank_transform', False):
-            transformed_fitnesses = rank_transform(fitnesses)
-        else:
-            transformed_fitnesses = fitnesses
+        # fitness = rank_transform(pnl) - always apply rank transform
+        # This maps raw PnL values to ranks normalized to [-0.5, 0.5]
+        # Helps escape local optima like "no trading" by focusing on relative ordering
+        fitnesses = rank_transform(pnls)
 
         normalized_fitnesses = self.noiser_cls.convert_fitnesses(
-            self.frozen_noiser_params, noiser_params_rep, transformed_fitnesses
+            self.frozen_noiser_params, noiser_params_rep, fitnesses
         )
 
         noiser_params_updated, updated_params = self.noiser_cls.do_updates(
@@ -2464,9 +2462,9 @@ class ESTrainer:
 
         # =========================================================================
         # Select example perturbation for visualization
-        # Use best fitness perturbation instead of first (more likely to have trades)
+        # Use best pnl perturbation instead of first (more likely to have trades)
         # =========================================================================
-        best_idx = jnp.argmax(fitnesses)
+        best_idx = jnp.argmax(pnls)
 
         # Extract one example trace for plotting (from best perturbation)
         # We must pull this out BEFORE averaging, as averaging traces is meaningless/expensive
@@ -2508,7 +2506,7 @@ class ESTrainer:
         aggregated_info['example_gt_trade_qty'] = example_gt_trade_qty
         aggregated_info['example_gt_trade_side'] = example_gt_trade_side
 
-        return jnp.mean(fitnesses), fitnesses, aggregated_info
+        return jnp.mean(pnls), pnls, aggregated_info
 
     def train(self, n_epochs: Optional[int] = None, resume_from: Optional[str] = None):
         """Run full training loop with automatic checkpointing.
@@ -2556,7 +2554,7 @@ class ESTrainer:
 
         # Resume from checkpoint if specified
         start_epoch = 0
-        best_fitness = -float('inf')
+        best_pnl = -float('inf')
         if resume_from:
             try:
                 self.load_checkpoint(resume_from)
@@ -2567,12 +2565,13 @@ class ESTrainer:
                     with open(state_path, 'rb') as f:
                         state = pickle.load(f)
                     start_epoch = state.get('epoch', 0) + 1
-                    best_fitness = state.get('best_fitness', -float('inf'))
+                    # Support both old 'best_fitness' and new 'best_pnl' keys for backward compatibility
+                    best_pnl = state.get('best_pnl', state.get('best_fitness', -float('inf')))
                     key = jax.random.PRNGKey(self.config.seed)
                     # Fast-forward the key
                     for _ in range(start_epoch):
                         key, _ = jax.random.split(key)
-                print(f"[TRAIN] Resumed from epoch {start_epoch}, best_fitness={best_fitness:.4f}")
+                print(f"[TRAIN] Resumed from epoch {start_epoch}, best_pnl={best_pnl:.4f}")
             except Exception as e:
                 print(f"[TRAIN] Warning: Could not resume from {resume_from}: {e}")
                 print("[TRAIN] Starting fresh training")
@@ -2627,43 +2626,43 @@ class ESTrainer:
             else:
                 current_sigma = sigma_init
 
-            mean_fitness, fitnesses, epoch_info = self.train_epoch(
+            mean_pnl, pnls, epoch_info = self.train_epoch(
                 epoch_key, epoch, initial_sim_state, initial_msg_history
             )
 
-            # Track best model
-            is_best = mean_fitness > best_fitness
+            # Track best model (by raw PnL, not rank-transformed fitness)
+            is_best = mean_pnl > best_pnl
             if is_best:
-                best_fitness = mean_fitness
+                best_pnl = mean_pnl
                 # Save best model (only on rank 0 in distributed mode)
                 if self._process_index == 0:
                     best_path = os.path.join(checkpoint_dir, 'best')
                     self.save_checkpoint(best_path)
-                    self._save_training_state(best_path, epoch, best_fitness)
-                    print(f"[TRAIN] New best model saved: fitness={best_fitness:.4f}")
+                    self._save_training_state(best_path, epoch, best_pnl)
+                    print(f"[TRAIN] New best model saved: pnl={best_pnl:.4f}")
 
             # Periodic checkpointing (only on rank 0 in distributed mode)
             if (epoch + 1) % checkpoint_every == 0 and self._process_index == 0:
                 ckpt_path = os.path.join(checkpoint_dir, f'epoch_{epoch}')
                 self.save_checkpoint(ckpt_path)
-                self._save_training_state(ckpt_path, epoch, best_fitness)
+                self._save_training_state(ckpt_path, epoch, best_pnl)
                 # Also save as 'latest' for easy resumption
                 latest_path = os.path.join(checkpoint_dir, 'latest')
                 self.save_checkpoint(latest_path)
-                self._save_training_state(latest_path, epoch, best_fitness)
+                self._save_training_state(latest_path, epoch, best_pnl)
 
             # Log to W&B
             if wandb_run:
-                fitness_std = float(jnp.std(fitnesses))
-                fitness_max = float(jnp.max(fitnesses))
-                fitness_min = float(jnp.min(fitnesses))
+                # PnL statistics (raw profit/loss in cents)
+                pnl_std = float(jnp.std(pnls))
+                pnl_max = float(jnp.max(pnls))
+                pnl_min = float(jnp.min(pnls))
 
-                # Compute transformed fitness std if rank_transform is enabled
-                if getattr(self.config, 'rank_transform', False):
-                    transformed_fitnesses = rank_transform(fitnesses)
-                    transformed_std = float(jnp.std(transformed_fitnesses))
-                else:
-                    transformed_std = None
+                # Fitness = rank_transform(pnl) - always compute for ES
+                # Range: [-0.5, 0.5] based on relative ranking
+                fitnesses = rank_transform(pnls)
+                fitness_mean = float(jnp.mean(fitnesses))
+                fitness_std = float(jnp.std(fitnesses))
 
                 # Calculate execution rates
                 task_size = self.config.task_size if self.config.task_size > 0 else 1.0
@@ -2906,13 +2905,16 @@ class ESTrainer:
                 # Build base metrics dict
                 metrics = {
                     'epoch': epoch,
-                    'fitness/mean': float(mean_fitness),
-                    'fitness/best_ever': float(best_fitness),
+                    # PnL metrics (raw profit/loss in cents)
+                    'pnl/mean': float(mean_pnl),
+                    'pnl/best_ever': float(best_pnl),
+                    'pnl/std': pnl_std,
+                    'pnl/max': pnl_max,
+                    'pnl/min': pnl_min,
+                    # Fitness metrics (rank_transform(pnl), range [-0.5, 0.5])
+                    'fitness/mean': fitness_mean,
                     'fitness/std': fitness_std,
-                    'fitness/max': fitness_max,
-                    'fitness/min': fitness_min,
-                    'pnl/mean': float(epoch_info['pnl']),
-                    
+
                     # Section 1: Normal Orders (Model Steps)
                     'normal_order/quantity': model_qty,
                     'normal_order/fill_rate': model_fill_rate,
@@ -2936,10 +2938,6 @@ class ESTrainer:
                     'execution/buffer_trades': float(epoch_info['buffer_trades']),  # Diagnostic: trades in final buffer
                 }
 
-                # Add rank_transform metrics if enabled
-                if transformed_std is not None:
-                    metrics['fitness/transformed_std'] = transformed_std
-
                 # Add current sigma (useful for tracking sigma decay)
                 metrics['es/sigma'] = current_sigma
 
@@ -2950,12 +2948,12 @@ class ESTrainer:
                     print(f"[WARNING] Epoch {epoch}: {doom_qty:.0f} shares unfilled (unfill_rate={unfill_rate:.1%})")
 
             if epoch % 10 == 0:
-                print(f"Epoch {epoch}: mean={mean_fitness:.4f}, best={best_fitness:.4f}, std={jnp.std(fitnesses):.4f}")
+                print(f"Epoch {epoch}: pnl_mean={mean_pnl:.4f}, pnl_best={best_pnl:.4f}, pnl_std={jnp.std(pnls):.4f}")
 
         # Save final checkpoint
         final_path = os.path.join(checkpoint_dir, 'final')
         self.save_checkpoint(final_path)
-        self._save_training_state(final_path, n_epochs - 1, best_fitness)
+        self._save_training_state(final_path, n_epochs - 1, best_pnl)
         print(f"[TRAIN] Final checkpoint saved to {final_path}")
 
         if wandb_run:
@@ -2963,14 +2961,14 @@ class ESTrainer:
 
         return self.lobs5_init.params
 
-    def _save_training_state(self, path: str, epoch: int, best_fitness: float):
+    def _save_training_state(self, path: str, epoch: int, best_pnl: float):
         """Save training state for resumption."""
         import os
         import pickle
         os.makedirs(path, exist_ok=True)
         state = {
             'epoch': epoch,
-            'best_fitness': best_fitness,
+            'best_pnl': best_pnl,  # Raw PnL in cents (fitness = rank_transform(pnl))
         }
         with open(os.path.join(path, 'training_state.pkl'), 'wb') as f:
             pickle.dump(state, f)
