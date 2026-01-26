@@ -17,6 +17,13 @@ from lob.init_train import (
     save_checkpoint,
     deduplicate_trainstate,
 )
+# LOBMAX (Transformer backend) initialization
+try:
+    from lobmax.init_train import init_lobmax_train_state
+    LOBMAX_AVAILABLE = True
+except ImportError:
+    LOBMAX_AVAILABLE = False
+
 from lob.dataloading import create_lobster_prediction_dataset, create_lobster_train_loader#, Datasets
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import (
@@ -210,16 +217,51 @@ def train(args):
             warmup_end_step = prodigy_schedule_info['warmup_end_step']
         else:
             # Standard initialization (no Prodigy)
-            state, model_cls, total_params = init_train_state(
-                args,
-                n_classes=n_classes,
-                seq_len=seq_len,
-                book_dim=book_dim,
-                book_seq_len=book_seq_len,
-                train_size=train_size,  # NEW: for schedule calculation
-                print_shapes=True
-            )
-            ssm_lr = args.ssm_lr_base
+            # ==================================================================
+            # Check backend: S5 (SSM) or Transformer (LOBMAX)
+            # ==================================================================
+            backend = getattr(args, 'backend', 's5')
+            
+            if backend == 'transformer':
+                # LOBMAX Transformer backend
+                if not LOBMAX_AVAILABLE:
+                    raise ImportError(
+                        "LOBMAX not available. Make sure lobmax/ directory exists "
+                        "and MaxText is in the path."
+                    )
+                log_with_timestamp(f"Initializing LOBMAX (Transformer) model...")
+                
+                # Initialize mesh for LOBMAX
+                from lob.sharding_utils import initialize_mesh, get_global_mesh
+                mesh = get_global_mesh()
+                if mesh is None:
+                    mesh = initialize_mesh(args.num_devices)
+                
+                state, model_cls, total_params = init_lobmax_train_state(
+                    args,
+                    n_classes=n_classes,
+                    seq_len=seq_len,
+                    book_dim=book_dim,
+                    book_seq_len=book_seq_len,
+                    train_size=train_size,
+                    mesh=mesh,
+                    print_shapes=True
+                )
+                # For Transformer, use lr_base instead of ssm_lr_base
+                ssm_lr = getattr(args, 'lr_base', getattr(args, 'ssm_lr_base', 0.0005))
+            else:
+                # S5 SSM backend (original)
+                state, model_cls, total_params = init_train_state(
+                    args,
+                    n_classes=n_classes,
+                    seq_len=seq_len,
+                    book_dim=book_dim,
+                    book_seq_len=book_seq_len,
+                    train_size=train_size,  # NEW: for schedule calculation
+                    print_shapes=True
+                )
+                ssm_lr = args.ssm_lr_base
+            
             lr = args.lr_factor * ssm_lr
             steps_per_epoch = train_size // args.global_bsz
             if hasattr(args, 'curtail_epochs') and args.curtail_epochs is not None:
@@ -284,13 +326,24 @@ def train(args):
             state = ckpt['model']
         
         val_model = model_cls(training=False, step_rescale=1)
-        init_hidden=model_cls().initialize_carry(batch_size=args.global_bsz//args.num_devices,
-                                                hidden_size=(ssm_size // pow(2,int(args.conj_sym))),
-                                                n_message_layers=args.n_message_layers,
-                                                n_book_pre_layers=args.n_book_pre_layers ,
-                                                n_book_post_layers=args.n_book_post_layers,
-                                                n_fused_layers=args.n_layers,
-                                                h_size_ema=ssm_size)
+        
+        # Initialize hidden state (S5 only - Transformer doesn't use hidden state)
+        backend = getattr(args, 'backend', 's5')
+        if backend == 'transformer':
+            # Transformer doesn't have hidden state - use None placeholder
+            init_hidden = None
+            log_with_timestamp("Transformer backend: No hidden state initialization needed")
+        else:
+            # S5 SSM backend: initialize hidden state
+            init_hidden = model_cls().initialize_carry(
+                batch_size=args.global_bsz // args.num_devices,
+                hidden_size=(ssm_size // pow(2, int(args.conj_sym))),
+                n_message_layers=args.n_message_layers,
+                n_book_pre_layers=args.n_book_pre_layers,
+                n_book_post_layers=args.n_book_post_layers,
+                n_fused_layers=args.n_layers,
+                h_size_ema=ssm_size
+            )
 
         # ====================================================================
         # New: Initialize mesh and JIT-compiled train_step (jax.jit + shardings migration)
@@ -474,7 +527,7 @@ def train(args):
             # MFU tracking parameters
             model_params=total_params,
             batch_size=args.global_bsz,
-            peak_tflops=1000.0,
+            peak_tflops=495.0,  # GH200 BF16 Tensor Core peak
             goodput_monitor=goodput_monitor,
             # Step-level checkpointing parameters
             checkpoint_callback=step_checkpoint_callback,

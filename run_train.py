@@ -279,6 +279,29 @@ if __name__ == "__main__":
 				help="Use BF16 mixed precision training")
 
 	# ============================================================================
+	# Backend Selection: S5 (SSM) or Transformer (MaxText)
+	# ============================================================================
+	parser.add_argument("--backend", type=str, default="s5",
+				choices=["s5", "transformer"],
+				help="Model backend: 's5' (default, SSM-based) or 'transformer' (MaxText LLaMA-style)")
+	
+	# Transformer-specific parameters (only used when backend=transformer)
+	parser.add_argument("--num_heads", type=int, default=16,
+				help="[Transformer] Number of attention heads")
+	parser.add_argument("--num_kv_heads", type=int, default=None,
+				help="[Transformer] Number of KV heads for GQA (default: same as num_heads)")
+	parser.add_argument("--head_dim", type=int, default=None,
+				help="[Transformer] Dimension per head (default: d_model / num_heads)")
+	parser.add_argument("--mlp_dim", type=int, default=None,
+				help="[Transformer] FFN intermediate dimension (default: 4 * d_model)")
+	parser.add_argument("--attention_kernel", type=str, default="flash",
+				choices=["dot_product", "flash", "cudnn_flash_te"],
+				help="[Transformer] Attention kernel: dot_product, flash (default), cudnn_flash_te")
+	parser.add_argument("--rope_type", type=str, default="llama3.1",
+				choices=["default", "llama3.1", "yarn"],
+				help="[Transformer] RoPE type: default, llama3.1 (default), yarn")
+
+	# ============================================================================
 	# Prodigy LR Estimation Mode (Plan B)
 	# ============================================================================
 	#
@@ -383,6 +406,26 @@ if __name__ == "__main__":
 
 	# Set BF16 environment variable based on command-line argument
 	os.environ['USE_BF16'] = '1' if args.use_bf16 else '0'
+
+	# ============================================
+	# Transformer Default Parameters
+	# ============================================
+	if args.backend == "transformer":
+		print(f"[*] Using Transformer backend (MaxText LLaMA-style)")
+		# Fill in Transformer defaults if not specified
+		if args.num_kv_heads is None:
+			args.num_kv_heads = args.num_heads
+		if args.head_dim is None:
+			args.head_dim = args.d_model // args.num_heads
+		if args.mlp_dim is None:
+			args.mlp_dim = 4 * args.d_model
+		
+		print(f"    d_model={args.d_model}, n_layers={args.n_layers}")
+		print(f"    num_heads={args.num_heads}, num_kv_heads={args.num_kv_heads}, head_dim={args.head_dim}")
+		print(f"    mlp_dim={args.mlp_dim}")
+		print(f"    attention_kernel={args.attention_kernel}, rope_type={args.rope_type}")
+	else:
+		print(f"[*] Using S5 backend (SSM-based)")
 
 	# Parse checkpoint_every_n_steps: "auto", "0", or integer
 	if args.checkpoint_every_n_steps.lower() == "auto":
