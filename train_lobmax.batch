@@ -1,0 +1,426 @@
+#!/bin/bash
+#SBATCH --job-name=lobmax_train
+#SBATCH --output=logs_lobmax/lobmax_%j.out
+#SBATCH --error=logs_lobmax/lobmax_%j.err
+# === 1-node test config ===
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --mem=0
+#SBATCH --time=2:00:00
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
+
+# === Test config: small model ===
+# Increased from 4 to 8 for better MFU (larger batches = better GPU utilization)
+export PER_GPU_BSZ=${PER_GPU_BSZ:-22}
+
+echo "============================================"
+echo "LOBMAX Training Job"
+echo "Job started at: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Running on nodes: $SLURM_JOB_NODELIST"
+echo "Number of nodes: $SLURM_NNODES"
+echo "GPUs per node: 4"
+echo "Total GPUs: $((SLURM_NNODES * 4))"
+echo "============================================"
+
+# ============================================
+# Model Preset Configuration for LOBMAX
+# ============================================
+# Available presets: 3B, 1.3B, 360M, 125M
+# Usage:
+#   MODEL_PRESET=125M sbatch train_lobmax.batch
+#   MODEL_PRESET=360M sbatch train_lobmax.batch
+# ============================================
+MODEL_PRESET=${MODEL_PRESET:-125M}
+echo "[*] LOBMAX Model preset: $MODEL_PRESET"
+export MODEL_PRESET
+
+if [ -n "$PER_GPU_BSZ" ]; then
+    echo "[*] Batch size override: $PER_GPU_BSZ (per GPU)"
+    export PER_GPU_BSZ
+fi
+
+# CURTAIL_EPOCHS: Optional - end each epoch early after N steps (for quick testing)
+# DISABLED: CURTAIL_EPOCHS feature (commented out)
+# if [ -n "$CURTAIL_EPOCHS" ]; then
+#     echo "[*] Curtail epochs: $CURTAIL_EPOCHS steps (quick test mode)"
+#     export CURTAIL_EPOCHS
+# fi
+
+# MSG_SEQ_LEN: Message sequence length (default 500, try 256/200 for faster training)
+# seq_len = MSG_SEQ_LEN × 24 (token_mode), e.g., 256 → 6144 tokens
+export MSG_SEQ_LEN=${MSG_SEQ_LEN:-500}
+echo "[*] Message sequence length: $MSG_SEQ_LEN (seq_len = $((MSG_SEQ_LEN * 24)) tokens)"
+
+# MoE Optimization: Tokamax GMM for GPU (disables Megablox TPU optimization)
+# Usage: USE_TOKAMAX_GMM=True MEGABLOX=False SPARSE_MATMUL=False MODEL_PRESET=0.6B-A306M-4E-T2 sbatch train_lobmax.batch
+if [ "$USE_TOKAMAX_GMM" = "True" ] || [ "$USE_TOKAMAX_GMM" = "true" ]; then
+    echo "[*] Tokamax GMM: ENABLED (GPU MoE optimization)"
+    echo "    Note: This disables Megablox and sparse_matmul for better GPU performance"
+fi
+
+# Sliding Window Attention: Reduce O(n²) to O(n×W) for 12K sequences
+# Usage: ATTENTION_TYPE=local_sliding SLIDING_WINDOW_SIZE=1024 sbatch train_lobmax.batch
+# Window size guide: 1024 (12x speedup), 2048 (6x speedup)
+export ATTENTION_TYPE=${ATTENTION_TYPE:-global}
+export SLIDING_WINDOW_SIZE=${SLIDING_WINDOW_SIZE:-0}
+if [ "$ATTENTION_TYPE" != "global" ]; then
+    echo "[*] Sliding Window Attention: ENABLED"
+    echo "    attention_type=${ATTENTION_TYPE}, window_size=${SLIDING_WINDOW_SIZE}"
+    echo "    Expected speedup: ~$((12000 / SLIDING_WINDOW_SIZE))x (for seq_len=12K)"
+fi
+
+# Create logs directory
+mkdir -p logs_lobmax
+
+# Change to working directory
+cd /projects/s5e/quant/AlphaTrade/LOBS5
+
+# Configuration
+GPUS_PER_NODE=4
+NNODES=$SLURM_NNODES
+TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
+
+echo "[*] Total GPUs: $TOTAL_GPUS ($NNODES nodes × $GPUS_PER_NODE GPUs/node)"
+echo "[*] Batch size will be set by MODEL_PRESET ($MODEL_PRESET)"
+
+# Multi-Node Setup
+MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
+MASTER_PORT=29500
+export JAX_COORDINATOR_ADDRESS="$MASTER_ADDR:$MASTER_PORT"
+export MASTER_ADDR
+export MASTER_PORT
+
+echo "[*] Multi-node mode: $NNODES nodes"
+echo "[*] Coordinator: $JAX_COORDINATOR_ADDRESS"
+
+# Data paths
+DATA_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022"
+TEST_DIR="/projects/s5e/quant/JAN2023/GOOG_24tok_preproc"
+
+# Launch with srun - inline wrapper
+srun --nodes=$NNODES \
+     --ntasks=$NNODES \
+     --ntasks-per-node=1 \
+     --gres=gpu:$GPUS_PER_NODE \
+     --gpu-bind=map_gpu:0,1,2,3 \
+     --output=logs_lobmax/training_${SLURM_JOB_ID}_node%n.log \
+     --export=ALL \
+     bash -c '
+# ========== Inline Wrapper ==========
+echo "========================================"
+echo "[Wrapper] Running on node: $(hostname)"
+echo "[Wrapper] SLURM_NODEID: ${SLURM_NODEID:-N/A}"
+echo "[Wrapper] SLURM_PROCID: ${SLURM_PROCID:-N/A}"
+echo "[Wrapper] CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-all}"
+echo "========================================"
+
+# Source conda and activate lobmax environment (use absolute path for srun compatibility)
+export CONDA_PREFIX=/projects/s5e/quant/miniforge3/envs/lobmax
+export PATH="$CONDA_PREFIX/bin:$PATH"
+source /projects/s5e/quant/miniforge3/etc/profile.d/conda.sh
+conda activate lobmax
+
+# Verify conda activation
+echo "[Wrapper] CONDA_PREFIX: $CONDA_PREFIX"
+echo "[Wrapper] Python path: $(which python)"
+echo "[Wrapper] Python check: $($CONDA_PREFIX/bin/$CONDA_PREFIX/bin/python --version)"
+
+# Load CUDA module
+module load cuda/12.6
+
+# Set LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+
+# JAX environment
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+export JAX_COORDINATOR_TIMEOUT_MS=600000
+# JAX 0.8.x: Use empty string to auto-detect GPU via PJRT plugin
+export JAX_PLATFORMS=""
+export TF_GPU_ALLOCATOR=cuda_malloc_async
+
+# MaxText perf toggles (override via env)
+export ATTN_KERNEL="${ATTN_KERNEL:-flash}"
+export FUSED_QKV="${FUSED_QKV:-True}"
+export FUSED_MLP="${FUSED_MLP:-True}"
+export FLOAT32_QK_PRODUCT="${FLOAT32_QK_PRODUCT:-False}"
+export FLOAT32_LOGITS="${FLOAT32_LOGITS:-False}"
+export REMAT_POLICY="${REMAT_POLICY:-full}"
+export QUANTIZATION="${QUANTIZATION:-}"
+export MEGABLOX="${MEGABLOX:-}"
+export SPARSE_MATMUL="${SPARSE_MATMUL:-}"
+export USE_TOKAMAX_GMM="${USE_TOKAMAX_GMM:-False}"
+
+# Multi-node JAX config
+if [ -n "$JAX_COORDINATOR_ADDRESS" ]; then
+    echo "[Wrapper] Multi-node coordinator: $JAX_COORDINATOR_ADDRESS"
+    export JAX_PROCESS_COUNT=${SLURM_NNODES:-1}
+    export JAX_PROCESS_INDEX=${SLURM_PROCID:-0}
+    export JAX_LOCAL_PROCESS_COUNT=1
+    export JAX_LOCAL_PROCESS_INDEX=0
+    echo "[Wrapper] JAX_PROCESS_COUNT=${JAX_PROCESS_COUNT}"
+    echo "[Wrapper] JAX_PROCESS_INDEX=${JAX_PROCESS_INDEX}"
+fi
+
+# CUDA config
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+mkdir -p "$HOME/.nv/ComputeCache" || true
+
+echo "[Wrapper] Available GPUs:"
+nvidia-smi --list-gpus | head -4
+echo "[Wrapper] Python version:"
+$CONDA_PREFIX/bin/python --version
+
+# Run LOBMAX training
+cd /projects/s5e/quant/AlphaTrade/LOBS5
+
+# ===== Flash Attention Runtime Check =====
+echo ""
+echo "============================================"
+echo "[Wrapper] Flash Attention Runtime Check"
+echo "============================================"
+
+# Set XLA flags for Flash Attention and MFU Optimization
+# Using minimal flags that worked with BSZ=22 (job 1912811)
+export XLA_FLAGS="${XLA_FLAGS} \
+  --xla_gpu_enable_cudnn_fmha=true \
+  --xla_gpu_enable_latency_hiding_scheduler=true"
+
+# =============================================================================
+# DISABLED XLA FLAGS - Caused OOM by breaking Flash Attention
+# =============================================================================
+# These flags were added for MaxText A3 GPU optimization but caused Flash
+# Attention to fall back to materializing full attention matrix (O(S^2) memory).
+# 
+# With S=12000, BSZ=22, the attention matrix would be:
+#   22 * 12 * 12000 * 12000 * 2 bytes = ~76GB per GPU (OOM on 85GB GH200)
+#
+# Job 1912811 (BSZ=22, 4.3% MFU, 13.9s/step) worked with only minimal flags.
+# Job 1913054 (same BSZ=22) failed with 99.92GB OOM after adding these flags.
+#
+# TODO: Investigate which specific flag breaks Flash Attention and re-enable
+#       the safe ones for better collective communication performance.
+# =============================================================================
+#   --xla_gpu_enable_highest_priority_async_stream=true \
+#   --xla_gpu_enable_triton_gemm=false \
+#   --xla_gpu_all_reduce_combine_threshold_bytes=134217728 \
+#   --xla_gpu_all_gather_combine_threshold_bytes=134217728 \
+#   --xla_gpu_reduce_scatter_combine_threshold_bytes=67108864 \
+#   --xla_gpu_enable_pipelined_all_gather=true \
+#   --xla_gpu_enable_pipelined_reduce_scatter=true \
+#   --xla_gpu_enable_pipelined_all_reduce=true \
+#   --xla_gpu_enable_while_loop_double_buffering=true \
+#   --xla_gpu_enable_all_gather_combine_by_dim=false \
+#   --xla_gpu_enable_reduce_scatter_combine_by_dim=false
+
+# NCCL Optimization
+export NCCL_DEBUG=WARN
+export NCCL_IB_DISABLE=0
+
+echo "[Wrapper] XLA_FLAGS: $XLA_FLAGS"
+
+# Run Flash Attention check
+$CONDA_PREFIX/bin/python -u -B lobmax/check_flash_attention.py --attention_kernel="$ATTN_KERNEL"
+FA_CHECK_RESULT=$?
+
+if [ $FA_CHECK_RESULT -ne 0 ]; then
+    echo "[WARNING] Flash Attention check reported issues. Training will continue but may be slower."
+fi
+
+echo ""
+echo "============================================"
+echo "[Wrapper] Starting LOBMAX Training"
+echo "============================================"
+
+# Use model preset or explicit parameters
+# Dense presets
+if [ "$MODEL_PRESET" = "30M" ]; then
+    # Tiny model for seq_len=12000 with limited memory
+    D_MODEL=512
+    N_LAYERS=6
+    NUM_HEADS=8
+    MLP_DIM=2048
+    LR_BASE=0.0008
+    NUM_EXPERTS=1
+    NUM_EXPERTS_PER_TOK=1
+elif [ "$MODEL_PRESET" = "125M" ]; then
+    D_MODEL=768
+    N_LAYERS=12
+    NUM_HEADS=12
+    MLP_DIM=3072
+    LR_BASE=0.0005
+    NUM_EXPERTS=1
+    NUM_EXPERTS_PER_TOK=1
+elif [ "$MODEL_PRESET" = "360M" ]; then
+    D_MODEL=1024
+    N_LAYERS=24
+    NUM_HEADS=16
+    MLP_DIM=4096
+    LR_BASE=0.0003
+    NUM_EXPERTS=1
+    NUM_EXPERTS_PER_TOK=1
+elif [ "$MODEL_PRESET" = "1.3B" ]; then
+    D_MODEL=2048
+    N_LAYERS=24
+    NUM_HEADS=16
+    MLP_DIM=8192
+    LR_BASE=0.00015
+    NUM_EXPERTS=1
+    NUM_EXPERTS_PER_TOK=1
+elif [ "$MODEL_PRESET" = "3B" ]; then
+    D_MODEL=2560
+    N_LAYERS=32
+    NUM_HEADS=20
+    MLP_DIM=10240
+    LR_BASE=0.00008
+    NUM_EXPERTS=1
+    NUM_EXPERTS_PER_TOK=1
+# MoE presets - measured total/active params (Qwen-style naming)
+elif [ "$MODEL_PRESET" = "1.9B-A153M" ]; then
+    # 1.85B total MoE (measured), 153M activated per token
+    D_MODEL=768
+    N_LAYERS=12
+    NUM_HEADS=12
+    MLP_DIM=3072
+    LR_BASE=0.0005
+    NUM_EXPERTS=16
+    NUM_EXPERTS_PER_TOK=1
+elif [ "$MODEL_PRESET" = "5.8B-A473M" ]; then
+    # 5.76B total MoE (measured), 473M activated per token
+    D_MODEL=1024
+    N_LAYERS=24
+    NUM_HEADS=16
+    MLP_DIM=4096
+    LR_BASE=0.0003
+    NUM_EXPERTS=16
+    NUM_EXPERTS_PER_TOK=1
+elif [ "$MODEL_PRESET" = "23B-A1.9B" ]; then
+    # ~23B total MoE (calculated), ~1.89B activated per token
+    D_MODEL=2048
+    N_LAYERS=24
+    NUM_HEADS=16
+    MLP_DIM=8192
+    LR_BASE=0.00015
+    NUM_EXPERTS=16
+    NUM_EXPERTS_PER_TOK=1
+elif [ "$MODEL_PRESET" = "44B-A3.8B" ]; then
+    # ~44B total MoE, ~3.8B activated (based on 3B Dense: d=2560, n=32)
+    D_MODEL=2560
+    N_LAYERS=32
+    NUM_HEADS=20
+    MLP_DIM=10240
+    LR_BASE=0.00008
+    NUM_EXPERTS=16
+    NUM_EXPERTS_PER_TOK=1
+# ============================================
+# MoE Optimization Presets (tokens_per_expert experiments)
+# ============================================
+# tokens_per_expert = batch × seq × topk / num_experts
+# Goal: Increase tokens_per_expert from 24K to 48K-192K for better MFU
+elif [ "$MODEL_PRESET" = "1.0B-A153M-8E" ]; then
+    # 8 experts (half of 16) → tokens_per_expert = 48K (2x baseline)
+    # Same activated params as 1.9B-A153M, but fewer total params
+    D_MODEL=768
+    N_LAYERS=12
+    NUM_HEADS=12
+    MLP_DIM=3072
+    LR_BASE=0.0005
+    NUM_EXPERTS=8
+    NUM_EXPERTS_PER_TOK=1
+elif [ "$MODEL_PRESET" = "1.0B-A306M-8E-T2" ]; then
+    # 8 experts + topk=2 → tokens_per_expert = 96K (4x baseline)
+    # Double activated params per token (306M vs 153M)
+    D_MODEL=768
+    N_LAYERS=12
+    NUM_HEADS=12
+    MLP_DIM=3072
+    LR_BASE=0.0005
+    NUM_EXPERTS=8
+    NUM_EXPERTS_PER_TOK=2
+elif [ "$MODEL_PRESET" = "0.6B-A153M-4E" ]; then
+    # 4 experts → tokens_per_expert = 96K (4x baseline)
+    # Same activated params, even fewer total params
+    D_MODEL=768
+    N_LAYERS=12
+    NUM_HEADS=12
+    MLP_DIM=3072
+    LR_BASE=0.0005
+    NUM_EXPERTS=4
+    NUM_EXPERTS_PER_TOK=1
+elif [ "$MODEL_PRESET" = "0.6B-A306M-4E-T2" ]; then
+    # 4 experts + topk=2 → tokens_per_expert = 192K (8x baseline)
+    # Maximum tokens_per_expert configuration
+    D_MODEL=768
+    N_LAYERS=12
+    NUM_HEADS=12
+    MLP_DIM=3072
+    LR_BASE=0.0005
+    NUM_EXPERTS=4
+    NUM_EXPERTS_PER_TOK=2
+else
+    echo "[Error] Unknown preset: $MODEL_PRESET"
+    echo "[Info] Dense presets: 30M, 125M, 360M, 1.3B, 3B"
+    echo "[Info] MoE presets (16E): 1.9B-A153M, 5.8B-A473M, 23B-A1.9B, 44B-A3.8B"
+    echo "[Info] MoE optimization: 1.0B-A153M-8E, 1.0B-A306M-8E-T2, 0.6B-A153M-4E, 0.6B-A306M-4E-T2"
+    exit 1
+fi
+
+if [ "$NUM_EXPERTS" -gt 1 ]; then
+    echo "[Wrapper] LOBMAX MoE Config: d_model=$D_MODEL, n_layers=$N_LAYERS, num_heads=$NUM_HEADS, mlp_dim=$MLP_DIM"
+    echo "  [MoE] num_experts=$NUM_EXPERTS, num_experts_per_tok=$NUM_EXPERTS_PER_TOK"
+else
+    echo "[Wrapper] LOBMAX Config: d_model=$D_MODEL, n_layers=$N_LAYERS, num_heads=$NUM_HEADS, mlp_dim=$MLP_DIM"
+fi
+
+$CONDA_PREFIX/bin/python -u -B run_lobmax.py \
+    --USE_WANDB=True \
+    --model_preset="$MODEL_PRESET" \
+    --attention_kernel="$ATTN_KERNEL" \
+    --rope_type=llama3.1 \
+    --attention_type="${ATTENTION_TYPE:-global}" \
+    --sliding_window_size="${SLIDING_WINDOW_SIZE:-0}" \
+    --fused_qkv="$FUSED_QKV" \
+    --fused_mlp="$FUSED_MLP" \
+    --float32_qk_product="$FLOAT32_QK_PRODUCT" \
+    --float32_logits="$FLOAT32_LOGITS" \
+    --prenorm=True \
+    --batchnorm=False \
+    --dataset=lobster-prediction \
+    --merging=padded \
+    --dir_name="'"$DATA_DIR"'" \
+    --test_dir_name="'"$TEST_DIR"'" \
+    --epochs=20 \
+    --jax_seed=42 \
+    --p_dropout=0.0 \
+    --warmup_end=1 \
+    --weight_decay=0.05 \
+    --use_book_data=True \
+    --use_simple_book=False \
+    --book_transform=True \
+    --masking=none \
+    --num_devices='"$GPUS_PER_NODE"' \
+    --n_data_workers=12 \
+    --pin_memory=True \
+    --prefetch_factor=6 \
+    --persistent_workers=True \
+    --enable_goodput_monitor=True \
+    --debug_loading=False \
+    --enable_profiler=False \
+    --random_offsets_train=True \
+    --shuffle_train=True \
+    --debug_overfit=False \
+    --use_bf16=True \
+    --remat_policy="$REMAT_POLICY" \
+    ${QUANTIZATION:+--quantization="$QUANTIZATION"} \
+    ${MEGABLOX:+--megablox="$MEGABLOX"} \
+    ${SPARSE_MATMUL:+--sparse_matmul="$SPARSE_MATMUL"} \
+    ${USE_TOKAMAX_GMM:+--use_tokamax_gmm="$USE_TOKAMAX_GMM"} \
+    --token_mode=24 \
+'
+
+echo "============================================"
+echo "LOBMAX Training completed at: $(date)"
+echo "============================================"
+

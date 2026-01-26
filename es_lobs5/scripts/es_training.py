@@ -16,6 +16,26 @@ Environment variables (for SLURM jobs):
     See es_training.sh for full list.
 """
 
+# =============================================================================
+# PERGPU_PERTURBATIONS Scaling Test Results (2026-01-17):
+# ------------------------------------------------------
+# Max Stable:  14,336 (Total 57,344) - Job 1921017 - RUNNING
+# First Fail:  16,384 (Total 65,536) - Job 1920937 - FAILED (OOM/Aborted)
+#
+# Jobs 18,432+ all fail with OOM (RESOURCE_EXHAUSTED ~48-80GB allocation)
+# The "Aborted" status indicates XLA runtime forced abort to prevent deadlock
+# after one replica hit OOM during distributed computation.
+#
+# Related files:
+#   - es_lobs5/scripts/es_training.sh     (batch script)
+#   - es_lobs5/training/es_trainer.py     (core logic)
+#
+# Reference logs:
+#   - logs/es_train_1921017.out/.err  (max stable run)
+#   - logs/es_train_1920937.out/.err  (first OOM failure)
+#   - logs/es_train_1921018.out/.err  (detailed OOM traceback)
+# =============================================================================
+
 import os
 import sys
 import time
@@ -49,11 +69,42 @@ def _init_distributed_if_needed():
     parser.add_argument('--proc_id', type=int, default=None)  # Default None, will use env var
     args, _ = parser.parse_known_args()
 
+    # Priority 1: Check standard JAX distributed environment variables
+    coord_env = os.environ.get('JAX_COORDINATOR_ADDRESS')
+    if coord_env:
+        import jax
+        pid = int(os.environ.get('JAX_PROCESS_INDEX', os.environ.get('SLURM_PROCID', '0')))
+        pcnt = int(os.environ.get('JAX_PROCESS_COUNT', os.environ.get('SLURM_NNODES', '1')))
+        
+        # Determine local devices (critical for 1-process-per-node mode)
+        # We assume 4 GPUs per node as per standard config, or check CUDA_VISIBLE_DEVICES
+        cvd = os.environ.get('CUDA_VISIBLE_DEVICES')
+        if cvd:
+            n_local = len([d for d in cvd.split(',') if d.strip()])
+        else:
+            # Fallback/Default for our nodes
+            n_local = 4
+            
+        local_device_ids = list(range(n_local))
+        
+        print(f"[DIST] Initializing JAX distributed (Env): coord={coord_env}, procs={pcnt}, id={pid}")
+        print(f"[DIST] Using local_device_ids={local_device_ids} ({n_local} GPUs)")
+        
+        jax.distributed.initialize(
+            coordinator_address=coord_env,
+            num_processes=pcnt,
+            process_id=pid,
+            local_device_ids=local_device_ids
+        )
+        print(f"[DIST] Process {jax.process_index()} initialized. Global devices: {jax.device_count()}, Local devices: {jax.local_device_count()}")
+        return True
+
+    # Priority 2: Legacy argument parsing (fallback)
     if args.coord_addr is not None:
         import jax
         # Get proc_id from command line or SLURM environment variable
         proc_id = args.proc_id
-        if proc_id is None:
+        if proc_id is None or proc_id < 0:
             # Use SLURM_PROCID for global process ID (0 to ntasks-1)
             # With ntasks-per-node=4, this gives unique ID per GPU across all nodes
             proc_id = int(os.environ.get('SLURM_PROCID', 0))

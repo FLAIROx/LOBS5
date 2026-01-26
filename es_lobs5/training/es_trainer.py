@@ -25,6 +25,54 @@ Key Features:
 gymanx_exchange env path: https://github.com/KangOxford/JaxMARL-HFT
 """
 
+# =============================================================================
+# S5 SSM Parameter Training Strategy
+# =============================================================================
+#
+# Default Behavior (freeze_nonlora=False):
+# ┌──────────────┬───────────┬───────────────┬───────────────────────────────┐
+# │  Parameter   │  Status   │ Training Mode │             Notes             │
+# ├──────────────┼───────────┼───────────────┼───────────────────────────────┤
+# │ Lambda_re/im │ Frozen    │ -             │ Always frozen (for stability) │
+# │ embedding    │ Frozen    │ -             │ Always frozen                 │
+# │ decoder      │ Frozen    │ -             │ Always frozen                 │
+# ├──────────────┼───────────┼───────────────┼───────────────────────────────┤
+# │ log_step     │ Trainable │ FULL          │ Time scale adaptation         │
+# │ B, C         │ Trainable │ FULL          │ Input/output projection       │
+# │ D            │ Trainable │ FULL          │ Skip/direct channel           │
+# │ norm, bias   │ Trainable │ FULL          │ Normalization layers          │
+# ├──────────────┼───────────┼───────────────┼───────────────────────────────┤
+# │ out2/weight  │ Trainable │ LoRA          │ GLU output layer              │
+# └──────────────┴───────────┴───────────────┴───────────────────────────────┘
+#
+# Summary:
+# - Frozen: Core stability components (Lambda eigenvalues, embedding, decoder)
+# - FULL training: SSM dynamics (B, C, D, log_step) and normalization layers
+# - LoRA training: Only the GLU output layer uses Low-Rank Adaptation
+#
+# To use conservative mode (LoRA-only): --freeze_nonlora True
+# =============================================================================
+
+# =============================================================================
+# PERGPU_PERTURBATIONS Scaling Test Results (2026-01-17):
+# ------------------------------------------------------
+# Max Stable:  14,336 (Total 57,344) - Job 1921017 - RUNNING
+# First Fail:  16,384 (Total 65,536) - Job 1920937 - FAILED (OOM/Aborted)
+#
+# Jobs 18,432+ all fail with OOM (RESOURCE_EXHAUSTED ~48-80GB allocation)
+# The "Aborted" status indicates XLA runtime forced abort to prevent deadlock
+# after one replica hit OOM during distributed computation.
+#
+# Related files:
+#   - es_lobs5/scripts/es_training.sh     (batch script)
+#   - es_lobs5/scripts/es_training.py     (entry point)
+#
+# Reference logs:
+#   - logs/es_train_1921017.out/.err  (max stable run)
+#   - logs/es_train_1920937.out/.err  (first OOM failure)
+#   - logs/es_train_1921018.out/.err  (detailed OOM traceback)
+# =============================================================================
+
 import os
 import jax
 
@@ -70,6 +118,28 @@ _CommonParams = None
 _simple_es_tree_key = None
 _load_checkpoint_for_es = None
 
+# Training mode configuration (lazy loaded)
+_training_modes = None
+
+
+def _get_training_modes():
+    """Lazy load training modes configuration."""
+    global _training_modes
+    if _training_modes is None:
+        from .training_modes import (
+            get_mode_config, get_param_classifier, apply_es_map_classification,
+            print_mode_config, is_lora_mode, get_all_modes
+        )
+        _training_modes = {
+            'get_mode_config': get_mode_config,
+            'get_param_classifier': get_param_classifier,
+            'apply_es_map_classification': apply_es_map_classification,
+            'print_mode_config': print_mode_config,
+            'is_lora_mode': is_lora_mode,
+            'get_all_modes': get_all_modes,
+        }
+    return _training_modes
+
 
 def _get_all_noisers():
     """Lazy load noisers."""
@@ -112,13 +182,14 @@ __all__ = ['ESTrainer', 'create_es_config', 'es_train']
 
 def _lazy_import_jaxlob():
     """Lazy import JaxLOB to avoid import errors when not using this mode."""
-    global OrderBook, LobState, Message_Tokenizer, encoding, get_best_bid_and_ask, create_trade, add_trade
+    global OrderBook, LobState, Message_Tokenizer, encoding, get_best_bid_and_ask, create_trade, add_trade, getCancelMsgs
     if OrderBook is None:
         from gymnax_exchange.jaxob.jorderbook import OrderBook as _OrderBook, LobState as _LobState
         from gymnax_exchange.jaxob.JaxOrderBookArrays import (
             get_best_bid_and_ask as _get_best_bid_and_ask,
             create_trade as _create_trade,
             add_trade as _add_trade,
+            getCancelMsgs as _getCancelMsgs,
         )
         from lob.encoding import Message_Tokenizer as _Message_Tokenizer
         import lob.encoding as _encoding
@@ -129,6 +200,69 @@ def _lazy_import_jaxlob():
         get_best_bid_and_ask = _get_best_bid_and_ask
         create_trade = _create_trade
         add_trade = _add_trade
+        getCancelMsgs = _getCancelMsgs
+
+
+# =============================================================================
+# Helper Functions for Smart Cancellation (Ported from Gymnax Exchange)
+# =============================================================================
+from functools import partial
+
+@jax.jit
+def p_in_cnl_vmap(p, prices_cnl):
+    return jnp.where((prices_cnl == p) & (p != 0), True, False)
+
+def matching_masks(prices_a, prices_cnl):
+    # Vectorized match check
+    p_in_cnl_fn = jax.vmap(p_in_cnl_vmap, in_axes=(0, None))
+    res = p_in_cnl_fn(prices_a, prices_cnl)
+    return jnp.any(res, axis=1), jnp.any(res, axis=0)
+
+def argsort_rev(arr):
+    """ 'arr' sorted in descending order (LTR priority tie-breaker) """
+    return (arr.shape[0] - 1 - jnp.argsort(arr[::-1]))[::-1]
+
+def rank_rev(arr):
+    """ Rank array in descending order, with ties having left-to-right priority. """
+    return jnp.argsort(argsort_rev(arr))
+
+def _filter_messages(action_msgs: jax.Array, cnl_msgs: jax.Array) -> Tuple[jax.Array, jax.Array]:
+    """ Filter out cancelation messages, when same actions should be placed again.
+        NOTE: only simplifies cancellations if new action size <= old action size.
+        To prevent multiple split orders, new larger orders still cancel the entire old order.
+    """
+    a_mask, c_mask = matching_masks(action_msgs[:, 3], cnl_msgs[:, 3])
+    
+    a_i = jnp.where(a_mask, size=a_mask.shape[0], fill_value=-1)[0]
+    a = jnp.where(a_i == -1, 0, action_msgs[a_i][:, 2])
+    c_i = jnp.where(c_mask, size=c_mask.shape[0], fill_value=-1)[0]
+    c = jnp.where(c_i == -1, 0, cnl_msgs[c_i][:, 2])
+
+    rel_cnl_quants = (c >= a) * a
+    
+    # Update action messages
+    # If action size matches cancel size (or is smaller), we reduce action.
+    # If action becomes 0, it means we don't need to send it (and don't need to cancel).
+    action_msgs = action_msgs.at[:, 2].set(
+        action_msgs[:, 2] - rel_cnl_quants[rank_rev(a_mask)])
+        
+    # Set actions with 0 quant to dummy messages (so process_orders skips/NOOPs them)
+    # Note: NOOP in JaxLOB is often type 0 or quantity 0.
+    # We ensure they are effectively NOOP.
+    action_msgs = jnp.where(
+        (action_msgs[:, 2] == 0)[:, None], # Broadcast
+        0,
+        action_msgs,
+    )
+    
+    # Update cancel messages
+    cnl_msgs = cnl_msgs.at[:, 2].set(cnl_msgs[:, 2] - rel_cnl_quants[rank_rev(c_mask)])
+    cnl_msgs = jnp.where(
+        (cnl_msgs[:, 2] == 0)[:, None],
+        0,
+        cnl_msgs,
+    )
+    return action_msgs, cnl_msgs
 
 
 def _get_flax_loaders():
@@ -262,6 +396,38 @@ def get_field_masks_from_validation_matrix(token_mode: int, vocab_size: int):
     return additive_mask
 
 
+def rank_transform(x: jax.Array) -> jax.Array:
+    """Convert fitness values to ranks, normalized to [-0.5, 0.5].
+
+    This prevents outliers from dominating and gives minority good
+    strategies a relatively larger weight in gradient estimation.
+    Particularly useful when most perturbations converge to a local
+    optimum (e.g., "no trading") while a few find better strategies.
+
+    Args:
+        x: Fitness array of shape (n_perturbations,)
+
+    Returns:
+        Rank-transformed array in [-0.5, 0.5] range
+
+    Reference:
+        HyperscaleES/rl_experiments/eggroll.py:102-104
+    """
+    ranks = jax.scipy.stats.rankdata(x, axis=-1) - 1.0
+    return ranks / (x.shape[-1] - 1) - 0.5
+
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 def create_es_config():
     """Create argument parser for ES training configuration."""
     parser = argparse.ArgumentParser(description='ES JaxLOB Training for LOBS5')
@@ -273,23 +439,45 @@ def create_es_config():
     # ES configuration
     parser.add_argument('--noiser', type=str, default='eggroll',
                         choices=['open_es', 'eggroll', 'eggrollbs', 'sparse'])
-    parser.add_argument('--sigma', type=float, default=0.01, help='Noise std')
+    parser.add_argument('--sigma', type=float, default=0.2, help='Initial noise std (default: 0.2 for exploration)')
+    parser.add_argument('--sigma_decay', type=float, default=0.9997,
+                        help='Sigma decay rate per epoch (0.9997: 0.2->0.01 over 10k epochs). Default: 0.9997')
+    parser.add_argument('--sigma_min', type=float, default=0.01,
+                        help='Minimum sigma (floor). Default: 0.01')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--lora_rank', type=int, default=4, help='LORA rank')
-    parser.add_argument('--freeze_nonlora', type=bool, default=True,
-                        help='Freeze non-LORA params (embeddings, base model). Default: True')
+
+    # Training mode (replaces use_lora, freeze_nonlora, lora_v2, freeze_ssm)
+    parser.add_argument('--mode', type=str, default='LORA_V1.6',
+                        choices=['LORA', 'LORA_V1.5', 'LORA_V1.6', 'LORA_V2', 'FULL', 'LORA+SSM'],
+                        help='Training mode: LORA (out2 only), LORA_V1.5 (all proj, train norms), '
+                             'LORA_V1.6 (all proj, freeze norms), LORA_V2 (all proj + SSM), '
+                             'FULL (no LoRA). Default: LORA_V1.6')
+
+    # [DEPRECATED] Legacy boolean flags - kept for backwards compatibility
+    # These are now ignored; use --mode instead
+    parser.add_argument('--use_lora', type=str2bool, default=None,
+                        help='[DEPRECATED] Use --mode instead. This flag is ignored.')
+    parser.add_argument('--freeze_nonlora', type=str2bool, default=None,
+                        help='[DEPRECATED] Use --mode instead. This flag is ignored.')
+    parser.add_argument('--lora_v2', type=str2bool, default=None,
+                        help='[DEPRECATED] Use --mode instead. This flag is ignored.')
+    parser.add_argument('--freeze_ssm', type=str2bool, default=None,
+                        help='[DEPRECATED] Use --mode instead. This flag is ignored.')
 
     # Training configuration
-    parser.add_argument('--n_perturbations', type=int, default=128,
-                        help='Population size (number of ES perturbations, must be divisible by n_devices)')
+    parser.add_argument('--pergpu_perturbations', type=int, default=32,
+                        help='Perturbations per GPU (Total = pergpu * n_devices)')
+    parser.add_argument('--n_perturbations', type=int, default=None,
+                        help='[DEPRECATED] Total population size. If set, overrides pergpu_perturbations.')
     # Legacy alias alias
     parser.add_argument('--n_threads', type=int, default=None,
                         help='[DEPRECATED] Use --n_perturbations instead')
     parser.add_argument('--n_epochs', type=int, default=1000, help='Training epochs')
-    parser.add_argument('--n_steps', type=int, default=100, help='Steps per episode')
-    parser.add_argument('--n_warmup_msgs', type=int, default=500,
+    parser.add_argument('--n_steps', type=int, default=10, help='Steps per episode')
+    parser.add_argument('--n_warmup_msgs', type=int, default=10,
                         help='Number of warmup messages to replay before episode starts (0 = no warmup)')
-    parser.add_argument('--background_msgs_per_step', type=int, default=10,
+    parser.add_argument('--background_msgs_per_step', type=int, default=50,
                         help='Background messages per step (applies to both world_model and historical_replay)')
     # Legacy alias alias
     parser.add_argument('--world_msgs_per_step', type=int, default=None,
@@ -298,7 +486,7 @@ def create_es_config():
     # Execution task
     parser.add_argument('--task', type=str, default='sell',
                         choices=['sell', 'buy'])
-    parser.add_argument('--task_size', type=int, default=500,
+    parser.add_argument('--task_size', type=int, default=50,
                         help='Shares to execute')
     parser.add_argument('--tick_size', type=int, default=100,
                         help='Tick size in cents')
@@ -321,12 +509,14 @@ def create_es_config():
                         help='Path to LOBSTER data directory for initial state')
 
     # Other
-    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--seed', type=int, default=2026)
     parser.add_argument('--output_dir', type=str, default='./es_checkpoints')
     parser.add_argument('--checkpoint_dir', type=str, default='./es_checkpoints',
                         help='Directory to save ES checkpoints')
-    parser.add_argument('--checkpoint_every', type=int, default=50,
+    parser.add_argument('--checkpoint_every', type=int, default=100,
                         help='Save checkpoint every N epochs')
+    parser.add_argument('--resume_from', type=str, default=None,
+                        help='Path to checkpoint directory to resume training from')
 
     # W&B logging
     parser.add_argument('--wandb_project', type=str, default=None,
@@ -341,6 +531,10 @@ def create_es_config():
                         help='Total number of processes (one per node)')
     parser.add_argument('--proc_id', type=int, default=None,
                         help='Process ID for this node (0-indexed)')
+
+    # Fitness shaping
+    parser.add_argument('--rank_transform', type=str2bool, default=True,
+                        help='Use rank-based fitness shaping (helps escape local optima like "no trading"). Default: True')
 
     return parser
 
@@ -615,23 +809,39 @@ class ESTrainer:
             self._process_index = 0
             self._process_count = 1
 
-        # Legacy alias: n_threads -> n_perturbations
+        # Handle perturbations configuration
+        # Priority: n_perturbations (explicit) > pergpu_perturbations (auto)
+        
+        # 1. Check deprecated n_threads
         if hasattr(config, 'n_threads') and getattr(config, 'n_threads', None) is not None:
-            if not hasattr(config, 'n_perturbations') or getattr(config, 'n_perturbations', 128) == 128:
-                print("[WARN] --n_threads is deprecated, use --n_perturbations instead")
-                config.n_perturbations = config.n_threads
-        # Ensure n_perturbations exists
-        if not hasattr(config, 'n_perturbations'):
-            config.n_perturbations = getattr(config, 'n_threads', 128)
+            print("[WARN] --n_threads is deprecated, use --pergpu_perturbations instead")
+            if getattr(config, 'n_perturbations', None) is None:
+                 config.n_perturbations = config.n_threads
+
+        # 2. Calculate effective n_perturbations
+        total_devices = jax.device_count()
+        
+        if getattr(config, 'n_perturbations', None) is not None:
+            # User explicitly set total count
+            pass
+        else:
+            # Auto-calculate from per-gpu
+            per_gpu = getattr(config, 'pergpu_perturbations', 32)
+            config.n_perturbations = per_gpu * total_devices
+            print(f"[INIT] Auto-calculated n_perturbations: {config.n_perturbations} ({per_gpu} per GPU * {total_devices} devices)")
+
+        # Validate divisibility
+        if config.n_perturbations % total_devices != 0:
+            print(f"[WARN] n_perturbations ({config.n_perturbations}) is not divisible by n_devices ({total_devices})")
 
         # Legacy alias: world_msgs_per_step -> background_msgs_per_step
         if hasattr(config, 'world_msgs_per_step') and getattr(config, 'world_msgs_per_step', None) is not None:
-            if not hasattr(config, 'background_msgs_per_step') or getattr(config, 'background_msgs_per_step', 10) == 10:
+            if not hasattr(config, 'background_msgs_per_step') or getattr(config, 'background_msgs_per_step', 50) == 10:
                 print("[WARN] --world_msgs_per_step is deprecated, use --background_msgs_per_step instead")
                 config.background_msgs_per_step = config.world_msgs_per_step
         # Ensure background_msgs_per_step exists
         if not hasattr(config, 'background_msgs_per_step'):
-            config.background_msgs_per_step = getattr(config, 'world_msgs_per_step', 10)
+            config.background_msgs_per_step = getattr(config, 'world_msgs_per_step', 50)
 
         _lazy_import_jaxlob()
 
@@ -768,29 +978,113 @@ class ESTrainer:
         print(f"[INIT-FLAX]   token_mode={token_mode}, batchnorm={self.flax_batchnorm}")
         print(f"[INIT-FLAX]   mixed_precision={'BF16' if use_bf16 else 'FP32'} (USE_BF16={os.environ.get('USE_BF16', '1')})")
 
+    def _log_detailed_param_stats(self, params, es_map, config, freeze_nonlora):
+        """Log detailed parameter structure with status for each tensor."""
+        print(f"\n[NOISER] {'='*120}")
+        print(f"[NOISER] {'Parameter Name':<60} | {'Shape':<15} | {'Type':<6} | {'Status':<12} | {'Physical':>12} | {'Effective':>12}")
+        print(f"[NOISER] {'-'*120}")
+
+        total_physical = 0
+        total_trainable = 0
+        total_effective = 0
+
+        # Flatten with paths to iterate
+        flat_params, tree_def = jax.tree_util.tree_flatten_with_path(params)
+        flat_map = jax.tree_util.tree_flatten(es_map)[0]
+
+        # Helper to format path
+        def path_to_str(path):
+            # path is a tuple of (DictKey, SequenceKey, etc)
+            return "/".join([str(p.key) if hasattr(p, 'key') else str(p) for p in path])
+
+        for (path, param), map_val in zip(flat_params, flat_map):
+            name = path_to_str(path)
+            shape = str(param.shape)
+            physical_size = param.size
+            total_physical += physical_size
+
+            # map: 0=FULL, 1=LORA, 2=FIXED, 3=FIXED
+            if map_val == 1: # LORA
+                p_type = "LORA"
+                status = "[Trainable]"
+                total_trainable += physical_size
+                # LoRA DoF = (in + out) * rank (assuming 2D)
+                if param.ndim == 2:
+                    eff_size = (param.shape[0] + param.shape[1]) * config.lora_rank
+                else:
+                    eff_size = 0 # Fallback or unlikely for LoRA
+            elif map_val == 0: # FULL
+                p_type = "FULL"
+                if freeze_nonlora:
+                    status = "[Frozen]"
+                    eff_size = 0
+                else:
+                    status = "[Trainable]"
+                    total_trainable += physical_size
+                    eff_size = physical_size
+            else: # FIXED
+                p_type = "FIXED"
+                status = "[Fixed]"
+                eff_size = 0
+
+            total_effective += eff_size
+
+            # Print row
+            print(f"[NOISER] {name:<60} | {shape:<15} | {p_type:<6} | {status:<12} | {physical_size:>12,} | {eff_size:>12,}")
+
+        print(f"[NOISER] {'='*120}")
+        print(f"[NOISER] SUMMARY:")
+        print(f"[NOISER]   Total Physical Params:  {total_physical:>15,}")
+        print(f"[NOISER]   Total Trainable Params: {total_trainable:>15,} ({(total_trainable/total_physical)*100:.2f}%)")
+        print(f"[NOISER]   Total Effective Params: {total_effective:>15,} ({(total_effective/total_physical)*100:.2f}%)")
+        print(f"[NOISER] {'='*120}\n")
+
+
     def _init_noiser(self):
-        """Initialize EGGROLL noiser for Policy.
+        """Initialize EGGROLL noiser for Policy using declarative mode configuration.
 
-        Note: solver=None uses default optax.sgd. The init_noiser API expects
-        a callable (like optax.sgd), not a pre-built optimizer chain.
-        See learned_lessons.md Lesson 4 for details.
-
-        For EggRollBS (baseline subtraction), group_size must be > 0.
-        Threads 0,1 in each group are baselines (no noise).
+        Training modes are defined in training_modes.py. The mode parameter
+        replaces the old boolean flags (use_lora, freeze_nonlora, lora_v2, freeze_ssm).
         """
         config = self.config
         all_noisers = _get_all_noisers()
         NOISER = all_noisers[config.noiser]
-
         self.noiser_cls = NOISER
 
         # Get group_size from config (required for EggRollBS, default 0 for EggRoll)
         group_size = getattr(config, 'group_size', 0)
 
-        # freeze_nonlora=True: Only train LORA parameters, freeze embeddings & base model
-        # freeze_nonlora=False: Train ALL parameters (not recommended for large models)
-        freeze_nonlora = getattr(config, 'freeze_nonlora', True)  # Default: freeze non-LORA
+        # ========================================================================
+        # MODE-BASED CONFIGURATION (replaces scattered boolean flags)
+        # ========================================================================
+        training_modes = _get_training_modes()
+        mode = getattr(config, 'mode', 'LORA_V1.5')
 
+        # Warn if deprecated flags are used
+        deprecated_flags = ['use_lora', 'freeze_nonlora', 'lora_v2', 'freeze_ssm']
+        used_deprecated = [f for f in deprecated_flags if getattr(config, f, None) is not None]
+        if used_deprecated:
+            print(f"[NOISER] WARNING: Deprecated flags ignored: {used_deprecated}")
+            print(f"[NOISER]          Use --mode instead. Current mode: {mode}")
+
+        # Get mode configuration
+        mode_config = training_modes['get_mode_config'](mode)
+
+        # Print mode configuration table
+        training_modes['print_mode_config'](mode)
+
+        # Apply es_map classification based on mode
+        classifier = training_modes['get_param_classifier'](mode)
+        self.lobs5_init.es_map = training_modes['apply_es_map_classification'](
+            self.lobs5_init.es_map,
+            self.lobs5_init.params,
+            classifier
+        )
+
+        # Get freeze_nonlora from mode config
+        freeze_nonlora = mode_config.freeze_nonlora
+
+        # Initialize noiser
         self.frozen_noiser_params, self.noiser_params = NOISER.init_noiser(
             self.lobs5_init.params,
             sigma=config.sigma,
@@ -802,36 +1096,17 @@ class ESTrainer:
             solver=None,  # Uses default optax.sgd
         )
 
-        # Log training mode
-        if freeze_nonlora:
-            print(f"[NOISER] LORA-only training: freeze_nonlora=True, rank={config.lora_rank}")
-            print(f"[NOISER] Only LORA parameters will be updated (embeddings & base model frozen)")
+        # Log training mode summary
+        is_lora = training_modes['is_lora_mode'](mode)
+        if not is_lora:
+            print(f"[NOISER] Full fine-tuning mode: {mode}")
+            print(f"[NOISER] All valid parameters will be updated directly")
         else:
-            print(f"[NOISER] Full fine-tuning: freeze_nonlora=False, rank={config.lora_rank}")
-            print(f"[NOISER] WARNING: ALL parameters will be updated (including embeddings)")
+            print(f"[NOISER] LoRA training mode: {mode}, rank={config.lora_rank}")
+            print(f"[NOISER] freeze_nonlora={freeze_nonlora}")
 
-        # Calculate actual trainable parameters based on es_map
-        # ES types: 0=PARAM (full), 1=MM_PARAM (LORA), 2=EMB_PARAM (frozen), 3=EXCLUDED (frozen)
-        total_params = 0
-        trainable_params = 0
-
-        def count_params(param, es_type):
-            nonlocal total_params, trainable_params
-            size = param.size
-            total_params += size
-            # MM_PARAM (1) = LORA update, PARAM (0) = full update (if not frozen)
-            if es_type == 1:  # MM_PARAM - always LORA updated
-                trainable_params += size
-            elif es_type == 0 and not freeze_nonlora:  # PARAM - only if not frozen
-                trainable_params += size
-
-        jax.tree.map(count_params, self.lobs5_init.params, self.lobs5_init.es_map)
-
-        frozen_params = total_params - trainable_params
-        print(f"[NOISER] Parameter breakdown:")
-        print(f"[NOISER]   Total: {total_params:,}")
-        print(f"[NOISER]   Trainable: {trainable_params:,} ({100*trainable_params/total_params:.2f}%)")
-        print(f"[NOISER]   Frozen: {frozen_params:,} ({100*frozen_params/total_params:.2f}%)")
+        # Detailed Parameter Logging
+        self._log_detailed_param_stats(self.lobs5_init.params, self.lobs5_init.es_map, config, freeze_nonlora)
 
     def _init_jaxlob(self):
         """Initialize JaxLOB order book simulator.
@@ -845,7 +1120,7 @@ class ESTrainer:
         from dataclasses import replace
 
         # Calculate required capacity
-        n_warmup = getattr(self.config, 'n_warmup_msgs', 500)
+        n_warmup = getattr(self.config, 'n_warmup_msgs', 10)
         expected_orders = n_warmup + self.config.n_steps * (self.config.background_msgs_per_step + 1)
         n_orders = max(1000, int(expected_orders * 1.5))
         n_trades = max(500, self.config.n_steps * 2)
@@ -890,7 +1165,7 @@ class ESTrainer:
 
         # Use inference.get_dataset() - SAME code path as run_inference.py
         # This ensures consistent token_mode handling
-        n_warmup = getattr(self.config, 'n_warmup_msgs', 500)
+        n_warmup = getattr(self.config, 'n_warmup_msgs', 10)
         n_sim = getattr(self.config, 'n_sim_steps', 1000)
 
         self.replay_dataset = inference.get_dataset(
@@ -935,6 +1210,28 @@ class ESTrainer:
         encoded = encode_msgs(msg_raw, self.encoder, token_mode=self.config.token_mode)
         self.replay_tokens = jnp.array(encoded)  # (n_msgs, token_mode)
 
+        # H4: Store Ground Truth Book Data for plotting
+        # book_data shape: (n_msgs, 43? or 21?)
+        # Use simple jnp array for now
+        self.replay_book_data = jnp.array(book_data)
+
+        # H4: Verify data structure assumptions (User Request)
+        # Check that Ask Price (Idx 3) > Bid Price (Idx 5) for a sample
+        # to ensure we are using the correct columns.
+        sample_indices = np.random.randint(0, len(book_data), size=100)
+        sample_ask = np.array(book_data[sample_indices, 3])
+        sample_bid = np.array(book_data[sample_indices, 5])
+        
+        # Check average spread is positive
+        avg_spread = np.mean(sample_ask - sample_bid)
+        if avg_spread <= 0:
+            print(f"[WARN] Replay Data Validation Warning: Average spread is {avg_spread} (<=0).")
+            print(f"       Ask P1 (Idx 3): {np.mean(sample_ask)}, Bid P1 (Idx 5): {np.mean(sample_bid)}")
+            print("       Double check column indices in replay_book_data!")
+        else:
+            print(f"[INIT-REPLAY] Data structure verified: Avg Spread = {avg_spread:.2f} (Ask > Bid confirmed)")
+
+
         # Extract date from dataset files for logging
         from glob import glob
         msg_files = sorted(glob(os.path.join(data_path, '*message*.npy')))
@@ -948,6 +1245,7 @@ class ESTrainer:
 
         print(f"[INIT-REPLAY] File {file_idx}: date={self.replay_data_date}")
         print(f"[INIT-REPLAY] Raw msgs shape: {msg_raw.shape}, Tokens shape: {msg_tokens.shape}")
+        print(f"[INIT-REPLAY] Replay Book Data shape: {self.replay_book_data.shape}")
         print(f"[INIT-REPLAY] Init book L2 shape: {book_l2_init.shape}")
 
     def _shard_to_mesh(self, x):
@@ -986,7 +1284,7 @@ class ESTrainer:
         print(f"[INIT-STATE] Initialized JaxLOB with L2 book shape: {self.init_book_l2.shape}")
 
         # 2. Warmup: replay messages to initialize order book state
-        n_warmup = getattr(config, 'n_warmup_msgs', 500)
+        n_warmup = getattr(config, 'n_warmup_msgs', 10)
         n_replay = min(n_warmup, len(self.replay_data_raw))
 
         if n_replay > 0:
@@ -1017,6 +1315,7 @@ class ESTrainer:
             noiser_params=self.noiser_params,
             params=self.lobs5_init.params,
             es_tree_key=self.es_tree_key,
+            es_map=self.lobs5_init.es_map,
             frozen_params=self.lobs5_init.frozen_params,
             iterinfo=None,  # No noise for World Model
         )
@@ -1031,6 +1330,7 @@ class ESTrainer:
             noiser_params=self.noiser_params,
             params=self.lobs5_init.params,
             es_tree_key=self.es_tree_key,
+            es_map=self.lobs5_init.es_map,
             frozen_params=self.lobs5_init.frozen_params,
             iterinfo=iterinfo,
         )
@@ -1066,6 +1366,7 @@ class ESTrainer:
         noiser_cls = self.noiser_cls
         frozen_noiser_params = self.frozen_noiser_params
         es_tree_key = self.es_tree_key
+        es_map = self.lobs5_init.es_map
         frozen_params = self.lobs5_init.frozen_params
         CommonParams = _get_common_params()
 
@@ -1093,6 +1394,7 @@ class ESTrainer:
                 noiser_params=noiser_params,
                 params=params,
                 es_tree_key=es_tree_key,
+                es_map=es_map,
                 frozen_params=frozen_params,
                 iterinfo=None,  # World Model has no ES noise
             )
@@ -1104,6 +1406,7 @@ class ESTrainer:
                 noiser_params=noiser_params,
                 params=params,
                 es_tree_key=es_tree_key,
+                es_map=es_map,
                 frozen_params=frozen_params,
                 iterinfo=iterinfo,
             )
@@ -1270,10 +1573,15 @@ class ESTrainer:
         # Reference: HyperscaleES/llm_experiments/utils.py - build_generate_thread pattern
         # ========================================================================
         process_order_array = self.sim.process_order_array
+        process_orders_array = self.sim.process_orders_array
         sim_obj = self.sim
         encoder = self.encoder
         replay_tokens = self.replay_tokens
         replay_data_raw = self.replay_data_raw
+        if self.config.background_mode == 'historical_replay':
+            replay_book_data = self.replay_book_data
+        else:
+            replay_book_data = None
         n_replay_msgs = replay_tokens.shape[0] if replay_tokens is not None else 0
 
         # ========================================================================
@@ -1295,14 +1603,17 @@ class ESTrainer:
         # ========================================================================
         def maybe_pvary(x):
             """Apply pvary if inside shard_map context."""
-            if in_shard_map:
-                return jax.lax.pvary(x, ('data',))
+            # DISABLED: pvary causes OOM by forcing global state materialization
+            # when used with vmap. Standard vmap(scan) handles local batching correctly.
+            # if in_shard_map:
+            #     return jax.lax.pvary(x, ('data',))
             return x
 
         def maybe_pvary_tree(tree):
             """Apply pvary to all leaves of a pytree if inside shard_map."""
-            if in_shard_map:
-                return jax.tree.map(lambda x: jax.lax.pvary(x, ('data',)), tree)
+            # DISABLED: see maybe_pvary
+            # if in_shard_map:
+            #     return jax.tree.map(lambda x: jax.lax.pvary(x, ('data',)), tree)
             return tree
         # ========================================================================
 
@@ -1460,7 +1771,7 @@ class ESTrainer:
         def step_fn(carry, step_idx):
             """Single step: Background messages -> Policy action."""
             (key, msg_history, hiddens_world, hiddens_policy,
-             sim_state, book_feat, world_oid_offset, quant_executed) = carry
+             sim_state, book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_all_trades, accum_submitted) = carry
 
             key, key_world, key_policy = jax.random.split(key, 3)
 
@@ -1539,7 +1850,7 @@ class ESTrainer:
                 return (key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr), world_msg
 
             # Select background generation function
-            n_warmup_cfg = getattr(config, 'n_warmup_msgs', 500)
+            n_warmup_cfg = getattr(config, 'n_warmup_msgs', 10)
             if config.background_mode == 'historical_replay':
                 step_fn_background = historical_replay_step
                 replay_ptr_init = jnp.int32(n_warmup_cfg + step_idx * config.background_msgs_per_step)
@@ -1646,40 +1957,100 @@ class ESTrainer:
                 trader_id=POLICY_TRADER_ID, token_mode=config.token_mode
             )
 
-            # Cancel previous unfilled policy order
-            prev_policy_oid = POLICY_ORDER_ID_START + step_idx - 1
-            is_prev_order_in_asks = sim_state.asks[:, 2] == prev_policy_oid
-            sim_state = sim_state._replace(
-                asks=jnp.where(is_prev_order_in_asks[:, None], jnp.array([0, 0, -1, -1, 0, 0]), sim_state.asks)
-            )
-            is_prev_order_in_bids = sim_state.bids[:, 2] == prev_policy_oid
-            sim_state = sim_state._replace(
-                bids=jnp.where(is_prev_order_in_bids[:, None], jnp.array([0, 0, -1, -1, 0, 0]), sim_state.bids)
-            )
-
             # Truncate quantity to remaining task
             quant_remaining = task_size - quant_executed
             original_qty = sim_msg[2]
             truncated_qty = jnp.minimum(original_qty, jnp.maximum(quant_remaining, 0))
             sim_msg = sim_msg.at[2].set(truncated_qty)
 
-            # Process order
-            sim_state = process_order_array(sim_state, sim_msg)
+            # =================================================================
+            # SMART CANCELLATION LOGIC (Match Gymnax Exchange Standard)
+            # =================================================================
+            # 1. Generate Cancel Messages for this agent
+            is_sell_task = (config.task == 'sell')
+            bookside = sim_state.asks if is_sell_task else sim_state.bids
+            side_int = -1 if is_sell_task else 1
+            
+            # Use getCancelMsgs (size=5: max concurrent active orders to cancel)
+            # Note: gym_env uses world_state.time for cancel time. We use 0.
+            cancel_msgs = getCancelMsgs(
+                bookside, 
+                POLICY_TRADER_ID, 
+                5,          # size
+                side_int,   # side
+                0, 0        # time
+            )
+
+            # 2. Filter Messages (Remove redundant cancel+add pairs)
+            # Expand sim_msg to (1,8) for batch processing
+            action_msgs_in = sim_msg[None, :]
+            action_msgs, cancel_msgs = _filter_messages(action_msgs_in, cancel_msgs)
+            
+            # 3. Combine Action and Cancel Messages
+            # (N_cancel + 1) messages
+            combined_msgs = jnp.concatenate([cancel_msgs, action_msgs])
+
+            # =================================================================
+            # FIX: Clear trades buffer before processing to prevent
+            # quadratic accumulation of trades across steps.
+            # =================================================================
+            sim_state = sim_state._replace(trades=jnp.ones_like(sim_state.trades) * -1)
+
+            # Process orders (Batch)
+            sim_state = process_orders_array(sim_state, combined_msgs)
 
             # Track execution
             trades = sim_state.trades
             is_new_trade = (trades[:, 0] != -1)
-            is_policy_in_trade = ((trades[:, 2] == policy_order_id) | (trades[:, 3] == policy_order_id)) & is_new_trade
+            # FIX: Use POLICY_TRADER_ID check instead of Order ID.
+            # This is CRITICAL for Smart Cancellation: if an old order (with old Order ID)
+            # is preserved and fills, we must count it!
+            # Col 6 = Passive Trader ID, Col 7 = Aggressive Trader ID
+            is_policy_in_trade = ((trades[:, 6] == POLICY_TRADER_ID) | (trades[:, 7] == POLICY_TRADER_ID)) & is_new_trade
             step_executed = jnp.sum(jnp.where(is_policy_in_trade, jnp.abs(trades[:, 1]), 0))
             quant_executed = quant_executed + step_executed
+
+            # Track revenue (accumulate Price * Qty)
+            step_revenue = jnp.sum(jnp.where(is_policy_in_trade,
+                                            trades[:, 0] * jnp.abs(trades[:, 1]),
+                                            0)).astype(jnp.float32)
+            accum_revenue = accum_revenue + step_revenue
+
+            # Compute VWAP for this step (for trade visualization)
+            # step_executed already computed above = sum(qty) where policy is involved
+            # step_revenue = sum(price * qty) for policy trades
+            step_vwap = jnp.where(
+                step_executed > 0,
+                step_revenue / step_executed.astype(jnp.float32),
+                0.0
+            )
 
             # Update state
             book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
 
+            # Get best bid/ask for plotting
+            best_ask, best_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
+
+            # Track trades (count)
+            # Track trades (count)
+            step_trades = jnp.sum(is_policy_in_trade)
+            accum_trades = accum_trades + step_trades
+
+            # Track ALL trades (for total_trades metric - includes world model trades)
+            step_all_trades = jnp.sum(is_new_trade)
+            accum_all_trades = accum_all_trades + step_all_trades
+
+            # Track submitted quantity (for execution probability calc)
+            # sim_msg[2] is the truncated quantity (can actually be processed by book)
+            step_submitted = sim_msg[2]
+            accum_submitted = accum_submitted + step_submitted
+
             # Return policy_msg for order analysis (shape: (msg_len,))
+            # Also return trade info for visualization: VWAP, qty, and bid/ask at trade time
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
-                    book_feat, world_oid_offset, quant_executed), policy_msg
+                    book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_all_trades, accum_submitted), \
+                   (policy_msg, best_bid, best_ask, step_vwap, step_executed.astype(jnp.float32))
 
         # Run episode
         # H2: Apply pvary to initial carry values when inside shard_map
@@ -1691,11 +2062,17 @@ class ESTrainer:
             maybe_pvary_tree(hiddens_policy),
             maybe_pvary_tree(sim_state),
             maybe_pvary(book_feat),
-            maybe_pvary(jnp.int32(0)),
-            maybe_pvary(jnp.int32(0)),
+            maybe_pvary(jnp.int32(0)), # world_oid_offset
+            maybe_pvary(jnp.int32(0)), # quant_executed
+            maybe_pvary(jnp.float32(0)), # accum_revenue
+            maybe_pvary(jnp.int32(0)), # accum_trades (policy/agent trades only)
+            maybe_pvary(jnp.int32(0)), # accum_all_trades (all trades including world model)
+            maybe_pvary(jnp.int32(0)), # accum_submitted
         )
         # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
-        (_, _, _, _, final_state, _, _, final_quant_executed), policy_msgs_all = jax.lax.scan(
+        # Also capture trade traces: vwap, qty, bid, ask at each step for visualization
+        (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue, final_trades, final_all_trades, final_submitted), \
+            (policy_msgs_all, bid_trace, ask_trace, trade_vwap_trace, trade_qty_trace) = jax.lax.scan(
             step_fn,
             main_scan_init,
             jnp.arange(config.n_steps),
@@ -1759,68 +2136,138 @@ class ESTrainer:
             (final_state, quant_remaining)
         )
 
-        # Compute fitness (PnL)
+        # FIX: Combine Loop Metrics (final_quant_executed, final_revenue)
+        # with Liquidation Metrics (from final_state.trades).
+        # =================================================================
+        # Filter Liquidation Trades from final_state (which contains last step + liquidation)
+        liquidation_oid = POLICY_ORDER_ID_START + config.n_steps
         trades = final_state.trades
-        valid_trades_mask = trades[:, 0] != -1
-
-        passive_ids = trades[:, 2]
-        aggr_ids = trades[:, 3]
-        is_policy_passive = (passive_ids >= POLICY_ORDER_ID_START) & (passive_ids < WORLD_ORDER_ID_START) & valid_trades_mask
-        is_policy_aggr = (aggr_ids >= POLICY_ORDER_ID_START) & (aggr_ids < WORLD_ORDER_ID_START) & valid_trades_mask
-        is_policy_trade = is_policy_passive | is_policy_aggr
-
+        valid_trades = trades[:, 0] != -1
+        is_liquidation = ((trades[:, 2] == liquidation_oid) | (trades[:, 3] == liquidation_oid)) & valid_trades
+        
+        liquidation_quantity_filled = jnp.sum(jnp.where(is_liquidation, jnp.abs(trades[:, 1]), 0))
+        liquidation_revenue = jnp.sum(jnp.where(is_liquidation, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
+        
+        # Total metrics
+        agent_quantity = final_quant_executed + liquidation_quantity_filled
+        
         is_sell_task = (config.task == 'sell')
         if is_sell_task:
-            sell_revenue = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
-            sell_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
-            pnl_raw = sell_revenue - init_mid_price * sell_quantity
-            agent_quantity = sell_quantity
+            total_revenue = final_revenue + liquidation_revenue
+            pnl_raw = total_revenue - init_mid_price * agent_quantity
         else:
-            buy_cost = jnp.sum(jnp.where(is_policy_trade, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
-            buy_quantity = jnp.sum(jnp.where(is_policy_trade, jnp.abs(trades[:, 1]), 0))
-            pnl_raw = init_mid_price * buy_quantity - buy_cost
-            agent_quantity = buy_quantity
+            total_cost = final_revenue + liquidation_revenue # Revenu accum is always P*Q
+            pnl_raw = init_mid_price * agent_quantity - total_cost
 
-        # Normalize PnL to -1 to 1 range using tanh
-        # pnl_normalized = "number of ticks improvement for full task execution"
-        # e.g., if you execute all task_size shares 1 tick better than mid, pnl_normalized = 1.0
-        normalization_scale = config.task_size * config.tick_size
-        pnl_normalized = pnl_raw / jnp.maximum(normalization_scale, 1.0)
-        pnl = jnp.tanh(pnl_normalized)  # squash to -1 to 1, 0 = executed at mid price
+        # PnL = raw profit/loss in cents (has real economic meaning)
+        pnl = pnl_raw
 
-        total_trades = jnp.sum(valid_trades_mask)
-        agent_trades = jnp.sum(is_policy_trade)
+        # NOTE: Normalization step removed - fitness is now computed as rank_transform(pnl) in train_epoch
+        # Old approach: fitness_raw = pnl / (task_size * tick_size) then rank_transform(fitness_raw)
+        # New approach: fitness = rank_transform(pnl) directly (simpler, cleaner semantics)
+        # normalization_scale = config.task_size * config.tick_size
+        # fitness_raw = pnl / jnp.maximum(normalization_scale, 1.0)
+
+        # buffer_trades: diagnostic metric - trades in final step buffer only (renamed from old total_trades)
+        buffer_trades = jnp.sum(valid_trades)
+
+        # agent_trades = trades from model steps + trades from liquidation step
+        liquidation_trades = jnp.sum(is_liquidation)
+        agent_trades = final_trades + liquidation_trades
+
+        # total_trades: ALL trades throughout the episode (world model + agent + liquidation)
+        # FIX: Use accumulated all trades + liquidation trades from final buffer
+        liquidation_all_trades = jnp.sum(valid_trades)  # All trades in liquidation step buffer
+        total_trades = final_all_trades + liquidation_all_trades
 
         # Calculate execution breakdown
-        # model_quantity: executed by model orders during regular steps
-        # liquidation_quantity: executed by force_market_order at end
-        # unfilled_quantity: not executed due to insufficient book depth
-        # NOTE: With force_market_order, agent_quantity MAY BE < task_size!
+        # model_quantity: executed by model orders during regular steps (Normal Orders)
+        # liquidation_quantity: executed by force_market_order at end (Market Orders)
+        # doom_quantity: not executed due to insufficient book depth (Doom Orders)
+        # NOTE: agent_quantity should never exceed task_size due to truncation
         liquidation_quantity = agent_quantity - model_quantity
-        unfilled_quantity = task_size - agent_quantity
+        # Clamp doom_quantity to >= 0 (should not be negative if tracking is correct)
+        doom_quantity = jnp.maximum(0, task_size - agent_quantity)
 
-        # Final fitness = PnL (only counts what was actually filled)
-        # Unfilled quantity has no revenue and no cost, so PnL is naturally
-        # lower when fill is incomplete (agent receives less for sell task)
-        fitness = jnp.where(jnp.isfinite(pnl), pnl, 0.0)
+        # Sanitize pnl: replace non-finite values with 0.0
+        # (fitness = rank_transform(pnl) is computed in train_epoch)
+        pnl = jnp.where(jnp.isfinite(pnl), pnl, 0.0)
 
         info = {
-            'fitness': fitness,
-            'pnl': pnl,                        # normalized to -1 to 1 (tanh)
-            'pnl_raw': pnl_raw,                # raw value in cents
-            'pnl_normalized': pnl_normalized,  # before tanh (in "ticks")
+            'pnl': pnl,                        # raw PnL in cents (fitness computed via rank_transform in train_epoch)
             # Execution breakdown
             'agent_quantity': agent_quantity,          # total executed = model + liquidation (may be < task_size!)
-            'model_quantity': model_quantity,          # executed by model orders
-            'liquidation_quantity': liquidation_quantity,  # executed by force_market_order
-            'unfilled_quantity': unfilled_quantity,    # NOT executed (book depth insufficient)
+            'model_quantity': model_quantity,          # executed by model orders (Normal)
+            'liquidation_quantity': liquidation_quantity,  # executed by force_market_order (Market)
+            'doom_quantity': doom_quantity,    # NOT executed (Doom)
+            'submitted_quantity': final_submitted, # Total quantity submitted by model (post-truncation)
             'agent_trades': agent_trades,
-            'total_trades': total_trades,
+            'total_trades': total_trades,      # All trades (world + agent + liquidation)
+            'buffer_trades': buffer_trades,    # Diagnostic: trades in final step buffer only
+            'init_mid_price': init_mid_price,
             'init_mid_price': init_mid_price,
             'policy_msgs': policy_msgs_all,    # shape: (n_steps, msg_len) for order analysis
+            'bid_trace': bid_trace,
+            'ask_trace': ask_trace,
+            # Trade visualization traces (shape: (n_steps,))
+            'trade_vwap_trace': trade_vwap_trace,   # VWAP of agent trades per step
+            'trade_qty_trace': trade_qty_trace,     # Quantity executed per step
         }
 
-        return fitness, info
+        # H4: Add Ground Truth Trace for "Whole Data Window" Plot
+        # We assume standard LOBSTER format: Ask P1 (0), Ask S1 (1), Bid P1 (2), Bid S1 (3)
+        # We need to slice replay_book_data for the duration of this episode
+        # Duration = n_warmup + n_steps * bg_msgs
+        if replay_book_data is not None:
+             n_warmup = getattr(config, 'n_warmup_msgs', 10)
+             n_bg = getattr(config, 'background_msgs_per_step', 10)
+             total_msgs = n_warmup + config.n_steps * n_bg
+
+             # Extract GT trace (Best Ask, Best Bid)
+             # Extract GT trace (Best Ask, Best Bid)
+             # replay_book_data has header cols 0,1,2.
+             # LOBSTER data starts at col 3.
+             # Ask Price 1 is at index 3, Bid Price 1 is at index 5
+             gt_trace_full = replay_book_data[:total_msgs, [3, 5]]
+             info['gt_bid_trace'] = gt_trace_full[:, 1] # Bid P1 (was ind 5)
+             info['gt_ask_trace'] = gt_trace_full[:, 0] # Ask P1 (was ind 3)
+
+             # ================================================================
+             # H5: Extract Historical Trades from replay_data_raw
+             # LOBSTER message format: [event_type, side, quantity, price, ...]
+             # event_type = 4 means EXECUTION (historical trade)
+             # ================================================================
+             if replay_data_raw is not None:
+                 # Get messages for this episode window
+                 msg_window = replay_data_raw[:total_msgs]
+
+                 # Extract event_type (col 0), side (col 1), qty (col 2), price (col 3)
+                 event_types = msg_window[:, 0]
+                 sides = msg_window[:, 1]      # 1 = buy, -1 = sell
+                 quantities = msg_window[:, 2]
+                 prices = msg_window[:, 3]
+
+                 # Create mask for executions (event_type = 4)
+                 is_execution = (event_types == 4)
+
+                 # Store historical trade data (sparse representation)
+                 # Shape: (total_msgs,) - non-zero where trade occurred
+                 info['gt_trade_price'] = jnp.where(is_execution, prices, 0)
+                 info['gt_trade_qty'] = jnp.where(is_execution, quantities, 0)
+                 info['gt_trade_side'] = jnp.where(is_execution, sides, 0)
+             else:
+                 info['gt_trade_price'] = jnp.zeros((1,), dtype=jnp.int32)
+                 info['gt_trade_qty'] = jnp.zeros((1,), dtype=jnp.int32)
+                 info['gt_trade_side'] = jnp.zeros((1,), dtype=jnp.int32)
+        else:
+             # Placeholder for World Model mode
+             info['gt_bid_trace'] = jnp.zeros((1,), dtype=jnp.int32)
+             info['gt_ask_trace'] = jnp.zeros((1,), dtype=jnp.int32)
+             info['gt_trade_price'] = jnp.zeros((1,), dtype=jnp.int32)
+             info['gt_trade_qty'] = jnp.zeros((1,), dtype=jnp.int32)
+             info['gt_trade_side'] = jnp.zeros((1,), dtype=jnp.int32)
+
+        return pnl, info  # Return raw pnl; fitness = rank_transform(pnl) computed in train_epoch
 
     def eval_single_thread(
         self,
@@ -1935,7 +2382,7 @@ class ESTrainer:
             noiser_params_rep = self.noiser_params
             params_rep = self.lobs5_init.params
 
-        fitnesses, infos = self._compiled_eval_batch(
+        pnls, infos = self._compiled_eval_batch(
             noiser_params_rep,
             params_rep,
             keys,
@@ -1946,16 +2393,16 @@ class ESTrainer:
         )
 
         # ========================================================================
-        # Multi-node: Gather fitnesses and infos from all processes
+        # Multi-node: Gather pnls and infos from all processes
         # In distributed mode, each process only has its local shard of results.
         # process_allgather collects all shards to form the complete arrays.
         #
-        # After gathering, we have ALL n_perturbations fitness values.
+        # After gathering, we have ALL n_perturbations pnl values.
         # The iterinfos must use GLOBAL thread_ids [0..n_perturbations-1]
         # for correct gradient computation across all perturbations.
         # ========================================================================
         if self._is_distributed and n_processes > 1:
-            fitnesses = process_allgather(fitnesses, tiled=True)
+            pnls = process_allgather(pnls, tiled=True)
             infos = jax.tree.map(
                 lambda x: process_allgather(x, tiled=True),
                 infos
@@ -1973,9 +2420,15 @@ class ESTrainer:
 
         # ========================================================================
         # H2: Use replicated params for gradient updates in multi-GPU mode
-        # The fitnesses returned from shard_map are sharded, so params must
+        # The pnls returned from shard_map are sharded, so params must
         # also be replicated to avoid device mismatch in do_updates
         # ========================================================================
+
+        # fitness = rank_transform(pnl) - always apply rank transform
+        # This maps raw PnL values to ranks normalized to [-0.5, 0.5]
+        # Helps escape local optima like "no trading" by focusing on relative ordering
+        fitnesses = rank_transform(pnls)
+
         normalized_fitnesses = self.noiser_cls.convert_fitnesses(
             self.frozen_noiser_params, noiser_params_rep, fitnesses
         )
@@ -1990,24 +2443,70 @@ class ESTrainer:
             self.lobs5_init.es_map,
         )
 
-        # Extract updated params back to single device for storage
+        # Extract updated params back to single LOCAL device for storage
+        # CRITICAL: Must use jax.local_devices()[0] in multi-node to avoid cross-host issues
         if n_devices > 1 and hasattr(self, '_mesh'):
-            # Get first shard from replicated params
+            # In multi-node mode: place on LOCAL device 0, not global device 0
+            local_device = jax.local_devices()[0]
             self.noiser_params = jax.tree.map(
-                lambda x: jax.device_put(x, jax.devices()[0]),
+                lambda x: jax.device_put(x, local_device),
                 noiser_params_updated
             )
             self.lobs5_init.params = jax.tree.map(
-                lambda x: jax.device_put(x, jax.devices()[0]),
+                lambda x: jax.device_put(x, local_device),
                 updated_params
             )
         else:
             self.noiser_params = noiser_params_updated
             self.lobs5_init.params = updated_params
 
-        aggregated_info = {k: jnp.mean(v) for k, v in infos.items()}
+        # =========================================================================
+        # Select example perturbation for visualization
+        # Use best pnl perturbation instead of first (more likely to have trades)
+        # =========================================================================
+        best_idx = jnp.argmax(pnls)
 
-        return jnp.mean(fitnesses), fitnesses, aggregated_info
+        # Extract one example trace for plotting (from best perturbation)
+        # We must pull this out BEFORE averaging, as averaging traces is meaningless/expensive
+        # Note: infos['bid_trace'] shape is (n_perturbations, n_steps)
+        example_bid_trace = infos['bid_trace'][best_idx]
+        example_ask_trace = infos['ask_trace'][best_idx]
+
+        # Ground Truth Traces (High Res) - same across perturbations, use [0]
+        example_gt_bid_trace = infos['gt_bid_trace'][0]
+        example_gt_ask_trace = infos['gt_ask_trace'][0]
+
+        # Trade traces for visualization (from best perturbation)
+        example_trade_vwap_trace = infos['trade_vwap_trace'][best_idx]
+        example_trade_qty_trace = infos['trade_qty_trace'][best_idx]
+
+        # Historical trade traces (same across perturbations, use [0])
+        example_gt_trade_price = infos['gt_trade_price'][0]
+        example_gt_trade_qty = infos['gt_trade_qty'][0]
+        example_gt_trade_side = infos['gt_trade_side'][0]
+
+        # Filter out heavy/non-scalar items before averaging
+        infos_for_mean = {
+            k: v for k, v in infos.items()
+            if k not in ['bid_trace', 'ask_trace', 'policy_msgs', 'gt_bid_trace', 'gt_ask_trace',
+                         'trade_vwap_trace', 'trade_qty_trace',
+                         'gt_trade_price', 'gt_trade_qty', 'gt_trade_side']
+        }
+        aggregated_info = {k: jnp.mean(v) for k, v in infos_for_mean.items()}
+
+        # Add example traces back to aggregated info
+        aggregated_info['example_bid_trace'] = example_bid_trace
+        aggregated_info['example_ask_trace'] = example_ask_trace
+        aggregated_info['example_gt_bid_trace'] = example_gt_bid_trace
+        aggregated_info['example_gt_ask_trace'] = example_gt_ask_trace
+        aggregated_info['example_trade_vwap_trace'] = example_trade_vwap_trace
+        aggregated_info['example_trade_qty_trace'] = example_trade_qty_trace
+        # Historical trade traces
+        aggregated_info['example_gt_trade_price'] = example_gt_trade_price
+        aggregated_info['example_gt_trade_qty'] = example_gt_trade_qty
+        aggregated_info['example_gt_trade_side'] = example_gt_trade_side
+
+        return jnp.mean(pnls), pnls, aggregated_info
 
     def train(self, n_epochs: Optional[int] = None, resume_from: Optional[str] = None):
         """Run full training loop with automatic checkpointing.
@@ -2026,10 +2525,36 @@ class ESTrainer:
         checkpoint_dir = getattr(self.config, 'checkpoint_dir', './es_checkpoints')
         checkpoint_every = getattr(self.config, 'checkpoint_every', 50)
         os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        # Log Doom Logic Parameters
+        print("="*60)
+        print("[CONFIG] Hybrid Liquidation Logic Enabled")
+        print("[CONFIG] 1. Attempt Market Order (Limit 0/Inf) to sweep book")
+        print("[CONFIG] 2. Unfilled Quantity Penalty (Doom Price):")
+        if self.config.task == 'sell':
+            print("[CONFIG]    CELL: 0.75 * Final Best Bid (25% Haircut)")
+        else:
+            print("[CONFIG]    BUY:  1.25 * Final Best Ask (25% Premium)")
+        print("="*60)
+
+        # Log Metric Definitions
+        print("="*60)
+        print("[CONFIG] Metric Definitions:")
+        print(" [Normal Orders] : model_quantity       (Executed by model orders during regular steps)")
+        print("                 : submitted_quantity   (Total Quantity Submitted by Model)")
+        print("                 : execution_prob       (Executed / Submitted)")
+        print(" [Market Orders] : liquidation_quantity (Executed by force_market_order at end)")
+        print(" [Doom Orders]   : doom_quantity        (Unfilled quantity, subject to penalty)")
+        print(" [Fill Rates]    : quantity / task_size")
+        print(" [Agent Trades]  : agent_trades         (Count of agent trade executions/fills)")
+        print(" [Total Trades]  : total_trades         (All trades in episode: world + agent + liquidation)")
+        print(" [Buffer Trades] : buffer_trades        (Diagnostic: trades in final step buffer only)")
+        print(" [Agent Qty]     : agent_quantity       (Total filled quantity = Normal + Market. Range: [0, task_size])")
+        print("="*60)
 
         # Resume from checkpoint if specified
         start_epoch = 0
-        best_fitness = -float('inf')
+        best_pnl = -float('inf')
         if resume_from:
             try:
                 self.load_checkpoint(resume_from)
@@ -2040,12 +2565,13 @@ class ESTrainer:
                     with open(state_path, 'rb') as f:
                         state = pickle.load(f)
                     start_epoch = state.get('epoch', 0) + 1
-                    best_fitness = state.get('best_fitness', -float('inf'))
+                    # Support both old 'best_fitness' and new 'best_pnl' keys for backward compatibility
+                    best_pnl = state.get('best_pnl', state.get('best_fitness', -float('inf')))
                     key = jax.random.PRNGKey(self.config.seed)
                     # Fast-forward the key
                     for _ in range(start_epoch):
                         key, _ = jax.random.split(key)
-                print(f"[TRAIN] Resumed from epoch {start_epoch}, best_fitness={best_fitness:.4f}")
+                print(f"[TRAIN] Resumed from epoch {start_epoch}, best_pnl={best_pnl:.4f}")
             except Exception as e:
                 print(f"[TRAIN] Warning: Could not resume from {resume_from}: {e}")
                 print("[TRAIN] Starting fresh training")
@@ -2067,12 +2593,15 @@ class ESTrainer:
                         'n_steps': self.config.n_steps,
                         'noiser': self.config.noiser,
                         'sigma': self.config.sigma,
+                        'sigma_decay': getattr(self.config, 'sigma_decay', 1.0),
+                        'sigma_min': getattr(self.config, 'sigma_min', 0.01),
                         'lr': self.config.lr,
                         'lora_rank': self.config.lora_rank,
                         'checkpoint': self.config.lobs5_checkpoint,
                         'background_mode': self.config.background_mode,
                         'n_processes': n_procs,
                         'n_devices_total': len(jax.devices()),
+                        'rank_transform': getattr(self.config, 'rank_transform', False),
                     },
                     resume='allow' if resume_from else None,
                 )
@@ -2082,85 +2611,349 @@ class ESTrainer:
         initial_sim_state, initial_msg_history = self._create_initial_sim_state()
 
         # Training loop
+        # Sigma decay setup
+        sigma_init = self.config.sigma
+        sigma_decay = getattr(self.config, 'sigma_decay', 1.0)
+        sigma_min = getattr(self.config, 'sigma_min', 0.01)
+
         for epoch in tqdm(range(start_epoch, n_epochs), desc='ES Training', initial=start_epoch, total=n_epochs):
             key, epoch_key = jax.random.split(key)
 
-            mean_fitness, fitnesses, epoch_info = self.train_epoch(
+            # Apply sigma decay: σ_n = max(σ_0 × decay^n, σ_min)
+            if sigma_decay < 1.0:
+                current_sigma = max(sigma_init * (sigma_decay ** epoch), sigma_min)
+                self.noiser_params["sigma"] = current_sigma
+            else:
+                current_sigma = sigma_init
+
+            mean_pnl, pnls, epoch_info = self.train_epoch(
                 epoch_key, epoch, initial_sim_state, initial_msg_history
             )
 
-            # Track best model
-            is_best = mean_fitness > best_fitness
+            # Track best model (by raw PnL, not rank-transformed fitness)
+            is_best = mean_pnl > best_pnl
             if is_best:
-                best_fitness = mean_fitness
+                best_pnl = mean_pnl
                 # Save best model (only on rank 0 in distributed mode)
                 if self._process_index == 0:
                     best_path = os.path.join(checkpoint_dir, 'best')
                     self.save_checkpoint(best_path)
-                    self._save_training_state(best_path, epoch, best_fitness)
-                    print(f"[TRAIN] New best model saved: fitness={best_fitness:.4f}")
+                    self._save_training_state(best_path, epoch, best_pnl)
+                    print(f"[TRAIN] New best model saved: pnl={best_pnl:.4f}")
 
             # Periodic checkpointing (only on rank 0 in distributed mode)
             if (epoch + 1) % checkpoint_every == 0 and self._process_index == 0:
                 ckpt_path = os.path.join(checkpoint_dir, f'epoch_{epoch}')
                 self.save_checkpoint(ckpt_path)
-                self._save_training_state(ckpt_path, epoch, best_fitness)
+                self._save_training_state(ckpt_path, epoch, best_pnl)
                 # Also save as 'latest' for easy resumption
                 latest_path = os.path.join(checkpoint_dir, 'latest')
                 self.save_checkpoint(latest_path)
-                self._save_training_state(latest_path, epoch, best_fitness)
+                self._save_training_state(latest_path, epoch, best_pnl)
 
             # Log to W&B
             if wandb_run:
+                # PnL statistics (raw profit/loss in cents)
+                pnl_std = float(jnp.std(pnls))
+                pnl_max = float(jnp.max(pnls))
+                pnl_min = float(jnp.min(pnls))
+
+                # Fitness = rank_transform(pnl) - always compute for ES
+                # Range: [-0.5, 0.5] based on relative ranking
+                fitnesses = rank_transform(pnls)
+                fitness_mean = float(jnp.mean(fitnesses))
                 fitness_std = float(jnp.std(fitnesses))
-                fitness_max = float(jnp.max(fitnesses))
-                fitness_min = float(jnp.min(fitnesses))
 
                 # Calculate execution rates
                 task_size = self.config.task_size if self.config.task_size > 0 else 1.0
                 agent_qty = float(epoch_info['agent_quantity'])
                 model_qty = float(epoch_info.get('model_quantity', 0))
                 liquidation_qty = float(epoch_info.get('liquidation_quantity', 0))
-                unfilled_qty = float(epoch_info.get('unfilled_quantity', 0))
+                doom_qty = float(epoch_info.get('doom_quantity', 0))
+                submitted_qty = float(epoch_info.get('submitted_quantity', 0))
 
                 fill_rate = agent_qty / task_size                    # Total fill rate (may be < 1.0!)
                 model_fill_rate = model_qty / task_size              # Model orders fill rate
                 liquidation_fill_rate = liquidation_qty / task_size  # Force market order fill rate
-                unfill_rate = unfilled_qty / task_size               # Unfilled rate (book depth insufficient)
+                unfill_rate = doom_qty / task_size               # Unfilled rate (book depth insufficient)
+                
+                # Execution Probability (Filled / Submitted)
+                # Avoid division by zero
+                exec_prob = model_qty / (submitted_qty + 1e-9)
 
-                wandb_run.log({
+                # Generate Best Bid/Ask Price Plot (Market Data Only)
+                if 'example_gt_bid_trace' in epoch_info and 'example_gt_ask_trace' in epoch_info:
+                    try:
+                        import matplotlib.pyplot as plt
+                        
+                        # Ground Truth (High Res)
+                        gt_bid = epoch_info['example_gt_bid_trace']
+                        gt_ask = epoch_info['example_gt_ask_trace']
+                        
+                        # Compute Mid Price
+                        # Check for valid prices (non-zero) to avoid weird mid prices
+                        valid_mask = (gt_bid > 0) & (gt_ask > 0)
+                        gt_mid = (gt_bid + gt_ask) / 2
+                        # Handle invalid (zero) values if necessary, but plotting usually handles nans/zeros ok visually 
+                        # or we can mask them. For now, plot direct values.
+                        
+                        # Get configuration for X-axis labeling
+                        n_warmup = getattr(self.config, 'n_warmup_msgs', 10)
+                        n_bg = getattr(self.config, 'background_msgs_per_step', 50)
+                        n_steps = self.config.n_steps
+
+                        # X-axis from -n_warmup (warmup phase is negative)
+                        gt_steps = list(range(-n_warmup, len(gt_bid) - n_warmup))
+
+                        # Create static plot
+                        fig, ax = plt.subplots(figsize=(12, 6))
+
+                        # Plot GT
+                        ax.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
+                        ax.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                        ax.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
+
+                        # Add vertical separator lines
+                        ax.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
+                        for i in range(1, n_steps + 1):
+                            ax.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+
+                        # Set custom X-axis ticks at warmup start, 0, and each step boundary
+                        ticks = [-n_warmup, 0]
+                        for i in range(1, n_steps + 1):
+                            ticks.append(i * n_bg)
+                        ax.set_xticks(ticks)
+
+                        ax.set_title(f"Market Trace (Data Window) - Epoch {epoch}")
+                        ax.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
+                        ax.set_ylabel("Price")
+                        ax.legend()
+                        ax.grid(True, alpha=0.3)
+                        
+                        # Log to WandB
+                        wandb_run.log({"market_data_trace": wandb.Image(fig)}, commit=False)
+                        plt.close(fig)
+
+                        # Second chart: Market Data with Trade Markers
+                        if 'example_trade_vwap_trace' in epoch_info:
+                            fig2, ax2 = plt.subplots(figsize=(12, 6))
+
+                            # Plot GT (same as first chart)
+                            ax2.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
+                            ax2.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                            ax2.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
+
+                            # Add vertical separator lines
+                            ax2.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
+                            for i in range(1, n_steps + 1):
+                                ax2.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+
+                            # Get trade traces
+                            trade_vwap = epoch_info['example_trade_vwap_trace']
+                            trade_qty = epoch_info['example_trade_qty_trace']
+
+                            # Get bid/ask traces for execution quality comparison
+                            bid_trace_data = epoch_info['example_bid_trace']
+                            ask_trace_data = epoch_info['example_ask_trace']
+
+                            # Add trade markers
+                            # Determine task type for color logic
+                            is_sell_task = getattr(self.config, 'task', 'sell') == 'sell'
+
+                            for step_idx in range(n_steps):
+                                qty = float(trade_qty[step_idx])
+                                if qty > 0:  # Trade occurred
+                                    # X position: at step boundary (end of step)
+                                    x_pos = (step_idx + 1) * n_bg
+                                    price = float(trade_vwap[step_idx])
+                                    bid = float(bid_trace_data[step_idx])
+                                    ask = float(ask_trace_data[step_idx])
+
+                                    # Determine execution quality color
+                                    if is_sell_task:
+                                        # Sell: higher is better (green=at ask, red=at bid)
+                                        if price >= ask:
+                                            color = 'limegreen'  # At Ask (best for sell)
+                                            marker = '^'         # Up triangle
+                                        elif price > bid:
+                                            color = 'gold'       # In spread
+                                            marker = 'o'         # Circle
+                                        else:
+                                            color = 'orangered'  # At/Below Bid (worst for sell)
+                                            marker = 'v'         # Down triangle
+                                    else:
+                                        # Buy: lower is better (green=at bid, red=at ask)
+                                        if price <= bid:
+                                            color = 'limegreen'  # At Bid (best for buy)
+                                            marker = 'v'         # Down triangle
+                                        elif price < ask:
+                                            color = 'gold'       # In spread
+                                            marker = 'o'         # Circle
+                                        else:
+                                            color = 'orangered'  # At/Above Ask (worst for buy)
+                                            marker = '^'         # Up triangle
+
+                                    # Marker size proportional to quantity
+                                    size = 50 + qty * 3
+                                    ax2.scatter(x_pos, price, c=color, s=size, marker=marker,
+                                               edgecolors='black', linewidths=0.5, zorder=5)
+
+                            # Add trade legend
+                            from matplotlib.lines import Line2D
+                            if is_sell_task:
+                                legend_elements = [
+                                    Line2D([0], [0], marker='^', color='w', markerfacecolor='limegreen',
+                                           markersize=10, label='At Ask (Best Sell)'),
+                                    Line2D([0], [0], marker='o', color='w', markerfacecolor='gold',
+                                           markersize=10, label='In Spread'),
+                                    Line2D([0], [0], marker='v', color='w', markerfacecolor='orangered',
+                                           markersize=10, label='At/Below Bid'),
+                                ]
+                            else:
+                                legend_elements = [
+                                    Line2D([0], [0], marker='v', color='w', markerfacecolor='limegreen',
+                                           markersize=10, label='At Bid (Best Buy)'),
+                                    Line2D([0], [0], marker='o', color='w', markerfacecolor='gold',
+                                           markersize=10, label='In Spread'),
+                                    Line2D([0], [0], marker='^', color='w', markerfacecolor='orangered',
+                                           markersize=10, label='At/Above Ask'),
+                                ]
+                            # Combine with line legends
+                            handles, labels = ax2.get_legend_handles_labels()
+                            ax2.legend(handles=legend_elements + handles, loc='upper left')
+
+                            ax2.set_title(f"Market Trace with Trades - Epoch {epoch}")
+                            ax2.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
+                            ax2.set_ylabel("Price")
+                            ax2.set_xticks(ticks)
+                            ax2.grid(True, alpha=0.3)
+
+                            wandb_run.log({"market_data_trace_with_trades": wandb.Image(fig2)}, commit=False)
+                            plt.close(fig2)
+
+                        # ==========================================================
+                        # Third chart: Market Data with Historical Trades Only
+                        # Shows trades from the original LOBSTER data (event_type=4)
+                        # ==========================================================
+                        if 'example_gt_trade_price' in epoch_info:
+                            gt_trade_price = epoch_info['example_gt_trade_price']
+                            gt_trade_qty = epoch_info['example_gt_trade_qty']
+                            gt_trade_side = epoch_info['example_gt_trade_side']
+
+                            # Check if we have any historical trades
+                            has_trades = jnp.sum(gt_trade_qty > 0) > 0
+
+                            if has_trades:
+                                fig3, ax3 = plt.subplots(figsize=(12, 6))
+
+                                # Plot GT (same as other charts)
+                                ax3.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
+                                ax3.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                                ax3.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
+
+                                # Add vertical separator lines
+                                ax3.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
+                                for i in range(1, n_steps + 1):
+                                    ax3.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+
+                                # Plot historical trades
+                                # gt_trade_price, gt_trade_qty, gt_trade_side have shape (total_msgs,)
+                                # Plot at message index positions (X-axis = gt_steps)
+                                for msg_idx in range(len(gt_trade_price)):
+                                    qty = float(gt_trade_qty[msg_idx])
+                                    if qty > 0:  # Trade occurred
+                                        x_pos = gt_steps[msg_idx]  # Message index position
+                                        price = float(gt_trade_price[msg_idx])
+                                        side = int(gt_trade_side[msg_idx])
+
+                                        # Color by side: Buy = blue, Sell = purple
+                                        if side == 1:  # Buy
+                                            color = 'dodgerblue'
+                                            marker = '^'  # Up triangle
+                                        else:  # Sell (side == -1)
+                                            color = 'mediumorchid'
+                                            marker = 'v'  # Down triangle
+
+                                        # Marker size proportional to quantity
+                                        size = 30 + qty * 2
+                                        ax3.scatter(x_pos, price, c=color, s=size, marker=marker,
+                                                   edgecolors='black', linewidths=0.3, alpha=0.7, zorder=5)
+
+                                # Add historical trade legend
+                                from matplotlib.lines import Line2D
+                                legend_elements = [
+                                    Line2D([0], [0], marker='^', color='w', markerfacecolor='dodgerblue',
+                                           markersize=10, label='Historical Buy'),
+                                    Line2D([0], [0], marker='v', color='w', markerfacecolor='mediumorchid',
+                                           markersize=10, label='Historical Sell'),
+                                ]
+                                handles, labels = ax3.get_legend_handles_labels()
+                                ax3.legend(handles=legend_elements + handles, loc='upper left')
+
+                                ax3.set_title(f"Market Trace with Historical Trades - Epoch {epoch}")
+                                ax3.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
+                                ax3.set_ylabel("Price")
+                                ax3.set_xticks(ticks)
+                                ax3.grid(True, alpha=0.3)
+
+                                wandb_run.log({"market_data_trace_historical_trades": wandb.Image(fig3)}, commit=False)
+                                plt.close(fig3)
+
+                    except Exception as e:
+                        print(f"[WARN] Failed to generate price plot: {e}")
+
+                # Build base metrics dict
+                metrics = {
                     'epoch': epoch,
-                    'fitness/mean': float(mean_fitness),
-                    'fitness/best_ever': float(best_fitness),
+                    # PnL metrics (raw profit/loss in cents)
+                    'pnl/mean': float(mean_pnl),
+                    'pnl/best_ever': float(best_pnl),
+                    'pnl/std': pnl_std,
+                    'pnl/max': pnl_max,
+                    'pnl/min': pnl_min,
+                    # Fitness metrics (rank_transform(pnl), range [-0.5, 0.5])
+                    'fitness/mean': fitness_mean,
                     'fitness/std': fitness_std,
-                    'fitness/max': fitness_max,
-                    'fitness/min': fitness_min,
-                    'pnl/mean': float(epoch_info['pnl']),
-                    # Execution quantities
-                    'execution/agent_quantity': agent_qty,             # Total filled = model + liquidation
-                    'execution/model_quantity': model_qty,             # Filled by model orders
-                    'execution/liquidation_quantity': liquidation_qty, # Filled by force_market_order
-                    'execution/unfilled_quantity': unfilled_qty,       # NOT filled (book depth insufficient)
-                    # Execution rates
-                    'execution/fill_rate': fill_rate,                  # Total fill rate (may be < 1.0!)
-                    'execution/model_fill_rate': model_fill_rate,      # Model orders fill rate
-                    'execution/liquidation_fill_rate': liquidation_fill_rate,  # Force market order fill rate
-                    'execution/unfill_rate': unfill_rate,              # Unfilled rate
+
+                    # Section 1: Normal Orders (Model Steps)
+                    'normal_order/quantity': model_qty,
+                    'normal_order/fill_rate': model_fill_rate,
+                    'normal_order/submitted_quantity': submitted_qty,
+                    'normal_order/submission_ratio': submitted_qty / task_size,  # 提交倍数
+                    'normal_order/execution_prob': exec_prob,
+                    
+                    # Section 2: Market Orders (Liquidation Step)
+                    'market_order/quantity': liquidation_qty,
+                    'market_order/fill_rate': liquidation_fill_rate,
+                    
+                    # Section 3: Doom Orders (Unfilled Penalty)
+                    'doom_order/quantity': doom_qty,
+                    'doom_order/fill_rate': unfill_rate,
+
+                    # Section 4: Execution Summary
+                    'execution/agent_quantity': agent_qty,
+                    'execution/fill_rate': fill_rate,
                     'execution/agent_trades': float(epoch_info['agent_trades']),
                     'execution/total_trades': float(epoch_info['total_trades']),
-                })
+                    'execution/buffer_trades': float(epoch_info['buffer_trades']),  # Diagnostic: trades in final buffer
+                }
 
-                # Print warning if unfilled > 0
-                if unfilled_qty > 0:
-                    print(f"[WARNING] Epoch {epoch}: {unfilled_qty:.0f} shares unfilled (unfill_rate={unfill_rate:.1%})")
+                # Add current sigma (useful for tracking sigma decay)
+                metrics['es/sigma'] = current_sigma
+
+                wandb_run.log(metrics)
+
+                # Print warning if doom_qty > 0
+                if doom_qty > 0:
+                    print(f"[WARNING] Epoch {epoch}: {doom_qty:.0f} shares unfilled (unfill_rate={unfill_rate:.1%})")
 
             if epoch % 10 == 0:
-                print(f"Epoch {epoch}: mean={mean_fitness:.4f}, best={best_fitness:.4f}, std={jnp.std(fitnesses):.4f}")
+                print(f"Epoch {epoch}: pnl_mean={mean_pnl:.4f}, pnl_best={best_pnl:.4f}, pnl_std={jnp.std(pnls):.4f}")
 
         # Save final checkpoint
         final_path = os.path.join(checkpoint_dir, 'final')
         self.save_checkpoint(final_path)
-        self._save_training_state(final_path, n_epochs - 1, best_fitness)
+        self._save_training_state(final_path, n_epochs - 1, best_pnl)
         print(f"[TRAIN] Final checkpoint saved to {final_path}")
 
         if wandb_run:
@@ -2168,14 +2961,14 @@ class ESTrainer:
 
         return self.lobs5_init.params
 
-    def _save_training_state(self, path: str, epoch: int, best_fitness: float):
+    def _save_training_state(self, path: str, epoch: int, best_pnl: float):
         """Save training state for resumption."""
         import os
         import pickle
         os.makedirs(path, exist_ok=True)
         state = {
             'epoch': epoch,
-            'best_fitness': best_fitness,
+            'best_pnl': best_pnl,  # Raw PnL in cents (fitness = rank_transform(pnl))
         }
         with open(os.path.join(path, 'training_state.pkl'), 'wb') as f:
             pickle.dump(state, f)

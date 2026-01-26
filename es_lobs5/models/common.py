@@ -25,6 +25,7 @@ PARAM = _common.PARAM
 MM_PARAM = _common.MM_PARAM
 EMB_PARAM = _common.EMB_PARAM
 EXCLUDED = _common.EXCLUDED
+LORA_V2_PATTERNS = _common.LORA_V2_PATTERNS
 merge_inits = _common.merge_inits
 merge_frozen = _common.merge_frozen
 call_submodule = _common.call_submodule
@@ -45,7 +46,7 @@ ES_Embedding = Embedding
 
 __all__ = [
     'Model', 'CommonInit', 'CommonParams',
-    'PARAM', 'MM_PARAM', 'EMB_PARAM', 'EXCLUDED',
+    'PARAM', 'MM_PARAM', 'EMB_PARAM', 'EXCLUDED', 'LORA_V2_PATTERNS',
     'merge_inits', 'merge_frozen', 'call_submodule',
     'simple_es_tree_key', 'recursive_scan_split',
     'ES_Parameter', 'ES_MM', 'ES_TMM', 'ES_Linear', 'ES_LayerNorm',
@@ -82,6 +83,7 @@ class ES_Parameter(Model):
             common_params.noiser_params,
             common_params.params,
             common_params.es_tree_key,
+            common_params.es_map,
             common_params.iterinfo
         )
 
