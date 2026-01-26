@@ -39,7 +39,7 @@ def msg_to_jnp(m_raw: jax.Array) -> jax.Array:
 
     Returns:
         (8,) JaxLOB simulator message:
-        [event_type, side*2-1, size, price_abs, 0(trade_id), order_id, time_s, time_ns]
+        [event_type, side*2-1, size, price_abs, order_id, 0(trader_id), time_s, time_ns]
     """
     m = m_raw.copy()
 
@@ -48,8 +48,8 @@ def msg_to_jnp(m_raw: jax.Array) -> jax.Array:
         (m[DIRECTION_i] * 2) - 1,  # 0/1 -> -1/1
         m[SIZE_i],
         m[PRICE_ABS_i],
-        0,  # TradeID
         m[ORDER_ID_i],
+        0,  # TraderID
         m[TIMEs_i],
         m[TIMEns_i],
     ])
