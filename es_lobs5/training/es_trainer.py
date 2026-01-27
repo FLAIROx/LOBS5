@@ -848,7 +848,7 @@ class ESTrainer:
         # Load LOBS5 checkpoint
         print(f"[INIT] Loading checkpoint from {config.lobs5_checkpoint}")
         load_checkpoint_for_es = _get_checkpoint_loader()
-        self.lobs5_init, self.es_tree_key = load_checkpoint_for_es(config.lobs5_checkpoint)
+        self.lobs5_init, self.es_tree_key = load_checkpoint_for_es(config.lobs5_checkpoint, seed=config.seed)
 
         # Auto-detect token_mode from checkpoint (like run_inference.py)
         # This overrides the command-line default to ensure correct encoding/decoding
