@@ -2581,11 +2581,12 @@ class ESTrainer:
                 import wandb
                 # Get SLURM job ID if available
                 job_id = os.environ.get("SLURM_JOB_ID", "local")
+                n_nodes = os.environ.get("SLURM_NNODES", "1")
                 n_procs = jax.process_count() if self._is_distributed else 1
                 wandb_run = wandb.init(
                     project=self.config.wandb_project,
                     entity=self.config.wandb_entity,
-                    name=f"es_n{self.config.n_perturbations}_s{self.config.seed}_j{job_id}",
+                    name=f"es_n{self.config.n_perturbations}_s{self.config.seed}_j{job_id}_nodes{n_nodes}",
                     config={
                         'n_perturbations': self.config.n_perturbations,
                         'n_steps': self.config.n_steps,
