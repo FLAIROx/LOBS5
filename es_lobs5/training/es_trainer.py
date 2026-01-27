@@ -3003,6 +3003,11 @@ class ESTrainer:
                 # Add current sigma (useful for tracking sigma decay)
                 metrics['es/sigma'] = current_sigma
 
+                # Add full distributions as histograms (for diagnosing fitness/pnl issues)
+                import numpy as np
+                metrics['pnl/distribution'] = wandb.Histogram(np.array(pnls))
+                metrics['fitness/distribution'] = wandb.Histogram(np.array(fitnesses))
+
                 wandb_run.log(metrics)
 
                 # Print warning if doom_qty > 0
