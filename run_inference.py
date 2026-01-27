@@ -9,8 +9,8 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".90"
 
-import torch
-torch.multiprocessing.set_start_method('spawn')
+# import torch
+# torch.multiprocessing.set_start_method('spawn')
 
 # Add parent folder to path (to run this file from subdirectories)
 (parent_folder_path, current_dir) = os.path.split(os.path.abspath(''))
