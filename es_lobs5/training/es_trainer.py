@@ -2420,16 +2420,15 @@ class ESTrainer:
         # Helps escape local optima like "no trading" by focusing on relative ordering
         fitnesses = rank_transform(pnls)
 
-        normalized_fitnesses = self.noiser_cls.convert_fitnesses(
-            self.frozen_noiser_params, noiser_params_rep, fitnesses
-        )
+        # NOTE: convert_fitnesses (z-score) removed — rank_transform already normalizes
+        # to [-0.5, 0.5]. The z-score was a redundant ~3.46x constant scaling.
 
         noiser_params_updated, updated_params = self.noiser_cls.do_updates(
             self.frozen_noiser_params,
             noiser_params_rep,
             params_rep,
             self.es_tree_key,
-            normalized_fitnesses,
+            fitnesses,
             iterinfos,
             self.lobs5_init.es_map,
         )
