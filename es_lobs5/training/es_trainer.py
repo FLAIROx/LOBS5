@@ -3035,15 +3035,36 @@ class ESTrainer:
                 metrics['fitness/distribution_heatmap'] = wandb.Histogram(fitnesses_np)
 
                 # Fitness distribution (matplotlib plot for per-epoch slider view)
-                fig_fit, ax_fit = plt.subplots(figsize=(8, 4), dpi=300)
-                ax_fit.hist(fitnesses_np, bins=50, color='coral', edgecolor='black', alpha=0.7)
-                ax_fit.axvline(x=0, color='black', linestyle='--', label='Mean=0')
-                ax_fit.set_xlim(-0.55, 0.55)
-                ax_fit.set_title(f'Fitness Distribution - Epoch {epoch} (N={len(fitnesses_np)})')
-                ax_fit.set_xlabel('Fitness (rank_transform)')
-                ax_fit.set_ylabel('Count')
-                ax_fit.legend()
-                ax_fit.grid(True, alpha=0.3)
+                # Two subplots: full range + zoomed-in mode detail
+                fig_fit, (ax_fit1, ax_fit2) = plt.subplots(1, 2, figsize=(16, 5), dpi=300)
+
+                # Left: full range with fine bins
+                ax_fit1.hist(fitnesses_np, bins=200, color='coral', edgecolor='coral', alpha=0.7)
+                ax_fit1.axvline(x=0, color='black', linestyle='--', linewidth=1.5, label='Mean=0')
+                ax_fit1.set_xlim(-0.55, 0.55)
+                ax_fit1.set_title(f'Fitness Distribution - Epoch {epoch} (N={len(fitnesses_np)})')
+                ax_fit1.set_xlabel('Fitness (rank_transform)')
+                ax_fit1.set_ylabel('Count')
+                ax_fit1.legend()
+                ax_fit1.grid(True, alpha=0.3)
+
+                # Right: zoomed-in [-0.1, 0.1] with very fine bins
+                mask = (fitnesses_np >= -0.1) & (fitnesses_np <= 0.1)
+                zoomed_data = fitnesses_np[mask]
+                ax_fit2.hist(zoomed_data, bins=100, color='coral', edgecolor='black',
+                             alpha=0.7, linewidth=0.5)
+                ax_fit2.axvline(x=0, color='black', linestyle='--', linewidth=1.5, label='Mean=0')
+                ax_fit2.set_xlim(-0.1, 0.1)
+                # Fine x-axis ticks every 0.01
+                ax_fit2.set_xticks(np.arange(-0.1, 0.101, 0.01))
+                ax_fit2.tick_params(axis='x', rotation=45, labelsize=7)
+                ax_fit2.set_title(f'Mode Detail [-0.1, 0.1] ({len(zoomed_data)}/{len(fitnesses_np)} samples)')
+                ax_fit2.set_xlabel('Fitness (rank_transform)')
+                ax_fit2.set_ylabel('Count')
+                ax_fit2.legend()
+                ax_fit2.grid(True, alpha=0.3)
+
+                plt.tight_layout()
                 metrics['fitness/distribution'] = wandb.Image(fig_fit)
                 plt.close(fig_fit)
 
