@@ -2733,8 +2733,8 @@ class ESTrainer:
                         ax.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
                         ax.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
 
-                        # Add vertical separator lines
-                        ax.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
+                        # Shade warmup region and add step separators
+                        ax.axvspan(-n_warmup, 0, color='blue', alpha=0.08, label='Warmup')
                         for i in range(1, n_steps + 1):
                             ax.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
 
@@ -2769,8 +2769,8 @@ class ESTrainer:
                             ax2.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
                             ax2.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
 
-                            # Add vertical separator lines
-                            ax2.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
+                            # Shade warmup region and add step separators
+                            ax2.axvspan(-n_warmup, 0, color='blue', alpha=0.08, label='Warmup')
                             for i in range(1, n_steps + 1):
                                 ax2.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
 
@@ -2899,8 +2899,8 @@ class ESTrainer:
                                 ax3.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
                                 ax3.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
 
-                                # Add vertical separator lines
-                                ax3.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
+                                # Shade warmup region and add step separators
+                                ax3.axvspan(-n_warmup, 0, color='blue', alpha=0.08, label='Warmup')
                                 for i in range(1, n_steps + 1):
                                     ax3.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
 
@@ -3006,11 +3006,15 @@ class ESTrainer:
                 # Two subplots: full range + zoomed-in mode detail
                 fig_pnl, (ax_pnl1, ax_pnl2) = plt.subplots(1, 2, figsize=(16, 5), dpi=300)
                 pnl_mean_val = float(np.mean(pnls_np))
+                pnl_median = float(np.median(pnls_np))
+                pnl_std = float(np.std(pnls_np))
 
                 # Left: full range with fine bins
                 ax_pnl1.hist(pnls_np, bins=200, color='steelblue', edgecolor='steelblue', alpha=0.7)
                 ax_pnl1.axvline(x=pnl_mean_val, color='red', linestyle='--',
                                 label=f'Mean={pnl_mean_val:.0f}')
+                ax_pnl1.axvline(x=pnl_median, color='orange', linestyle='-.',
+                                label=f'Median={pnl_median:.0f}')
                 ax_pnl1.axvline(x=0, color='black', linestyle=':', alpha=0.5, label='Breakeven')
                 ax_pnl1.set_title(f'PnL Distribution - Epoch {epoch} (N={len(pnls_np)})')
                 ax_pnl1.set_xlabel('PnL (cents)')
@@ -3018,18 +3022,22 @@ class ESTrainer:
                 ax_pnl1.legend()
                 ax_pnl1.grid(True, alpha=0.3)
 
-                # Right: zoomed-in around mode (dynamic range via percentiles)
+                # Right: zoomed-in around mode (robust multi-level fallback)
                 p10 = float(np.percentile(pnls_np, 10))
                 p90 = float(np.percentile(pnls_np, 90))
                 iqr = p90 - p10
-                zoom_lo = p10 - 0.3 * max(iqr, 1)
-                zoom_hi = p90 + 0.3 * max(iqr, 1)
+                half_w = max(iqr * 0.8, 2 * pnl_std, 200)
+                center = 0.5 * (p10 + p90)
+                zoom_lo = center - half_w
+                zoom_hi = center + half_w
                 mask_pnl = (pnls_np >= zoom_lo) & (pnls_np <= zoom_hi)
                 zoomed_pnl = pnls_np[mask_pnl]
                 ax_pnl2.hist(zoomed_pnl, bins=100, color='steelblue', edgecolor='black',
                              alpha=0.7, linewidth=0.5)
                 ax_pnl2.axvline(x=pnl_mean_val, color='red', linestyle='--',
                                 label=f'Mean={pnl_mean_val:.0f}')
+                ax_pnl2.axvline(x=pnl_median, color='orange', linestyle='-.',
+                                label=f'Median={pnl_median:.0f}')
                 ax_pnl2.set_xlim(zoom_lo, zoom_hi)
                 # Fine x-axis ticks (~20 ticks across the range)
                 tick_step = max((zoom_hi - zoom_lo) / 20, 1)
@@ -3057,8 +3065,12 @@ class ESTrainer:
                 fig_fit, (ax_fit1, ax_fit2) = plt.subplots(1, 2, figsize=(16, 5), dpi=300)
 
                 # Left: full range with fine bins
+                fit_median = float(np.median(fitnesses_np))
+                fit_std = float(np.std(fitnesses_np))
                 ax_fit1.hist(fitnesses_np, bins=200, color='coral', edgecolor='coral', alpha=0.7)
                 ax_fit1.axvline(x=0, color='black', linestyle='--', linewidth=1.5, label='Mean=0')
+                ax_fit1.axvline(x=fit_median, color='orange', linestyle='-.',
+                                label=f'Median={fit_median:.3f}')
                 ax_fit1.set_xlim(-0.55, 0.55)
                 ax_fit1.set_title(f'Fitness Distribution - Epoch {epoch} (N={len(fitnesses_np)})')
                 ax_fit1.set_xlabel('Fitness (rank_transform)')
@@ -3066,17 +3078,21 @@ class ESTrainer:
                 ax_fit1.legend()
                 ax_fit1.grid(True, alpha=0.3)
 
-                # Right: zoomed-in around mode (dynamic range via percentiles)
+                # Right: zoomed-in around mode (robust multi-level fallback)
                 fp10 = float(np.percentile(fitnesses_np, 10))
                 fp90 = float(np.percentile(fitnesses_np, 90))
                 fiqr = fp90 - fp10
-                fzoom_lo = fp10 - 0.3 * max(fiqr, 0.001)
-                fzoom_hi = fp90 + 0.3 * max(fiqr, 0.001)
+                fhalf_w = max(fiqr * 0.8, 2 * fit_std, 0.1)
+                fcenter = 0.5 * (fp10 + fp90)
+                fzoom_lo = fcenter - fhalf_w
+                fzoom_hi = fcenter + fhalf_w
                 mask = (fitnesses_np >= fzoom_lo) & (fitnesses_np <= fzoom_hi)
                 zoomed_data = fitnesses_np[mask]
                 ax_fit2.hist(zoomed_data, bins=100, color='coral', edgecolor='black',
                              alpha=0.7, linewidth=0.5)
                 ax_fit2.axvline(x=0, color='black', linestyle='--', linewidth=1.5, label='Mean=0')
+                ax_fit2.axvline(x=fit_median, color='orange', linestyle='-.',
+                                label=f'Median={fit_median:.3f}')
                 ax_fit2.set_xlim(fzoom_lo, fzoom_hi)
                 # Fine x-axis ticks (~20 ticks across the range)
                 ftick_step = max((fzoom_hi - fzoom_lo) / 20, 0.001)
