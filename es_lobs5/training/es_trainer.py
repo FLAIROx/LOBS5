@@ -2701,59 +2701,26 @@ class ESTrainer:
                         n_bg = getattr(self.config, 'background_msgs_per_step', 50)
                         n_steps = self.config.n_steps
 
-                        # Build merged trace: interleave GT data with agent bid/ask at step boundaries
-                        # Each step adds 1 agent data point (post-trade book state), extending total by n_steps
-                        import numpy as np
-                        agent_bid_data = epoch_info.get('example_bid_trace')
-                        agent_ask_data = epoch_info.get('example_ask_trace')
-                        if agent_bid_data is not None and agent_ask_data is not None:
-                            agent_bid_arr = np.array(agent_bid_data)
-                            agent_ask_arr = np.array(agent_ask_data)
-                            gt_bid_np = np.array(gt_bid)
-                            gt_ask_np = np.array(gt_ask)
-                            merged_bid_list = []
-                            merged_ask_list = []
-                            # Warmup portion (pure GT)
-                            merged_bid_list.extend(gt_bid_np[:n_warmup].tolist())
-                            merged_ask_list.extend(gt_ask_np[:n_warmup].tolist())
-                            # Trading portion: n_bg bg points + 1 agent point per step
-                            for s in range(n_steps):
-                                gt_start = n_warmup + s * n_bg
-                                gt_end = gt_start + n_bg
-                                merged_bid_list.extend(gt_bid_np[gt_start:gt_end].tolist())
-                                merged_ask_list.extend(gt_ask_np[gt_start:gt_end].tolist())
-                                merged_bid_list.append(float(agent_bid_arr[s]))
-                                merged_ask_list.append(float(agent_ask_arr[s]))
-                            plot_bid = np.array(merged_bid_list)
-                            plot_ask = np.array(merged_ask_list)
-                            plot_mid = (plot_bid + plot_ask) / 2
-                            step_width = n_bg + 1  # 51 per step (50 bg + 1 policy)
-                        else:
-                            plot_bid = np.array(gt_bid)
-                            plot_ask = np.array(gt_ask)
-                            plot_mid = np.array(gt_mid)
-                            step_width = n_bg
-
                         # X-axis from -n_warmup (warmup phase is negative)
-                        plot_x = list(range(-n_warmup, len(plot_bid) - n_warmup))
+                        gt_steps = list(range(-n_warmup, len(gt_bid) - n_warmup))
 
-                        # Create static plot
+                        # Step boundary ticks at i * n_bg (pure background messages only)
+                        ticks = [-n_warmup, 0]
+                        for i in range(1, n_steps + 1):
+                            ticks.append(i * n_bg)
+
+                        # Create static plot (pure GT - no agent impact)
                         fig, ax = plt.subplots(figsize=(12, 6), dpi=300)
 
-                        # Plot merged bid/ask/mid (includes agent impact at step boundaries)
-                        ax.plot(plot_x, plot_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
-                        ax.plot(plot_x, plot_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
-                        ax.plot(plot_x, plot_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
+                        ax.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
+                        ax.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                        ax.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
 
                         # Add vertical separator lines
                         ax.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
                         for i in range(1, n_steps + 1):
-                            ax.axvline(x=i * step_width, color='gray', linestyle=':', alpha=0.3)
+                            ax.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
 
-                        # Set custom X-axis ticks at warmup start, 0, and each step boundary
-                        ticks = [-n_warmup, 0]
-                        for i in range(1, n_steps + 1):
-                            ticks.append(i * step_width)
                         ax.set_xticks(ticks)
 
                         ax.set_title(f"Market Trace (Data Window) - Epoch {epoch}")
@@ -2770,23 +2737,30 @@ class ESTrainer:
                         if 'example_trade_vwap_trace' in epoch_info:
                             fig2, ax2 = plt.subplots(figsize=(12, 6), dpi=300)
 
-                            # Plot merged bid/ask/mid (same as first chart, includes agent impact)
-                            ax2.plot(plot_x, plot_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
-                            ax2.plot(plot_x, plot_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
-                            ax2.plot(plot_x, plot_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
+                            # Plot pure GT background (no agent impact)
+                            ax2.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
+                            ax2.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                            ax2.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
 
                             # Add vertical separator lines
                             ax2.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
                             for i in range(1, n_steps + 1):
-                                ax2.axvline(x=i * step_width, color='gray', linestyle=':', alpha=0.3)
+                                ax2.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+
+                            # Agent bid/ask overlay: show agent's observed book state at step boundaries
+                            agent_bid_data = epoch_info.get('example_bid_trace')
+                            agent_ask_data = epoch_info.get('example_ask_trace')
+                            if agent_bid_data is not None and agent_ask_data is not None:
+                                for s in range(n_steps):
+                                    x_agent = (s + 1) * n_bg
+                                    ax2.scatter(x_agent, float(agent_ask_data[s]), c='red', s=25,
+                                               marker='s', alpha=0.9, zorder=4, edgecolors='darkred', linewidths=0.5)
+                                    ax2.scatter(x_agent, float(agent_bid_data[s]), c='green', s=25,
+                                               marker='s', alpha=0.9, zorder=4, edgecolors='darkgreen', linewidths=0.5)
 
                             # Get trade traces
                             trade_vwap = epoch_info['example_trade_vwap_trace']
                             trade_qty = epoch_info['example_trade_qty_trace']
-
-                            # Get bid/ask traces for execution quality comparison
-                            bid_trace_data = epoch_info['example_bid_trace']
-                            ask_trace_data = epoch_info['example_ask_trace']
 
                             # Add trade markers
                             # Determine task type for color logic
@@ -2795,18 +2769,17 @@ class ESTrainer:
                             for step_idx in range(n_steps):
                                 qty = float(trade_qty[step_idx])
                                 if qty > 0:  # Trade occurred
-                                    # X position: at agent point in merged trace
-                                    x_pos = step_idx * step_width + n_bg
+                                    # X position: at step boundary
+                                    x_pos = (step_idx + 1) * n_bg
                                     price = float(trade_vwap[step_idx])
-                                    # Use pre-trade bid/ask from merged trace for color comparison
-                                    # This is the last bg msg before the agent's order (visually matches the chart curves)
-                                    pre_trade_idx = n_warmup + step_idx * step_width + n_bg - 1
-                                    if pre_trade_idx < len(plot_bid):
-                                        bid = float(plot_bid[pre_trade_idx])
-                                        ask = float(plot_ask[pre_trade_idx])
+                                    # Color comparison: use GT bid/ask at step boundary
+                                    gt_idx = n_warmup + (step_idx + 1) * n_bg - 1
+                                    if gt_idx < len(gt_bid):
+                                        bid = float(gt_bid[gt_idx])
+                                        ask = float(gt_ask[gt_idx])
                                     else:
-                                        bid = float(bid_trace_data[step_idx])
-                                        ask = float(ask_trace_data[step_idx])
+                                        bid = float(agent_bid_data[step_idx]) if agent_bid_data is not None else 0
+                                        ask = float(agent_ask_data[step_idx]) if agent_ask_data is not None else 0
 
                                     # Determine execution quality color
                                     if is_sell_task:
@@ -2848,7 +2821,7 @@ class ESTrainer:
                             liq_qty = float(epoch_info.get('example_liquidation_qty', 0))
                             if liq_qty > 0:
                                 liq_vwap = float(epoch_info['example_liquidation_vwap'])
-                                liq_x = n_steps * step_width
+                                liq_x = (n_steps + 0.5) * n_bg
                                 ax2.scatter(liq_x, liq_vwap, c='magenta', s=120, marker='D',
                                            edgecolors='black', linewidths=1.0, zorder=6)
                                 ax2.annotate(f'MO:{int(liq_qty)}', (liq_x, liq_vwap),
