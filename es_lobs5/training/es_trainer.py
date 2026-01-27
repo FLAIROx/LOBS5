@@ -3018,16 +3018,49 @@ class ESTrainer:
                 metrics['pnl/distribution_heatmap'] = wandb.Histogram(pnls_np)
 
                 # PnL distribution (matplotlib plot for per-epoch slider view)
-                fig_pnl, ax_pnl = plt.subplots(figsize=(8, 4), dpi=300)
-                ax_pnl.hist(pnls_np, bins=50, color='steelblue', edgecolor='black', alpha=0.7)
-                ax_pnl.axvline(x=float(np.mean(pnls_np)), color='red', linestyle='--',
-                               label=f'Mean={float(np.mean(pnls_np)):.0f}')
-                ax_pnl.axvline(x=0, color='black', linestyle=':', alpha=0.5, label='Breakeven')
-                ax_pnl.set_title(f'PnL Distribution - Epoch {epoch} (N={len(pnls_np)})')
-                ax_pnl.set_xlabel('PnL (cents)')
-                ax_pnl.set_ylabel('Count')
-                ax_pnl.legend()
-                ax_pnl.grid(True, alpha=0.3)
+                # Two subplots: full range + zoomed-in mode detail
+                fig_pnl, (ax_pnl1, ax_pnl2) = plt.subplots(1, 2, figsize=(16, 5), dpi=300)
+                pnl_mean_val = float(np.mean(pnls_np))
+
+                # Left: full range with fine bins
+                ax_pnl1.hist(pnls_np, bins=200, color='steelblue', edgecolor='steelblue', alpha=0.7)
+                ax_pnl1.axvline(x=pnl_mean_val, color='red', linestyle='--',
+                                label=f'Mean={pnl_mean_val:.0f}')
+                ax_pnl1.axvline(x=0, color='black', linestyle=':', alpha=0.5, label='Breakeven')
+                ax_pnl1.set_title(f'PnL Distribution - Epoch {epoch} (N={len(pnls_np)})')
+                ax_pnl1.set_xlabel('PnL (cents)')
+                ax_pnl1.set_ylabel('Count')
+                ax_pnl1.legend()
+                ax_pnl1.grid(True, alpha=0.3)
+
+                # Right: zoomed-in around mode (dynamic range via percentiles)
+                p10 = float(np.percentile(pnls_np, 10))
+                p90 = float(np.percentile(pnls_np, 90))
+                iqr = p90 - p10
+                zoom_lo = p10 - 0.3 * max(iqr, 1)
+                zoom_hi = p90 + 0.3 * max(iqr, 1)
+                mask_pnl = (pnls_np >= zoom_lo) & (pnls_np <= zoom_hi)
+                zoomed_pnl = pnls_np[mask_pnl]
+                ax_pnl2.hist(zoomed_pnl, bins=100, color='steelblue', edgecolor='black',
+                             alpha=0.7, linewidth=0.5)
+                ax_pnl2.axvline(x=pnl_mean_val, color='red', linestyle='--',
+                                label=f'Mean={pnl_mean_val:.0f}')
+                ax_pnl2.set_xlim(zoom_lo, zoom_hi)
+                # Fine x-axis ticks (~20 ticks across the range)
+                tick_step = max((zoom_hi - zoom_lo) / 20, 1)
+                ax_pnl2.set_xticks(np.arange(
+                    np.ceil(zoom_lo / tick_step) * tick_step,
+                    zoom_hi + tick_step * 0.1,
+                    tick_step))
+                ax_pnl2.tick_params(axis='x', rotation=45, labelsize=7)
+                ax_pnl2.set_title(f'Mode Detail [{zoom_lo:.0f}, {zoom_hi:.0f}] '
+                                  f'({len(zoomed_pnl)}/{len(pnls_np)} samples)')
+                ax_pnl2.set_xlabel('PnL (cents)')
+                ax_pnl2.set_ylabel('Count')
+                ax_pnl2.legend()
+                ax_pnl2.grid(True, alpha=0.3)
+
+                plt.tight_layout()
                 metrics['pnl/distribution'] = wandb.Image(fig_pnl)
                 plt.close(fig_pnl)
 
@@ -3048,17 +3081,27 @@ class ESTrainer:
                 ax_fit1.legend()
                 ax_fit1.grid(True, alpha=0.3)
 
-                # Right: zoomed-in [-0.1, 0.1] with very fine bins
-                mask = (fitnesses_np >= -0.1) & (fitnesses_np <= 0.1)
+                # Right: zoomed-in around mode (dynamic range via percentiles)
+                fp10 = float(np.percentile(fitnesses_np, 10))
+                fp90 = float(np.percentile(fitnesses_np, 90))
+                fiqr = fp90 - fp10
+                fzoom_lo = fp10 - 0.3 * max(fiqr, 0.001)
+                fzoom_hi = fp90 + 0.3 * max(fiqr, 0.001)
+                mask = (fitnesses_np >= fzoom_lo) & (fitnesses_np <= fzoom_hi)
                 zoomed_data = fitnesses_np[mask]
                 ax_fit2.hist(zoomed_data, bins=100, color='coral', edgecolor='black',
                              alpha=0.7, linewidth=0.5)
                 ax_fit2.axvline(x=0, color='black', linestyle='--', linewidth=1.5, label='Mean=0')
-                ax_fit2.set_xlim(-0.1, 0.1)
-                # Fine x-axis ticks every 0.01
-                ax_fit2.set_xticks(np.arange(-0.1, 0.101, 0.01))
+                ax_fit2.set_xlim(fzoom_lo, fzoom_hi)
+                # Fine x-axis ticks (~20 ticks across the range)
+                ftick_step = max((fzoom_hi - fzoom_lo) / 20, 0.001)
+                ax_fit2.set_xticks(np.arange(
+                    np.ceil(fzoom_lo / ftick_step) * ftick_step,
+                    fzoom_hi + ftick_step * 0.1,
+                    ftick_step))
                 ax_fit2.tick_params(axis='x', rotation=45, labelsize=7)
-                ax_fit2.set_title(f'Mode Detail [-0.1, 0.1] ({len(zoomed_data)}/{len(fitnesses_np)} samples)')
+                ax_fit2.set_title(f'Mode Detail [{fzoom_lo:.3f}, {fzoom_hi:.3f}] '
+                                  f'({len(zoomed_data)}/{len(fitnesses_np)} samples)')
                 ax_fit2.set_xlabel('Fitness (rank_transform)')
                 ax_fit2.set_ylabel('Count')
                 ax_fit2.legend()
