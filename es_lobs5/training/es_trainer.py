@@ -2737,7 +2737,7 @@ class ESTrainer:
                         plot_x = list(range(-n_warmup, len(plot_bid) - n_warmup))
 
                         # Create static plot
-                        fig, ax = plt.subplots(figsize=(12, 6))
+                        fig, ax = plt.subplots(figsize=(12, 6), dpi=300)
 
                         # Plot merged bid/ask/mid (includes agent impact at step boundaries)
                         ax.plot(plot_x, plot_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
@@ -2767,7 +2767,7 @@ class ESTrainer:
 
                         # Second chart: Market Data with Trade Markers
                         if 'example_trade_vwap_trace' in epoch_info:
-                            fig2, ax2 = plt.subplots(figsize=(12, 6))
+                            fig2, ax2 = plt.subplots(figsize=(12, 6), dpi=300)
 
                             # Plot merged bid/ask/mid (same as first chart, includes agent impact)
                             ax2.plot(plot_x, plot_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
@@ -2906,7 +2906,7 @@ class ESTrainer:
                             has_trades = jnp.sum(gt_trade_qty > 0) > 0
 
                             if has_trades:
-                                fig3, ax3 = plt.subplots(figsize=(12, 6))
+                                fig3, ax3 = plt.subplots(figsize=(12, 6), dpi=300)
 
                                 # Plot GT (same as other charts)
                                 ax3.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
@@ -3013,8 +3013,11 @@ class ESTrainer:
                 pnls_np = np.array(pnls)
                 fitnesses_np = np.array(fitnesses)
 
-                # PnL distribution
-                fig_pnl, ax_pnl = plt.subplots(figsize=(8, 4))
+                # PnL distribution (histogram for heatmap view)
+                metrics['pnl/distribution_heatmap'] = wandb.Histogram(pnls_np)
+
+                # PnL distribution (matplotlib plot for per-epoch slider view)
+                fig_pnl, ax_pnl = plt.subplots(figsize=(8, 4), dpi=300)
                 ax_pnl.hist(pnls_np, bins=50, color='steelblue', edgecolor='black', alpha=0.7)
                 ax_pnl.axvline(x=float(np.mean(pnls_np)), color='red', linestyle='--',
                                label=f'Mean={float(np.mean(pnls_np)):.0f}')
@@ -3027,8 +3030,11 @@ class ESTrainer:
                 metrics['pnl/distribution'] = wandb.Image(fig_pnl)
                 plt.close(fig_pnl)
 
-                # Fitness distribution
-                fig_fit, ax_fit = plt.subplots(figsize=(8, 4))
+                # Fitness distribution (histogram for heatmap view)
+                metrics['fitness/distribution_heatmap'] = wandb.Histogram(fitnesses_np)
+
+                # Fitness distribution (matplotlib plot for per-epoch slider view)
+                fig_fit, ax_fit = plt.subplots(figsize=(8, 4), dpi=300)
                 ax_fit.hist(fitnesses_np, bins=50, color='coral', edgecolor='black', alpha=0.7)
                 ax_fit.axvline(x=0, color='black', linestyle='--', label='Mean=0')
                 ax_fit.set_xlim(-0.55, 0.55)
