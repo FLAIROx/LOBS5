@@ -2783,6 +2783,23 @@ class ESTrainer:
                         is_sell_task = getattr(self.config, 'task', 'sell') == 'sell'
                         from matplotlib.lines import Line2D
 
+                        # Map GT indices to real simulation positions (gaps at policy order slots)
+                        # Timeline: 50 bg + 1 policy × 10 steps = 510 messages
+                        step_width = n_bg + 1  # 51
+                        gt_sim_steps = []
+                        for i in range(len(gt_bid)):
+                            if i < n_warmup:
+                                gt_sim_steps.append(i - n_warmup)
+                            else:
+                                k = i - n_warmup
+                                s = k // n_bg
+                                w = k % n_bg
+                                gt_sim_steps.append(s * step_width + w)
+
+                        ticks2 = [-n_warmup, 0]
+                        for i in range(1, n_steps + 1):
+                            ticks2.append(i * step_width)  # 51, 102, ..., 510
+
                         for viz_label in ['best', 'worst', 'mode']:
                             prefix = f'example_{viz_label}'
                             trade_vwap_key = f'{prefix}_trade_vwap_trace'
@@ -2792,22 +2809,22 @@ class ESTrainer:
                             viz_pnl = float(epoch_info.get(f'{prefix}_pnl', 0))
                             fig2, ax2 = plt.subplots(figsize=(12, 6), dpi=300)
 
-                            # Plot pure GT background (no agent impact)
-                            ax2.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
-                            ax2.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
-                            ax2.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
+                            # Plot GT at real simulation positions (gaps at policy order slots)
+                            ax2.plot(gt_sim_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
+                            ax2.plot(gt_sim_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                            ax2.plot(gt_sim_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
 
                             # Shade warmup region and add step separators
                             ax2.axvspan(-n_warmup, 0, color='blue', alpha=0.08, label='Warmup')
                             for i in range(1, n_steps + 1):
-                                ax2.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+                                ax2.axvline(x=i * step_width, color='gray', linestyle=':', alpha=0.3)
 
-                            # Agent bid/ask overlay: show agent's observed book state at step boundaries
+                            # Agent bid/ask overlay: post-trade book state at policy order slots
                             _abd = epoch_info.get(f'{prefix}_bid_trace')
                             _aad = epoch_info.get(f'{prefix}_ask_trace')
                             if _abd is not None and _aad is not None:
                                 for s in range(n_steps):
-                                    x_agent = (s + 1) * n_bg
+                                    x_agent = s * step_width + n_bg  # policy order slot: 50,101,...,509
                                     ax2.scatter(x_agent, float(_aad[s]), c='red', s=25,
                                                marker='s', alpha=0.9, zorder=4, edgecolors='darkred', linewidths=0.5)
                                     ax2.scatter(x_agent, float(_abd[s]), c='green', s=25,
@@ -2821,7 +2838,7 @@ class ESTrainer:
                             for step_idx in range(n_steps):
                                 qty = float(trade_qty[step_idx])
                                 if qty > 0:  # Trade occurred
-                                    x_pos = (step_idx + 1) * n_bg
+                                    x_pos = step_idx * step_width + n_bg  # policy order slot
                                     price = float(trade_vwap[step_idx])
                                     # Color comparison: use GT bid/ask at step boundary
                                     gt_idx = n_warmup + (step_idx + 1) * n_bg - 1
@@ -2862,7 +2879,7 @@ class ESTrainer:
                             liq_qty = float(epoch_info.get(f'{prefix}_liquidation_qty', 0))
                             if liq_qty > 0:
                                 liq_vwap = float(epoch_info[f'{prefix}_liquidation_vwap'])
-                                liq_x = (n_steps + 0.5) * n_bg
+                                liq_x = n_steps * step_width + 0.5  # slightly past timeline end
                                 ax2.scatter(liq_x, liq_vwap, c='magenta', s=120, marker='D',
                                            edgecolors='black', linewidths=1.0, zorder=6)
                                 ax2.annotate(f'MO:{int(liq_qty)}', (liq_x, liq_vwap),
@@ -2894,13 +2911,19 @@ class ESTrainer:
                             legend_elements.append(
                                 Line2D([0], [0], marker='D', color='w', markerfacecolor='magenta',
                                        markersize=10, label='Forced Market Order'))
+                            legend_elements.append(
+                                Line2D([0], [0], marker='s', color='w', markerfacecolor='green',
+                                       markeredgecolor='darkgreen', markersize=8, label='Post-Trade Bid'))
+                            legend_elements.append(
+                                Line2D([0], [0], marker='s', color='w', markerfacecolor='red',
+                                       markeredgecolor='darkred', markersize=8, label='Post-Trade Ask'))
                             handles, labels = ax2.get_legend_handles_labels()
                             ax2.legend(handles=legend_elements + handles, loc='upper left')
 
                             ax2.set_title(f"Market Trace [{viz_label}] PnL={viz_pnl:.0f} - Epoch {epoch}")
                             ax2.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
                             ax2.set_ylabel("Price")
-                            ax2.set_xticks(ticks)
+                            ax2.set_xticks(ticks2)
                             ax2.grid(True, alpha=0.3)
 
                             wandb_key = f"market_data_trace_with_trades_{viz_label}"
