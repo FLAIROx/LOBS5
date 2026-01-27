@@ -3006,10 +3006,39 @@ class ESTrainer:
                 # Add current sigma (useful for tracking sigma decay)
                 metrics['es/sigma'] = current_sigma
 
-                # Add full distributions as histograms (for diagnosing fitness/pnl issues)
+                # Add full distributions as matplotlib plots (wandb.Image gives per-epoch step slider)
                 import numpy as np
-                metrics['pnl/distribution'] = wandb.Histogram(np.array(pnls))
-                metrics['fitness/distribution'] = wandb.Histogram(np.array(fitnesses))
+                import matplotlib.pyplot as plt
+
+                pnls_np = np.array(pnls)
+                fitnesses_np = np.array(fitnesses)
+
+                # PnL distribution
+                fig_pnl, ax_pnl = plt.subplots(figsize=(8, 4))
+                ax_pnl.hist(pnls_np, bins=50, color='steelblue', edgecolor='black', alpha=0.7)
+                ax_pnl.axvline(x=float(np.mean(pnls_np)), color='red', linestyle='--',
+                               label=f'Mean={float(np.mean(pnls_np)):.0f}')
+                ax_pnl.axvline(x=0, color='black', linestyle=':', alpha=0.5, label='Breakeven')
+                ax_pnl.set_title(f'PnL Distribution - Epoch {epoch} (N={len(pnls_np)})')
+                ax_pnl.set_xlabel('PnL (cents)')
+                ax_pnl.set_ylabel('Count')
+                ax_pnl.legend()
+                ax_pnl.grid(True, alpha=0.3)
+                metrics['pnl/distribution'] = wandb.Image(fig_pnl)
+                plt.close(fig_pnl)
+
+                # Fitness distribution
+                fig_fit, ax_fit = plt.subplots(figsize=(8, 4))
+                ax_fit.hist(fitnesses_np, bins=50, color='coral', edgecolor='black', alpha=0.7)
+                ax_fit.axvline(x=0, color='black', linestyle='--', label='Mean=0')
+                ax_fit.set_xlim(-0.55, 0.55)
+                ax_fit.set_title(f'Fitness Distribution - Epoch {epoch} (N={len(fitnesses_np)})')
+                ax_fit.set_xlabel('Fitness (rank_transform)')
+                ax_fit.set_ylabel('Count')
+                ax_fit.legend()
+                ax_fit.grid(True, alpha=0.3)
+                metrics['fitness/distribution'] = wandb.Image(fig_fit)
+                plt.close(fig_fit)
 
                 wandb_run.log(metrics)
 
