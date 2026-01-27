@@ -950,7 +950,7 @@ def generate(
 
         print(m_seq_cond[:-1],b_seq_cond[:-1])
         # Split arrays into N chunks along the leading axis
-        N = 5
+        N = 1
         chex.assert_is_divisible(m_seq_cond[:-1].shape[0], N)
         chex.assert_is_divisible(b_seq_cond[:-1].shape[0], N)
         m_seq_cond_split = m_seq_cond[:-1].reshape((N, -1))
