@@ -2132,7 +2132,12 @@ class ESTrainer:
         
         liquidation_quantity_filled = jnp.sum(jnp.where(is_liquidation, jnp.abs(trades[:, 1]), 0))
         liquidation_revenue = jnp.sum(jnp.where(is_liquidation, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
-        
+        liquidation_vwap = jnp.where(
+            liquidation_quantity_filled > 0,
+            liquidation_revenue // liquidation_quantity_filled,
+            0
+        )
+
         # Total metrics
         agent_quantity = final_quant_executed + liquidation_quantity_filled
         
@@ -2197,6 +2202,7 @@ class ESTrainer:
             # Trade visualization traces (shape: (n_steps,))
             'trade_vwap_trace': trade_vwap_trace,   # VWAP of agent trades per step
             'trade_qty_trace': trade_qty_trace,     # Quantity executed per step
+            'liquidation_vwap': liquidation_vwap,   # VWAP of forced market order (0 if none)
         }
 
         # H4: Add Ground Truth Trace for "Whole Data Window" Plot
@@ -2465,6 +2471,10 @@ class ESTrainer:
         example_trade_vwap_trace = infos['trade_vwap_trace'][best_idx]
         example_trade_qty_trace = infos['trade_qty_trace'][best_idx]
 
+        # Forced market order visualization (from best perturbation)
+        example_liquidation_vwap = infos['liquidation_vwap'][best_idx]
+        example_liquidation_qty = infos['liquidation_quantity'][best_idx]
+
         # Historical trade traces (same across perturbations, use [0])
         example_gt_trade_price = infos['gt_trade_price'][0]
         example_gt_trade_qty = infos['gt_trade_qty'][0]
@@ -2486,6 +2496,9 @@ class ESTrainer:
         aggregated_info['example_gt_ask_trace'] = example_gt_ask_trace
         aggregated_info['example_trade_vwap_trace'] = example_trade_vwap_trace
         aggregated_info['example_trade_qty_trace'] = example_trade_qty_trace
+        # Forced market order (from best perturbation)
+        aggregated_info['example_liquidation_vwap'] = example_liquidation_vwap
+        aggregated_info['example_liquidation_qty'] = example_liquidation_qty
         # Historical trade traces
         aggregated_info['example_gt_trade_price'] = example_gt_trade_price
         aggregated_info['example_gt_trade_qty'] = example_gt_trade_qty
@@ -2790,6 +2803,20 @@ class ESTrainer:
                                                  bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
                                                            alpha=0.7, edgecolor='none'))
 
+                            # Add forced market order marker (if liquidation occurred)
+                            liq_qty = float(epoch_info.get('example_liquidation_qty', 0))
+                            if liq_qty > 0:
+                                liq_vwap = float(epoch_info['example_liquidation_vwap'])
+                                liq_x = (n_steps + 1) * n_bg
+                                ax2.scatter(liq_x, liq_vwap, c='magenta', s=120, marker='D',
+                                           edgecolors='black', linewidths=1.0, zorder=6)
+                                ax2.annotate(f'MO:{int(liq_qty)}', (liq_x, liq_vwap),
+                                             textcoords="offset points", xytext=(0, 12),
+                                             ha='center', fontsize=8, fontweight='bold',
+                                             color='darkmagenta',
+                                             bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                                                       alpha=0.7, edgecolor='none'))
+
                             # Add trade legend
                             from matplotlib.lines import Line2D
                             if is_sell_task:
@@ -2810,6 +2837,9 @@ class ESTrainer:
                                     Line2D([0], [0], marker='^', color='w', markerfacecolor='orangered',
                                            markersize=10, label='At/Above Ask'),
                                 ]
+                            legend_elements.append(
+                                Line2D([0], [0], marker='D', color='w', markerfacecolor='magenta',
+                                       markersize=10, label='Forced Market Order'))
                             # Combine with line legends
                             handles, labels = ax2.get_legend_handles_labels()
                             ax2.legend(handles=legend_elements + handles, loc='upper left')
