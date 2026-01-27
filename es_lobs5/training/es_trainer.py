@@ -2976,6 +2976,9 @@ class ESTrainer:
                     # Fitness metrics (rank_transform(pnl), range [-0.5, 0.5])
                     'fitness/mean': fitness_mean,
                     'fitness/std': fitness_std,
+                    # Per-perturbation distribution histograms
+                    'pnl/distribution': wandb.Histogram(pnls.tolist()),
+                    'fitness/distribution': wandb.Histogram(fitnesses.tolist()),
 
                     # Section 1: Normal Orders (Model Steps)
                     'normal_order/quantity': model_qty,
