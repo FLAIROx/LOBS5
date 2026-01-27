@@ -1784,6 +1784,7 @@ class ESTrainer:
 
                 sim_st = process_order_array(sim_st, sim_msg)
                 book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
+                bg_ask, bg_bid = get_best_bid_and_ask(jaxlob_cfg, sim_st.asks, sim_st.bids)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], replayed_msg_tokens])
 
                 new_replay_ptr = replay_ptr + 1
@@ -1791,7 +1792,7 @@ class ESTrainer:
                 new_replay_ptr = jnp.where(new_replay_ptr >= n_replay_msgs, jnp.int32(500), new_replay_ptr)
                 oid_offset = oid_offset + 1
 
-                return (key, msg_hist, hidden, sim_st, book_f, oid_offset, new_replay_ptr), replayed_msg_tokens
+                return (key, msg_hist, hidden, sim_st, book_f, oid_offset, new_replay_ptr), (replayed_msg_tokens, bg_bid, bg_ask)
 
             def world_model_step(wcarry, world_msg_idx):
                 """Generate message autoregressively using world model."""
@@ -1838,10 +1839,11 @@ class ESTrainer:
 
                 sim_st = process_order_array(sim_st, sim_msg)
                 book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
+                bg_ask, bg_bid = get_best_bid_and_ask(jaxlob_cfg, sim_st.asks, sim_st.bids)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], world_msg])
                 oid_offset = oid_offset + 1
 
-                return (key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr), world_msg
+                return (key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr), (world_msg, bg_bid, bg_ask)
 
             # Select background generation function
             n_warmup_cfg = getattr(config, 'n_warmup_msgs', 10)
@@ -1864,12 +1866,13 @@ class ESTrainer:
                 maybe_pvary(replay_ptr_init),
             )
             (key_world, msg_history, hiddens_world, sim_state, book_feat,
-             world_oid_offset, _), _ = jax.lax.scan(
+             world_oid_offset, _), (_, bg_bid_trace, bg_ask_trace) = jax.lax.scan(
                 step_fn_background,
                 background_scan_init,
                 jnp.arange(config.background_msgs_per_step),
                 length=config.background_msgs_per_step,
             )
+            # bg_bid_trace shape: (K,), bg_ask_trace shape: (K,)
 
             # Policy generates action with field-aware constrained decoding
             # field_masks is pre-computed OUTSIDE step_fn to avoid tracer leak
@@ -2014,10 +2017,13 @@ class ESTrainer:
             book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
 
-            # Get best bid/ask for plotting
+            # Get best bid/ask for plotting (post-policy order)
             best_ask, best_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
 
-            # Track trades (count)
+            # Concatenate bg + policy bid/ask into per-step trace (shape: step_width = K+1)
+            step_bid_trace = jnp.concatenate([bg_bid_trace, jnp.array([best_bid])])
+            step_ask_trace = jnp.concatenate([bg_ask_trace, jnp.array([best_ask])])
+
             # Track trades (count)
             step_trades = jnp.sum(is_policy_in_trade)
             accum_trades = accum_trades + step_trades
@@ -2032,10 +2038,10 @@ class ESTrainer:
             accum_submitted = accum_submitted + step_submitted
 
             # Return policy_msg for order analysis (shape: (msg_len,))
-            # Also return trade info for visualization: VWAP, qty, and bid/ask at trade time
+            # step_bid/ask_trace: per-message book state (shape: (step_width,) = (K+1,))
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
                     book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_all_trades, accum_submitted), \
-                   (policy_msg, best_bid, best_ask, step_vwap, step_executed.astype(jnp.float32))
+                   (policy_msg, step_bid_trace, step_ask_trace, step_vwap, step_executed.astype(jnp.float32))
 
         # Run episode
         # H2: Apply pvary to initial carry values when inside shard_map
@@ -2197,8 +2203,10 @@ class ESTrainer:
             'init_mid_price': init_mid_price,
             'init_mid_price': init_mid_price,
             'policy_msgs': policy_msgs_all,    # shape: (n_steps, msg_len) for order analysis
-            'bid_trace': bid_trace,
-            'ask_trace': ask_trace,
+            'sim_bid_trace': bid_trace.reshape(-1),  # (n_steps * step_width,) full per-msg trace
+            'sim_ask_trace': ask_trace.reshape(-1),
+            'bid_trace': bid_trace[:, -1],  # (n_steps,) backward compat: post-policy only
+            'ask_trace': ask_trace[:, -1],
             # Trade visualization traces (shape: (n_steps,))
             'trade_vwap_trace': trade_vwap_trace,   # VWAP of agent trades per step
             'trade_qty_trace': trade_qty_trace,     # Quantity executed per step
@@ -2504,6 +2512,8 @@ class ESTrainer:
         # Add per-perturbation traces (best, worst, mode)
         for label, idx in zip(viz_labels, viz_indices):
             prefix = f'example_{label}'
+            aggregated_info[f'{prefix}_sim_bid_trace'] = infos['sim_bid_trace'][idx]
+            aggregated_info[f'{prefix}_sim_ask_trace'] = infos['sim_ask_trace'][idx]
             aggregated_info[f'{prefix}_bid_trace'] = infos['bid_trace'][idx]
             aggregated_info[f'{prefix}_ask_trace'] = infos['ask_trace'][idx]
             aggregated_info[f'{prefix}_trade_vwap_trace'] = infos['trade_vwap_trace'][idx]
@@ -2808,10 +2818,29 @@ class ESTrainer:
                             viz_pnl = float(epoch_info.get(f'{prefix}_pnl', 0))
                             fig2, ax2 = plt.subplots(figsize=(12, 6), dpi=300)
 
-                            # Plot GT at real simulation positions (gaps at policy order slots)
-                            ax2.plot(gt_sim_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
-                            ax2.plot(gt_sim_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
-                            ax2.plot(gt_sim_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
+                            # Build full bid/ask curves from matching engine state
+                            # Warmup: from GT (no agent during warmup, GT = sim)
+                            # Trading: from per-message simulation trace (510 points)
+                            import numpy as _np
+                            sim_bid_key = f'{prefix}_sim_bid_trace'
+                            if sim_bid_key in epoch_info:
+                                _sb = _np.array(epoch_info[sim_bid_key])  # (510,)
+                                _sa = _np.array(epoch_info[f'{prefix}_sim_ask_trace'])
+                                _sm = (_sb + _sa) / 2
+                                _wx = list(range(-n_warmup, 0))
+                                _sx = list(range(n_steps * step_width))  # 0..509
+                                _fx = _wx + _sx
+                                _fb = _np.concatenate([_np.array(gt_bid[:n_warmup]), _sb])
+                                _fa = _np.concatenate([_np.array(gt_ask[:n_warmup]), _sa])
+                                _fm = _np.concatenate([_np.array(gt_mid[:n_warmup]), _sm])
+                            else:
+                                # Fallback: GT data if sim traces unavailable
+                                _fx = gt_sim_steps
+                                _fa, _fm, _fb = gt_ask, gt_mid, gt_bid
+
+                            ax2.plot(_fx, _fa, label='Sim Ask', color='red', alpha=0.6, linewidth=1.0)
+                            ax2.plot(_fx, _fm, label='Sim Mid', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                            ax2.plot(_fx, _fb, label='Sim Bid', color='green', alpha=0.6, linewidth=1.0)
 
                             # Shade warmup region and add step separators
                             ax2.axvspan(-n_warmup, 0, color='blue', alpha=0.08, label='Warmup')
@@ -2839,11 +2868,12 @@ class ESTrainer:
                                 if qty > 0:  # Trade occurred
                                     x_pos = step_idx * step_width + n_bg  # policy order slot
                                     price = float(trade_vwap[step_idx])
-                                    # Color comparison: use GT bid/ask at step boundary
-                                    gt_idx = n_warmup + (step_idx + 1) * n_bg - 1
-                                    if gt_idx < len(gt_bid):
-                                        bid = float(gt_bid[gt_idx])
-                                        ask = float(gt_ask[gt_idx])
+                                    # Color comparison: use pre-trade sim book state
+                                    # (last bg msg before policy order in this step)
+                                    _pre_idx = step_idx * step_width + n_bg - 1
+                                    if sim_bid_key in epoch_info and _pre_idx < len(_sb):
+                                        bid = float(_sb[_pre_idx])
+                                        ask = float(_sa[_pre_idx])
                                     else:
                                         bid = float(_abd[step_idx]) if _abd is not None else 0
                                         ask = float(_aad[step_idx]) if _aad is not None else 0
