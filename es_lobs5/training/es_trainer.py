@@ -1585,12 +1585,8 @@ class ESTrainer:
         n_replay_msgs = replay_tokens.shape[0] if replay_tokens is not None else 0
 
         # ========================================================================
-        # FLAX MODEL: Extract Flax model for correct token generation
-        # This uses the same code path as run_inference.py (verified correct)
+        # Syntax validation helpers (still used for constrained decoding)
         # ========================================================================
-        flax_train_state = self.flax_train_state
-        flax_model = self.flax_model
-        flax_batchnorm = self.flax_batchnorm
         syntax_valid_mask = self.syntax_valid_mask
         import lob.validation_helpers as valh_module
         # ========================================================================
@@ -1642,19 +1638,17 @@ class ESTrainer:
         )
 
         # ========================================================================
-        # FLAX MODEL: Policy uses Flax model hidden states (same as inference)
-        # NOTE: Flax model expects hidden_size = ssm_size // 2 when conj_sym=True
-        # This matches inference_no_errcorr.py line 1179-1185
+        # ES MODEL: Policy uses ES hidden states (same as world model + warmup)
         # ========================================================================
-        hidden_size_policy = ssm_size // (2 if conj_sym else 1)
-        hiddens_policy = flax_model.initialize_carry(
-            1,  # batch_size
-            hidden_size=hidden_size_policy,
+        hiddens_policy = ES_PaddedLobPredModel.initialize_carry(
+            batch_size=1,
+            ssm_size=ssm_size,
             n_message_layers=fp.get('n_message_layers', 2),
             n_book_pre_layers=fp.get('n_book_pre_layers', 1),
             n_book_post_layers=fp.get('n_book_post_layers', 1),
             n_fused_layers=n_fused,
-            h_size_ema=ssm_size,  # Full size for EMA
+            d_model=d_model,
+            conj_sym=conj_sym,
         )
 
         # Message length based on token mode
@@ -1884,12 +1878,12 @@ class ESTrainer:
             # Using T=1.0 (standard sampling) as default
             temperature = getattr(config, 'temperature', 1.0)
 
-            def sample_policy_token_flax(token_carry, token_pos):
-                """Sample next token using FLAX model (same as run_inference.py).
+            def sample_policy_token_es(token_carry, token_pos):
+                """Sample next token using ES model (perturbed params).
 
-                This replaces the ES model path with the verified-correct Flax path.
-                Uses valh.apply_model() and valh.fill_predicted_tok() for proper
-                token generation with syntax validation.
+                Uses ES_PaddedLobPredModel._forward_step with policy_common_params,
+                which contains iterinfo=(epoch, thread_id) to activate LoRA noise.
+                This matches the HyperscaleES reference implementation.
 
                 Args:
                     token_carry: (key, msg_history, hiddens)
@@ -1901,33 +1895,24 @@ class ESTrainer:
                 # Get syntax validation mask for current token position
                 valid_mask = valh_module.get_valid_mask(syntax_valid_mask, token_pos)
 
-                # Use Flax model (same as inference_no_errcorr._generate_token)
-                # CRITICAL: Pass only the LAST token, not the full sequence!
-                # The RNN hidden state carries all context information.
-                # Passing multiple tokens would produce logits for each token.
-                hidden_p, logits = valh_module.apply_model(
-                    hidden_p,
-                    msg_hist_p[-1:],  # Only LAST token (shape (1,)), not full message!
-                    book_feat[None, :],  # book features
-                    flax_train_state,
-                    flax_model,
-                    flax_batchnorm,
-                    False,  # shift_start
+                # ES model forward (single token)
+                # msg_hist_p[-1:] shape: (1,) — only last token
+                # book_feat[None, :] shape: (1, d_book)
+                hidden_p, log_probs = ES_PaddedLobPredModel._forward_step(
+                    policy_common_params, hidden_p, msg_hist_p[-1:], book_feat[None, :]
                 )
-                # logits shape: (1, 1, n_classes) -> (1, n_classes) after [0]
-                logits = logits[0]
+                # log_probs shape: (1, d_output) — single token, already log_softmax
+                # EMA state: single token → shape (batch, 1, d) → no fix_ema_shape needed
 
-                # Apply syntax validation mask (same as inference)
-                logits = valh_module.filter_valid_pred(logits, valid_mask)
+                # Apply syntax validation mask + renormalize
+                log_probs = valh_module.filter_valid_pred(log_probs, valid_mask)
 
-                # Sample next token (same as inference)
-                # sample_top_n=-1 means sample from full distribution
+                # Sample next token (top_n=-1 = sample from full distribution)
                 next_token_p = valh_module.fill_predicted_tok(
-                    logits, -1, jnp.array([sample_key_p])
+                    log_probs, -1, jnp.array([sample_key_p])
                 )
 
                 # Update message history
-                # next_token_p is shape (1,) from fill_predicted_tok, so use directly
                 msg_hist_p = jnp.concatenate([msg_hist_p[1:], next_token_p])
 
                 # Return scalar token for scan output (squeeze the (1,) array)
@@ -1941,9 +1926,9 @@ class ESTrainer:
                 maybe_pvary_tree(hiddens_policy),
             )
             # Pass token positions (0-23) as xs to enable field-aware masking
-            # NOTE: Using sample_policy_token_flax for correct token generation
+            # ES model path: matches HyperscaleES reference (warmup + token gen use same model)
             (key_policy, msg_history, hiddens_policy), policy_msg = jax.lax.scan(
-                sample_policy_token_flax,  # FLAX model path (verified correct)
+                sample_policy_token_es,  # ES model path
                 policy_token_init,
                 jnp.arange(msg_len, dtype=jnp.int32),
                 length=msg_len,
