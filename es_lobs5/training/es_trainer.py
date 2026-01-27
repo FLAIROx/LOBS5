@@ -2797,6 +2797,13 @@ class ESTrainer:
                                     size = 50 + qty * 3
                                     ax2.scatter(x_pos, price, c=color, s=size, marker=marker,
                                                edgecolors='black', linewidths=0.5, zorder=5)
+                                    # Label each trade marker with its volume
+                                    ax2.annotate(f'{int(qty)}', (x_pos, price),
+                                                 textcoords="offset points", xytext=(0, 12),
+                                                 ha='center', fontsize=8, fontweight='bold',
+                                                 color='black',
+                                                 bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                                                           alpha=0.7, edgecolor='none'))
 
                             # Add trade legend
                             from matplotlib.lines import Line2D
