@@ -211,7 +211,8 @@ CHECKPOINT_DIR="${CHECKPOINT_DIR:-${BASE_DIR}/AlphaTrade/LOBS5/checkpoints/es_ru
 RESUME_FROM="${RESUME_FROM:-}"
 
 # Random seed
-SEED="${SEED:-2026}"
+# SEED="${SEED:-2026}"  # Fixed seed (original)
+SEED="${SEED:-$(date +%H%M%S)}"  # Time-based seed (HHMMSS)
 
 # Token mode
 TOKEN_MODE="${TOKEN_MODE:-24}"
@@ -272,7 +273,7 @@ printf "│            │ RANK_TRANSFORM                    │ %-14s │ %-59s
 echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
 printf "│ System     │ CHECKPOINT_EVERY                  │ %-14s │ %-59s │\n" "${CHECKPOINT_EVERY}" "Epoch frequency to save checkpoints"
 printf "│            │ TOKEN_MODE                        │ %-14s │ %-59s │\n" "${TOKEN_MODE}" "Token vocabulary mode (24 = base-100 encoding)"
-printf "│            │ SEED                              │ %-14s │ %-59s │\n" "${SEED}" "Random seed for reproducibility"
+printf "│            │ SEED                              │ %-14s │ %-59s │\n" "${SEED}" "Random seed (HHMMSS time-based, override via SEED=)"
 echo "├────────────┼───────────────────────────────────┼────────────────────────────────────────────────────────────────────────────┤"
 printf "│ Paths      │ CHECKPOINT                        │ %-78s │\n" "${CHECKPOINT}"
 printf "│            │ DATA_DIR                          │ %-78s │\n" "${DATA_DIR}"
