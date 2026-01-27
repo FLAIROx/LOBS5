@@ -2809,7 +2809,8 @@ class ESTrainer:
                         for i in range(1, n_steps + 1):
                             ticks2.append(i * step_width)  # 51, 102, ..., 510
 
-                        for viz_label in ['best', 'worst', 'mode']:
+                        for _show_pt, viz_label in [(True, 'best'), (True, 'worst'), (True, 'mode'),
+                                                       (False, 'best'), (False, 'worst'), (False, 'mode')]:
                             prefix = f'example_{viz_label}'
                             trade_vwap_key = f'{prefix}_trade_vwap_trace'
                             if trade_vwap_key not in epoch_info:
@@ -2850,7 +2851,7 @@ class ESTrainer:
                             # Agent bid/ask overlay: post-trade book state at policy order slots
                             _abd = epoch_info.get(f'{prefix}_bid_trace')
                             _aad = epoch_info.get(f'{prefix}_ask_trace')
-                            if _abd is not None and _aad is not None:
+                            if _show_pt and _abd is not None and _aad is not None:
                                 for s in range(n_steps):
                                     x_agent = s * step_width + n_bg  # policy order slot: 50,101,...,509
                                     ax2.scatter(x_agent, float(_aad[s]), c='red', s=25,
@@ -2940,12 +2941,13 @@ class ESTrainer:
                             legend_elements.append(
                                 Line2D([0], [0], marker='D', color='w', markerfacecolor='magenta',
                                        markersize=10, label='Forced Market Order'))
-                            legend_elements.append(
-                                Line2D([0], [0], marker='s', color='w', markerfacecolor='green',
-                                       markeredgecolor='darkgreen', markersize=8, label='Post-Trade Bid'))
-                            legend_elements.append(
-                                Line2D([0], [0], marker='s', color='w', markerfacecolor='red',
-                                       markeredgecolor='darkred', markersize=8, label='Post-Trade Ask'))
+                            if _show_pt:
+                                legend_elements.append(
+                                    Line2D([0], [0], marker='s', color='w', markerfacecolor='green',
+                                           markeredgecolor='darkgreen', markersize=8, label='Post-Trade Bid'))
+                                legend_elements.append(
+                                    Line2D([0], [0], marker='s', color='w', markerfacecolor='red',
+                                           markeredgecolor='darkred', markersize=8, label='Post-Trade Ask'))
                             handles, labels = ax2.get_legend_handles_labels()
                             ax2.legend(handles=legend_elements + handles, loc='lower right')
 
@@ -2955,7 +2957,8 @@ class ESTrainer:
                             ax2.set_xticks(ticks2)
                             ax2.grid(True, alpha=0.3)
 
-                            wandb_key = f"market_data_trace_with_trades_{viz_label}"
+                            _suffix = f"with_trades_{viz_label}" if _show_pt else f"clean_{viz_label}"
+                            wandb_key = f"market_trace_{_suffix}"
                             wandb_run.log({wandb_key: wandb.Image(fig2)}, commit=False)
                             plt.close(fig2)
 
