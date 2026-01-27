@@ -2452,28 +2452,34 @@ class ESTrainer:
             self.lobs5_init.params = updated_params
 
         # =========================================================================
-        # Select example perturbation for visualization
-        # Use best pnl perturbation instead of first (more likely to have trades)
+        # Select 3 example perturbations for visualization:
+        #   best (highest PnL), worst (lowest PnL), mode (most typical PnL)
         # =========================================================================
+        import numpy as _np_viz
         best_idx = jnp.argmax(pnls)
+        worst_idx = jnp.argmin(pnls)
+        # Mode: find the most populated histogram bin, pick nearest perturbation
+        _pnls_np = _np_viz.array(pnls)
+        _hist_counts, _hist_edges = _np_viz.histogram(_pnls_np, bins=50)
+        _mode_bin = _np_viz.argmax(_hist_counts)
+        _mode_center = (_hist_edges[_mode_bin] + _hist_edges[_mode_bin + 1]) / 2
+        mode_idx = jnp.argmin(jnp.abs(pnls - _mode_center))
 
-        # Extract one example trace for plotting (from best perturbation)
-        # We must pull this out BEFORE averaging, as averaging traces is meaningless/expensive
+        print(f"[PLOT] Visualization perturbations: "
+              f"best={int(best_idx)} (PnL={float(pnls[best_idx]):.1f}), "
+              f"worst={int(worst_idx)} (PnL={float(pnls[worst_idx]):.1f}), "
+              f"mode={int(mode_idx)} (PnL={float(pnls[mode_idx]):.1f}, "
+              f"bin_center={_mode_center:.1f}, bin_count={int(_hist_counts[_mode_bin])}), "
+              f"out of {len(pnls)} perturbations")
+
+        # Extract traces for each visualization perturbation
         # Note: infos['bid_trace'] shape is (n_perturbations, n_steps)
-        example_bid_trace = infos['bid_trace'][best_idx]
-        example_ask_trace = infos['ask_trace'][best_idx]
+        viz_labels = ['best', 'worst', 'mode']
+        viz_indices = [best_idx, worst_idx, mode_idx]
 
         # Ground Truth Traces (High Res) - same across perturbations, use [0]
         example_gt_bid_trace = infos['gt_bid_trace'][0]
         example_gt_ask_trace = infos['gt_ask_trace'][0]
-
-        # Trade traces for visualization (from best perturbation)
-        example_trade_vwap_trace = infos['trade_vwap_trace'][best_idx]
-        example_trade_qty_trace = infos['trade_qty_trace'][best_idx]
-
-        # Forced market order visualization (from best perturbation)
-        example_liquidation_vwap = infos['liquidation_vwap'][best_idx]
-        example_liquidation_qty = infos['liquidation_quantity'][best_idx]
 
         # Historical trade traces (same across perturbations, use [0])
         example_gt_trade_price = infos['gt_trade_price'][0]
@@ -2489,20 +2495,31 @@ class ESTrainer:
         }
         aggregated_info = {k: jnp.mean(v) for k, v in infos_for_mean.items()}
 
-        # Add example traces back to aggregated info
-        aggregated_info['example_bid_trace'] = example_bid_trace
-        aggregated_info['example_ask_trace'] = example_ask_trace
+        # Add GT traces (shared across all perturbations)
         aggregated_info['example_gt_bid_trace'] = example_gt_bid_trace
         aggregated_info['example_gt_ask_trace'] = example_gt_ask_trace
-        aggregated_info['example_trade_vwap_trace'] = example_trade_vwap_trace
-        aggregated_info['example_trade_qty_trace'] = example_trade_qty_trace
-        # Forced market order (from best perturbation)
-        aggregated_info['example_liquidation_vwap'] = example_liquidation_vwap
-        aggregated_info['example_liquidation_qty'] = example_liquidation_qty
-        # Historical trade traces
         aggregated_info['example_gt_trade_price'] = example_gt_trade_price
         aggregated_info['example_gt_trade_qty'] = example_gt_trade_qty
         aggregated_info['example_gt_trade_side'] = example_gt_trade_side
+
+        # Add per-perturbation traces (best, worst, mode)
+        for label, idx in zip(viz_labels, viz_indices):
+            prefix = f'example_{label}'
+            aggregated_info[f'{prefix}_bid_trace'] = infos['bid_trace'][idx]
+            aggregated_info[f'{prefix}_ask_trace'] = infos['ask_trace'][idx]
+            aggregated_info[f'{prefix}_trade_vwap_trace'] = infos['trade_vwap_trace'][idx]
+            aggregated_info[f'{prefix}_trade_qty_trace'] = infos['trade_qty_trace'][idx]
+            aggregated_info[f'{prefix}_liquidation_vwap'] = infos['liquidation_vwap'][idx]
+            aggregated_info[f'{prefix}_liquidation_qty'] = infos['liquidation_quantity'][idx]
+            aggregated_info[f'{prefix}_pnl'] = pnls[idx]
+
+        # Backward-compatible keys pointing to best perturbation
+        aggregated_info['example_bid_trace'] = infos['bid_trace'][best_idx]
+        aggregated_info['example_ask_trace'] = infos['ask_trace'][best_idx]
+        aggregated_info['example_trade_vwap_trace'] = infos['trade_vwap_trace'][best_idx]
+        aggregated_info['example_trade_qty_trace'] = infos['trade_qty_trace'][best_idx]
+        aggregated_info['example_liquidation_vwap'] = infos['liquidation_vwap'][best_idx]
+        aggregated_info['example_liquidation_qty'] = infos['liquidation_quantity'][best_idx]
 
         return jnp.mean(pnls), pnls, aggregated_info
 
@@ -2705,7 +2722,7 @@ class ESTrainer:
                         gt_steps = list(range(-n_warmup, len(gt_bid) - n_warmup))
 
                         # Step boundary ticks at i * n_bg (pure background messages only)
-                        ticks = [-n_warmup, 0]
+                        ticks = [0]
                         for i in range(1, n_steps + 1):
                             ticks.append(i * n_bg)
 
@@ -2733,8 +2750,18 @@ class ESTrainer:
                         wandb_run.log({"market_data_trace": wandb.Image(fig)}, commit=False)
                         plt.close(fig)
 
-                        # Second chart: Market Data with Trade Markers
-                        if 'example_trade_vwap_trace' in epoch_info:
+                        # Second chart(s): Market Data with Trade Markers
+                        # Generate one chart per visualization perturbation (best, worst, mode)
+                        is_sell_task = getattr(self.config, 'task', 'sell') == 'sell'
+                        from matplotlib.lines import Line2D
+
+                        for viz_label in ['best', 'worst', 'mode']:
+                            prefix = f'example_{viz_label}'
+                            trade_vwap_key = f'{prefix}_trade_vwap_trace'
+                            if trade_vwap_key not in epoch_info:
+                                continue
+
+                            viz_pnl = float(epoch_info.get(f'{prefix}_pnl', 0))
                             fig2, ax2 = plt.subplots(figsize=(12, 6), dpi=300)
 
                             # Plot pure GT background (no agent impact)
@@ -2748,28 +2775,24 @@ class ESTrainer:
                                 ax2.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
 
                             # Agent bid/ask overlay: show agent's observed book state at step boundaries
-                            agent_bid_data = epoch_info.get('example_bid_trace')
-                            agent_ask_data = epoch_info.get('example_ask_trace')
-                            if agent_bid_data is not None and agent_ask_data is not None:
+                            _abd = epoch_info.get(f'{prefix}_bid_trace')
+                            _aad = epoch_info.get(f'{prefix}_ask_trace')
+                            if _abd is not None and _aad is not None:
                                 for s in range(n_steps):
                                     x_agent = (s + 1) * n_bg
-                                    ax2.scatter(x_agent, float(agent_ask_data[s]), c='red', s=25,
+                                    ax2.scatter(x_agent, float(_aad[s]), c='red', s=25,
                                                marker='s', alpha=0.9, zorder=4, edgecolors='darkred', linewidths=0.5)
-                                    ax2.scatter(x_agent, float(agent_bid_data[s]), c='green', s=25,
+                                    ax2.scatter(x_agent, float(_abd[s]), c='green', s=25,
                                                marker='s', alpha=0.9, zorder=4, edgecolors='darkgreen', linewidths=0.5)
 
                             # Get trade traces
-                            trade_vwap = epoch_info['example_trade_vwap_trace']
-                            trade_qty = epoch_info['example_trade_qty_trace']
+                            trade_vwap = epoch_info[trade_vwap_key]
+                            trade_qty = epoch_info[f'{prefix}_trade_qty_trace']
 
                             # Add trade markers
-                            # Determine task type for color logic
-                            is_sell_task = getattr(self.config, 'task', 'sell') == 'sell'
-
                             for step_idx in range(n_steps):
                                 qty = float(trade_qty[step_idx])
                                 if qty > 0:  # Trade occurred
-                                    # X position: at step boundary
                                     x_pos = (step_idx + 1) * n_bg
                                     price = float(trade_vwap[step_idx])
                                     # Color comparison: use GT bid/ask at step boundary
@@ -2778,38 +2801,28 @@ class ESTrainer:
                                         bid = float(gt_bid[gt_idx])
                                         ask = float(gt_ask[gt_idx])
                                     else:
-                                        bid = float(agent_bid_data[step_idx]) if agent_bid_data is not None else 0
-                                        ask = float(agent_ask_data[step_idx]) if agent_ask_data is not None else 0
+                                        bid = float(_abd[step_idx]) if _abd is not None else 0
+                                        ask = float(_aad[step_idx]) if _aad is not None else 0
 
                                     # Determine execution quality color
                                     if is_sell_task:
-                                        # Sell: higher is better (green=at ask, red=at bid)
                                         if price >= ask:
-                                            color = 'limegreen'  # At Ask (best for sell)
-                                            marker = '^'         # Up triangle
+                                            color, mkr = 'limegreen', '^'
                                         elif price > bid:
-                                            color = 'gold'       # In spread
-                                            marker = 'o'         # Circle
+                                            color, mkr = 'gold', 'o'
                                         else:
-                                            color = 'orangered'  # At/Below Bid (worst for sell)
-                                            marker = 'v'         # Down triangle
+                                            color, mkr = 'orangered', 'v'
                                     else:
-                                        # Buy: lower is better (green=at bid, red=at ask)
                                         if price <= bid:
-                                            color = 'limegreen'  # At Bid (best for buy)
-                                            marker = 'v'         # Down triangle
+                                            color, mkr = 'limegreen', 'v'
                                         elif price < ask:
-                                            color = 'gold'       # In spread
-                                            marker = 'o'         # Circle
+                                            color, mkr = 'gold', 'o'
                                         else:
-                                            color = 'orangered'  # At/Above Ask (worst for buy)
-                                            marker = '^'         # Up triangle
+                                            color, mkr = 'orangered', '^'
 
-                                    # Marker size proportional to quantity
                                     size = 50 + qty * 3
-                                    ax2.scatter(x_pos, price, c=color, s=size, marker=marker,
+                                    ax2.scatter(x_pos, price, c=color, s=size, marker=mkr,
                                                edgecolors='black', linewidths=0.5, zorder=5)
-                                    # Label each trade marker with its volume
                                     ax2.annotate(f'{int(qty)}', (x_pos, price),
                                                  textcoords="offset points", xytext=(0, 12),
                                                  ha='center', fontsize=8, fontweight='bold',
@@ -2818,9 +2831,9 @@ class ESTrainer:
                                                            alpha=0.7, edgecolor='none'))
 
                             # Add forced market order marker (if liquidation occurred)
-                            liq_qty = float(epoch_info.get('example_liquidation_qty', 0))
+                            liq_qty = float(epoch_info.get(f'{prefix}_liquidation_qty', 0))
                             if liq_qty > 0:
-                                liq_vwap = float(epoch_info['example_liquidation_vwap'])
+                                liq_vwap = float(epoch_info[f'{prefix}_liquidation_vwap'])
                                 liq_x = (n_steps + 0.5) * n_bg
                                 ax2.scatter(liq_x, liq_vwap, c='magenta', s=120, marker='D',
                                            edgecolors='black', linewidths=1.0, zorder=6)
@@ -2831,8 +2844,7 @@ class ESTrainer:
                                              bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
                                                        alpha=0.7, edgecolor='none'))
 
-                            # Add trade legend
-                            from matplotlib.lines import Line2D
+                            # Legend
                             if is_sell_task:
                                 legend_elements = [
                                     Line2D([0], [0], marker='^', color='w', markerfacecolor='limegreen',
@@ -2854,17 +2866,17 @@ class ESTrainer:
                             legend_elements.append(
                                 Line2D([0], [0], marker='D', color='w', markerfacecolor='magenta',
                                        markersize=10, label='Forced Market Order'))
-                            # Combine with line legends
                             handles, labels = ax2.get_legend_handles_labels()
                             ax2.legend(handles=legend_elements + handles, loc='upper left')
 
-                            ax2.set_title(f"Market Trace with Trades - Epoch {epoch}")
+                            ax2.set_title(f"Market Trace [{viz_label}] PnL={viz_pnl:.0f} - Epoch {epoch}")
                             ax2.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
                             ax2.set_ylabel("Price")
                             ax2.set_xticks(ticks)
                             ax2.grid(True, alpha=0.3)
 
-                            wandb_run.log({"market_data_trace_with_trades": wandb.Image(fig2)}, commit=False)
+                            wandb_key = f"market_data_trace_with_trades_{viz_label}"
+                            wandb_run.log({wandb_key: wandb.Image(fig2)}, commit=False)
                             plt.close(fig2)
 
                         # ==========================================================
