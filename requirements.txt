@@ -7,11 +7,6 @@ scikit-learn
 statsmodels
 
 # JAX (Updated versions that are compatible)
-#jax[cuda13]==0.7.2
-#jax-cuda13-pjrt==0.7.2
-#jax-cuda13-plugin==0.7.2
-#jaxlib==0.7.2
-jaxopt==0.8.5
 optax
 flax
 chex
@@ -19,7 +14,8 @@ dm-tree
 ml-dtypes
 
 # Deep Learning
-tensorflow-probability
+tfp-nightly
+
 
 # RL and Environment Libraries
 gym
@@ -60,20 +56,6 @@ cloudpickle
 pytest
 pytest-cov
 
-# CUDA Support (Optional - uncomment if you have CUDA)
-# nvidia-cublas-cu12
-# nvidia-cuda-cupti-cu12
-# nvidia-cuda-nvcc-cu12
-# nvidia-cuda-nvrtc-cu12
-# nvidia-cuda-runtime-cu12
-# nvidia-cudnn-cu12
-# nvidia-cufft-cu12
-# nvidia-curand-cu12
-# nvidia-cusolver-cu12
-# nvidia-cusparse-cu12
-# nvidia-nccl-cu12
-# nvidia-nvjitlink-cu12
-# nvidia-nvtx-cu12
 
 # Specialized Libraries
 einops

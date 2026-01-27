@@ -1,5 +1,5 @@
 #FROM nvcr.io/nvidia/k8s/container-toolkit:v1.19.0-rc.1
-FROM nvcr.io/nvidia/jax:25.01-py3
+FROM nvcr.io/nvidia/jax:25.10-py3
 
 # Create user
 ARG UID
@@ -32,14 +32,17 @@ RUN
 # Copy requirements.txt and verify its contents
 COPY --chown=${MYUSER}:${MYUSER} requirements.txt /home/${MYUSER}/lobs5/
 RUN ls -l && cat requirements.txt
-RUN python3 -m pip install --upgrade pip
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install -r requirements.txt
+
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 #jaxmarl from source if needed, all the requirements
 # RUN pip install -e .[algs,dev]
-RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
-RUN pip uninstall -y jax jaxlib jax-plugins jax-cuda12-pjrt jax-cuda12-plugin nvidia-cusparse nvidia-cusolver nvidia-cufft nvidia-nccl-cu12 
-RUN pip install -U "jax[cuda13]==0.7.2" "jaxlib[cuda13]==0.7.2" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+# RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+# RUN pip uninstall -y jax jaxlib jax-plugins jax-cuda12-pjrt jax-cuda12-plugin nvidia-cusparse nvidia-cusolver nvidia-cufft nvidia-nccl-cu12 
+# RUN pip install -U "jax[cuda13]==0.7.2" "jaxlib[cuda13]==0.7.2" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 
-RUN pip install -r requirements.txt 
+# RUN pip install -r requirements.txt 
 
 
 RUN wget https://go.dev/dl/go1.24.5.linux-amd64.tar.gz
