@@ -2805,7 +2805,7 @@ class ESTrainer:
                                 w = k % n_bg
                                 gt_sim_steps.append(s * step_width + w)
 
-                        ticks2 = [-n_warmup, 0]
+                        ticks2 = [0]
                         for i in range(1, n_steps + 1):
                             ticks2.append(i * step_width)  # 51, 102, ..., 510
 
@@ -2947,7 +2947,7 @@ class ESTrainer:
                                 Line2D([0], [0], marker='s', color='w', markerfacecolor='red',
                                        markeredgecolor='darkred', markersize=8, label='Post-Trade Ask'))
                             handles, labels = ax2.get_legend_handles_labels()
-                            ax2.legend(handles=legend_elements + handles, loc='upper left')
+                            ax2.legend(handles=legend_elements + handles, loc='lower right')
 
                             ax2.set_title(f"Market Trace [{viz_label}] PnL={viz_pnl:.0f} - Epoch {epoch}")
                             ax2.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
