@@ -186,7 +186,7 @@ BG_MSGS="${BG_MSGS:-50}"
 SIGMA="${SIGMA:-0.2}"             # Initial sigma (0.2 for exploration)
 SIGMA_DECAY="${SIGMA_DECAY:-0.9997}"  # Per-epoch decay (0.9997: 0.2->0.01 over 10k epochs)
 SIGMA_MIN="${SIGMA_MIN:-0.01}"     # Floor value (stop decaying at this value)
-LR="${LR:-0.001}"
+LR="${LR:-1}"
 NOISER="${NOISER:-eggroll}"
 LORA_RANK="${LORA_RANK:-4}"
 
