@@ -174,7 +174,8 @@ DATA_DIR="${DATA_DIR:-${BASE_DIR}/JAN2023/GOOG_24tok_preproc}"
 
 # Training scale
 N_EPOCHS="${N_EPOCHS:-1000000}"
-PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-2048}"
+PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-4096}"
+# PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-2048}"
 # PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-56}" # for FULL mode
 # N_PERTURBATIONS is deprecated but kept for backward compatibility if set explicitly
 N_PERTURBATIONS="${N_PERTURBATIONS:-}" 
@@ -186,7 +187,7 @@ BG_MSGS="${BG_MSGS:-50}"
 SIGMA="${SIGMA:-0.2}"             # Initial sigma (0.2 for exploration)
 SIGMA_DECAY="${SIGMA_DECAY:-0.9997}"  # Per-epoch decay (0.9997: 0.2->0.01 over 10k epochs)
 SIGMA_MIN="${SIGMA_MIN:-0.01}"     # Floor value (stop decaying at this value)
-LR="${LR:-1}"
+LR="${LR:-0.01}"
 NOISER="${NOISER:-eggroll}"
 LORA_RANK="${LORA_RANK:-4}"
 
