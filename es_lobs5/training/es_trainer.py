@@ -1349,7 +1349,6 @@ class ESTrainer:
 
             # DEBUG: Compare sim state after warmup with GT
             if hasattr(self, 'replay_book_data') and self.replay_book_data is not None:
-                from jaxlob.utils import get_best_bid_and_ask
                 jaxlob_cfg = self.sim.config
                 sim_ask, sim_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
                 gt_ask = self.replay_book_data[n_replay, 3]  # after n_replay messages
