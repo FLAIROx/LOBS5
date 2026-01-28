@@ -2182,8 +2182,8 @@ class ESTrainer:
         # doom_quantity: not executed due to insufficient book depth (Doom Orders)
         # NOTE: agent_quantity should never exceed task_size due to truncation
         liquidation_quantity = agent_quantity - model_quantity
-        # Clamp doom_quantity to >= 0 (should not be negative if tracking is correct)
-        doom_quantity = jnp.maximum(0, task_size - agent_quantity)
+        # # Clamp doom_quantity to >= 0 (should not be negative if tracking is correct)
+        # doom_quantity = jnp.maximum(0, task_size - agent_quantity)
 
         # Sanitize pnl: replace non-finite values with 0.0
         # (fitness = rank_transform(pnl) is computed in train_epoch)
@@ -2195,7 +2195,7 @@ class ESTrainer:
             'agent_quantity': agent_quantity,          # total executed = model + liquidation (may be < task_size!)
             'model_quantity': model_quantity,          # executed by model orders (Normal)
             'liquidation_quantity': liquidation_quantity,  # executed by force_market_order (Market)
-            'doom_quantity': doom_quantity,    # NOT executed (Doom)
+            # 'doom_quantity': doom_quantity,    # NOT executed (Doom)
             'submitted_quantity': final_submitted, # Total quantity submitted by model (post-truncation)
             'agent_trades': agent_trades,
             'total_trades': total_trades,      # All trades (world + agent + liquidation)
@@ -2722,13 +2722,13 @@ class ESTrainer:
                 agent_qty = float(epoch_info['agent_quantity'])
                 model_qty = float(epoch_info.get('model_quantity', 0))
                 liquidation_qty = float(epoch_info.get('liquidation_quantity', 0))
-                doom_qty = float(epoch_info.get('doom_quantity', 0))
+                # doom_qty = float(epoch_info.get('doom_quantity', 0))
                 submitted_qty = float(epoch_info.get('submitted_quantity', 0))
 
                 fill_rate = agent_qty / task_size                    # Total fill rate (may be < 1.0!)
                 model_fill_rate = model_qty / task_size              # Model orders fill rate
                 liquidation_fill_rate = liquidation_qty / task_size  # Force market order fill rate
-                unfill_rate = doom_qty / task_size               # Unfilled rate (book depth insufficient)
+                # unfill_rate = doom_qty / task_size               # Unfilled rate (book depth insufficient)
                 
                 # Execution Probability (Filled / Submitted)
                 # Avoid division by zero
@@ -3045,10 +3045,6 @@ class ESTrainer:
                     # Fitness metrics (rank_transform(pnl), range [-0.5, 0.5])
                     'fitness/mean': fitness_mean,
                     'fitness/std': fitness_std,
-                    # Per-perturbation distribution histograms
-                    'pnl/distribution': wandb.Histogram(pnls.tolist()),
-                    'fitness/distribution': wandb.Histogram(fitnesses.tolist()),
-
                     # Section 1: Normal Orders (Model Steps)
                     'normal_order/quantity': model_qty,
                     'normal_order/fill_rate': model_fill_rate,
@@ -3060,9 +3056,9 @@ class ESTrainer:
                     'market_order/quantity': liquidation_qty,
                     'market_order/fill_rate': liquidation_fill_rate,
                     
-                    # Section 3: Doom Orders (Unfilled Penalty)
-                    'doom_order/quantity': doom_qty,
-                    'doom_order/fill_rate': unfill_rate,
+                    # # Section 3: Doom Orders (Unfilled Penalty)
+                    # 'doom_order/quantity': doom_qty,
+                    # 'doom_order/fill_rate': unfill_rate,
 
                     # Section 4: Execution Summary
                     'execution/agent_quantity': agent_qty,
@@ -3197,9 +3193,9 @@ class ESTrainer:
 
                 wandb_run.log(metrics)
 
-                # Print warning if doom_qty > 0
-                if doom_qty > 0:
-                    print(f"[WARNING] Epoch {epoch}: {doom_qty:.0f} shares unfilled (unfill_rate={unfill_rate:.1%})")
+                # # Print warning if doom_qty > 0
+                # if doom_qty > 0:
+                #     print(f"[WARNING] Epoch {epoch}: {doom_qty:.0f} shares unfilled (unfill_rate={unfill_rate:.1%})")
 
             if epoch % 10 == 0:
                 print(f"Epoch {epoch}: pnl_mean={mean_pnl:.4f}, pnl_best={best_pnl:.4f}, pnl_std={jnp.std(pnls):.4f}")
