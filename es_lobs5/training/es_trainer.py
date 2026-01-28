@@ -705,6 +705,43 @@ def get_sim_msg_es(
     return sim_msg, msg_decoded
 
 
+def decode_policy_order_for_viz(
+    policy_msg_tokens: jnp.ndarray,
+    encoder: dict,
+    mid_price: float,
+    tick_size: int,
+    token_mode: int = 24
+) -> dict:
+    """Decode policy order tokens for visualization.
+
+    Args:
+        policy_msg_tokens: Raw policy message tokens (shape: msg_len)
+        encoder: Encoding dictionary for decode_msg
+        mid_price: Mid price at the time of order submission
+        tick_size: Tick size in cents
+        token_mode: Token mode (22 or 24)
+
+    Returns:
+        dict with keys: event_type, side, price, quantity, rel_price
+    """
+    from lob import encoding
+
+    msg_decoded = encoding.decode_msg(policy_msg_tokens, encoder, token_mode=token_mode)
+    event_type = int(msg_decoded[1])  # 1=Limit, 2=Cancel, 3=Delete, 4=Execute
+    side = int(msg_decoded[2])        # 0=Buy, 1=Sell
+    rel_price = int(msg_decoded[4])   # Relative price offset in ticks
+    quantity = int(msg_decoded[5])    # Order quantity
+    abs_price = mid_price + rel_price * tick_size
+
+    return {
+        'event_type': event_type,
+        'side': side,
+        'price': abs_price,
+        'quantity': quantity,
+        'rel_price': rel_price,
+    }
+
+
 def transform_L2_state_wrapper(
     cfg: 'Configuration',
     sim_state: 'LobState',
@@ -779,7 +816,7 @@ def get_mid_price(cfg: 'Configuration', sim_state: 'LobState', tick_size: int = 
     mid = (best_bid + best_ask) // 2
     mid = jnp.where((mid > 0) & jnp.isfinite(mid), mid, DEFAULT_MID)
 
-    return (mid // tick_size) * tick_size
+    return mid
 
 
 class ESTrainer:
@@ -2527,6 +2564,7 @@ class ESTrainer:
             aggregated_info[f'{prefix}_liquidation_vwap'] = infos['liquidation_vwap'][idx]
             aggregated_info[f'{prefix}_liquidation_qty'] = infos['liquidation_quantity'][idx]
             aggregated_info[f'{prefix}_pnl'] = pnls[idx]
+            aggregated_info[f'{prefix}_policy_msgs'] = infos['policy_msgs'][idx]  # Policy order tokens for visualization
 
         # Backward-compatible keys pointing to best perturbation
         aggregated_info['example_bid_trace'] = infos['bid_trace'][best_idx]
@@ -2980,6 +3018,194 @@ class ESTrainer:
                             wandb_key = f"market_trace_{_suffix}"
                             wandb_run.log({wandb_key: wandb.Image(fig2)}, commit=False)
                             plt.close(fig2)
+
+                        # ==========================================================
+                        # NEW: Policy Orders Chart (shows ALL orders, not just filled)
+                        # Includes: unfilled limit orders, cancel orders, and trades
+                        # ==========================================================
+                        for viz_label in ['best', 'worst', 'mode']:
+                            prefix = f'example_{viz_label}'
+                            policy_msgs_key = f'{prefix}_policy_msgs'
+                            if policy_msgs_key not in epoch_info:
+                                continue
+
+                            viz_pnl = float(epoch_info.get(f'{prefix}_pnl', 0))
+                            fig_po, ax_po = plt.subplots(figsize=(12, 6), dpi=300)
+
+                            # Build bid/ask curves (same as market_trace_with_trades)
+                            import numpy as _np
+                            sim_bid_key = f'{prefix}_sim_bid_trace'
+                            if sim_bid_key in epoch_info:
+                                _sb_po = _np.array(epoch_info[sim_bid_key])
+                                _sa_po = _np.array(epoch_info[f'{prefix}_sim_ask_trace'])
+                                _sm_po = (_sb_po + _sa_po) / 2
+                                _wx_po = list(range(-n_warmup, 0))
+                                _sx_po = list(range(n_steps * step_width))
+                                _fx_po = _wx_po + _sx_po
+                                _fb_po = _np.concatenate([_np.array(gt_bid[:n_warmup]), _sb_po])
+                                _fa_po = _np.concatenate([_np.array(gt_ask[:n_warmup]), _sa_po])
+                                _fm_po = _np.concatenate([_np.array(gt_mid[:n_warmup]), _sm_po])
+                            else:
+                                _fx_po = gt_sim_steps
+                                _fa_po, _fm_po, _fb_po = gt_ask, gt_mid, gt_bid
+                                _sb_po, _sa_po = _np.array(gt_bid), _np.array(gt_ask)
+
+                            ax_po.plot(_fx_po, _fa_po, label='Sim Ask', color='red', alpha=0.6, linewidth=1.0)
+                            ax_po.plot(_fx_po, _fm_po, label='Sim Mid', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                            ax_po.plot(_fx_po, _fb_po, label='Sim Bid', color='green', alpha=0.6, linewidth=1.0)
+
+                            ax_po.axvspan(-n_warmup, 0, color='blue', alpha=0.08, label='Warmup')
+                            for i in range(1, n_steps + 1):
+                                ax_po.axvline(x=i * step_width, color='gray', linestyle=':', alpha=0.3)
+
+                            # Get traces
+                            trade_qty_po = epoch_info.get(f'{prefix}_trade_qty_trace')
+                            trade_vwap_po = epoch_info.get(f'{prefix}_trade_vwap_trace')
+                            policy_msgs_po = epoch_info[policy_msgs_key]
+
+                            # Get Y-axis limits after plotting price curves
+                            ax_po.autoscale()
+                            y_min, y_max = ax_po.get_ylim()
+                            y_range = y_max - y_min
+
+                            # Plot ALL policy orders
+                            for step_idx in range(n_steps):
+                                x_pos = step_idx * step_width + n_bg
+
+                                # Calculate mid price at order submission time
+                                pre_order_idx = step_idx * step_width + n_bg - 1
+                                if pre_order_idx < len(_sb_po):
+                                    step_mid = (float(_sb_po[pre_order_idx]) + float(_sa_po[pre_order_idx])) / 2
+                                    pre_bid = float(_sb_po[pre_order_idx])
+                                    pre_ask = float(_sa_po[pre_order_idx])
+                                else:
+                                    step_mid = float(gt_mid[n_warmup])
+                                    pre_bid = float(gt_bid[n_warmup])
+                                    pre_ask = float(gt_ask[n_warmup])
+
+                                # Decode policy order
+                                order = decode_policy_order_for_viz(
+                                    policy_msgs_po[step_idx],
+                                    self.encoder,
+                                    step_mid,
+                                    self.config.tick_size,
+                                    self.config.token_mode
+                                )
+
+                                price = order['price']
+                                qty_ord = order['quantity']
+                                traded_qty = float(trade_qty_po[step_idx]) if trade_qty_po is not None else 0
+
+                                # Handle out-of-range orders with edge arrows
+                                if price > y_max:
+                                    ax_po.annotate('', xy=(x_pos, y_max - y_range * 0.02),
+                                                  xytext=(x_pos, y_max - y_range * 0.08),
+                                                  arrowprops=dict(arrowstyle='->', color='purple', lw=1.5))
+                                    ax_po.annotate(f'{int(price)}', (x_pos, y_max - y_range * 0.01),
+                                                  ha='center', fontsize=6, color='purple')
+                                    continue
+                                elif price < y_min:
+                                    ax_po.annotate('', xy=(x_pos, y_min + y_range * 0.02),
+                                                  xytext=(x_pos, y_min + y_range * 0.08),
+                                                  arrowprops=dict(arrowstyle='->', color='purple', lw=1.5))
+                                    ax_po.annotate(f'{int(price)}', (x_pos, y_min + y_range * 0.01),
+                                                  ha='center', fontsize=6, color='purple')
+                                    continue
+
+                                side_str = 'S' if order['side'] == 1 else 'B'
+
+                                if order['event_type'] == 1:  # Limit Order
+                                    if traded_qty > 0:
+                                        # Filled order - use existing color scheme
+                                        if is_sell_task:
+                                            if price >= pre_ask:
+                                                color, mkr = 'limegreen', '^'
+                                            elif price > pre_bid:
+                                                color, mkr = 'gold', 'o'
+                                            else:
+                                                color, mkr = 'orangered', 'v'
+                                        else:
+                                            if price <= pre_bid:
+                                                color, mkr = 'limegreen', 'v'
+                                            elif price < pre_ask:
+                                                color, mkr = 'gold', 'o'
+                                            else:
+                                                color, mkr = 'orangered', '^'
+                                        size = 50 + traded_qty * 3
+                                        ax_po.scatter(x_pos, price, c=color, s=size, marker=mkr,
+                                                     edgecolors='black', linewidths=0.5, zorder=5)
+                                        ax_po.annotate(f'{int(traded_qty)}{side_str}', (x_pos, price),
+                                                      textcoords="offset points", xytext=(0, 12),
+                                                      ha='center', fontsize=7, fontweight='bold',
+                                                      bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                                                                alpha=0.7, edgecolor='none'))
+                                    else:
+                                        # Unfilled order - blue diamond
+                                        ax_po.scatter(x_pos, price, c='lightblue', s=60, marker='D',
+                                                     edgecolors='blue', linewidths=1, alpha=0.8, zorder=4)
+                                        ax_po.annotate(f'{qty_ord}{side_str}', (x_pos, price),
+                                                      textcoords="offset points", xytext=(0, -15),
+                                                      ha='center', fontsize=7, color='blue')
+                                elif order['event_type'] == 2:  # Cancel
+                                    ax_po.scatter(x_pos, price, c='gray', s=40, marker='x', alpha=0.6, zorder=4)
+                                    ax_po.annotate(f'C{qty_ord}', (x_pos, price),
+                                                  textcoords="offset points", xytext=(0, -12),
+                                                  ha='center', fontsize=6, color='gray')
+
+                            # Add liquidation marker if applicable
+                            liq_qty_po = float(epoch_info.get(f'{prefix}_liquidation_qty', 0))
+                            if liq_qty_po > 0:
+                                liq_vwap_po = float(epoch_info[f'{prefix}_liquidation_vwap'])
+                                liq_x_po = n_steps * step_width + 0.5
+                                ax_po.scatter(liq_x_po, liq_vwap_po, c='magenta', s=120, marker='D',
+                                             edgecolors='black', linewidths=1.0, zorder=6)
+                                ax_po.annotate(f'MO:{int(liq_qty_po)}', (liq_x_po, liq_vwap_po),
+                                              textcoords="offset points", xytext=(0, 12),
+                                              ha='center', fontsize=8, fontweight='bold', color='darkmagenta',
+                                              bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                                                        alpha=0.7, edgecolor='none'))
+
+                            # Legend for policy orders chart
+                            legend_po = [
+                                Line2D([0], [0], marker='D', color='w', markerfacecolor='lightblue',
+                                       markeredgecolor='blue', markersize=10, label='Unfilled Limit Order'),
+                                Line2D([0], [0], marker='x', color='gray', markersize=10, label='Cancel Order'),
+                            ]
+                            if is_sell_task:
+                                legend_po.extend([
+                                    Line2D([0], [0], marker='^', color='w', markerfacecolor='limegreen',
+                                           markersize=10, label='Filled @ Ask'),
+                                    Line2D([0], [0], marker='o', color='w', markerfacecolor='gold',
+                                           markersize=10, label='Filled In Spread'),
+                                    Line2D([0], [0], marker='v', color='w', markerfacecolor='orangered',
+                                           markersize=10, label='Filled @ Bid'),
+                                ])
+                            else:
+                                legend_po.extend([
+                                    Line2D([0], [0], marker='v', color='w', markerfacecolor='limegreen',
+                                           markersize=10, label='Filled @ Bid'),
+                                    Line2D([0], [0], marker='o', color='w', markerfacecolor='gold',
+                                           markersize=10, label='Filled In Spread'),
+                                    Line2D([0], [0], marker='^', color='w', markerfacecolor='orangered',
+                                           markersize=10, label='Filled @ Ask'),
+                                ])
+                            legend_po.append(
+                                Line2D([0], [0], marker='D', color='w', markerfacecolor='magenta',
+                                       markersize=10, label='Forced Market Order'))
+                            legend_po.append(
+                                Line2D([0], [0], marker='^', color='purple', markersize=8,
+                                       label='Out-of-Range Order'))
+                            handles_po, _ = ax_po.get_legend_handles_labels()
+                            ax_po.legend(handles=legend_po + handles_po, loc='lower right', fontsize=7)
+
+                            ax_po.set_title(f"Policy Orders [{viz_label}] PnL={viz_pnl:.0f} - Epoch {epoch}")
+                            ax_po.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
+                            ax_po.set_ylabel("Price")
+                            ax_po.set_xticks(ticks2)
+                            ax_po.grid(True, alpha=0.3)
+
+                            wandb_run.log({f"market_trace_policy_orders_{viz_label}": wandb.Image(fig_po)}, commit=False)
+                            plt.close(fig_po)
 
                         # ==========================================================
                         # Third chart: Market Data with Historical Trades Only
