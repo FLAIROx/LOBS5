@@ -1325,6 +1325,18 @@ class ESTrainer:
         sim_state = self.sim.reset(self.init_book_l2)
         print(f"[INIT-STATE] Initialized JaxLOB with L2 book shape: {self.init_book_l2.shape}")
 
+        # DEBUG: Compare init_book_l2 with GT book data
+        if hasattr(self, 'replay_book_data') and self.replay_book_data is not None:
+            print("="*60)
+            print("[DEBUG-INIT] Comparing initial book state:")
+            print(f"  init_book_l2[0:2] (ask_p1, ask_s1): {self.init_book_l2[0:2]}")
+            print(f"  init_book_l2[2:4] (bid_p1, bid_s1): {self.init_book_l2[2:4]}")
+            print(f"  GT book[0] ask_p1 (col 3): {self.replay_book_data[0, 3]}")
+            print(f"  GT book[0] bid_p1 (col 5): {self.replay_book_data[0, 5]}")
+            print(f"  Diff ask: {float(self.init_book_l2[0]) - float(self.replay_book_data[0, 3])}")
+            print(f"  Diff bid: {float(self.init_book_l2[2]) - float(self.replay_book_data[0, 5])}")
+            print("="*60)
+
         # 2. Warmup: replay messages to initialize order book state
         n_warmup = getattr(config, 'n_warmup_msgs', 10)
         n_replay = min(n_warmup, len(self.replay_data_raw))
@@ -1334,6 +1346,21 @@ class ESTrainer:
             replay_jaxlob = msgs_to_jnp(replay_msgs_raw)
             sim_state = self.sim.process_orders_array(sim_state, replay_jaxlob)
             print(f"[INIT-STATE] Replayed {n_replay} warmup messages")
+
+            # DEBUG: Compare sim state after warmup with GT
+            if hasattr(self, 'replay_book_data') and self.replay_book_data is not None:
+                from jaxlob.utils import get_best_bid_and_ask
+                jaxlob_cfg = self.sim.config
+                sim_ask, sim_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
+                gt_ask = self.replay_book_data[n_replay, 3]  # after n_replay messages
+                gt_bid = self.replay_book_data[n_replay, 5]
+                print("="*60)
+                print(f"[DEBUG-WARMUP] After {n_replay} warmup messages:")
+                print(f"  Sim ask: {sim_ask}, Sim bid: {sim_bid}")
+                print(f"  GT  ask: {gt_ask}, GT  bid: {gt_bid}")
+                print(f"  Diff ask: {float(sim_ask) - float(gt_ask)}")
+                print(f"  Diff bid: {float(sim_bid) - float(gt_bid)}")
+                print("="*60)
 
         # 3. Build context tokens from replay_tokens (encoded by LOBSTER_Dataset)
         # CRITICAL: Do NOT pad with zeros - zeros are MASK tokens which corrupt RNN hidden states!
