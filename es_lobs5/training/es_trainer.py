@@ -2107,9 +2107,11 @@ class ESTrainer:
 
             # Return policy_msg for order analysis (shape: (msg_len,))
             # step_bid/ask_trace: per-message book state (shape: (step_width,) = (K+1,))
+            # bg_bid/ask_trace: pure background replay trace (shape: (K,)) - NO policy order
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
                     book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_all_trades, accum_submitted), \
-                   (policy_msg, step_bid_trace, step_ask_trace, step_vwap, step_executed.astype(jnp.float32))
+                   (policy_msg, step_bid_trace, step_ask_trace, step_vwap, step_executed.astype(jnp.float32),
+                    bg_bid_trace, bg_ask_trace)
 
         # Run episode
         # H2: Apply pvary to initial carry values when inside shard_map
@@ -2130,8 +2132,10 @@ class ESTrainer:
         )
         # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
         # Also capture trade traces: vwap, qty, bid, ask at each step for visualization
+        # pure_replay_bid/ask_trace: background-only replay (no policy) for GT comparison
         (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue, final_trades, final_all_trades, final_submitted), \
-            (policy_msgs_all, bid_trace, ask_trace, trade_vwap_trace, trade_qty_trace) = jax.lax.scan(
+            (policy_msgs_all, bid_trace, ask_trace, trade_vwap_trace, trade_qty_trace,
+             pure_replay_bid_trace, pure_replay_ask_trace) = jax.lax.scan(
             step_fn,
             main_scan_init,
             jnp.arange(config.n_steps),
@@ -2279,6 +2283,11 @@ class ESTrainer:
             'trade_vwap_trace': trade_vwap_trace,   # VWAP of agent trades per step
             'trade_qty_trace': trade_qty_trace,     # Quantity executed per step
             'liquidation_vwap': liquidation_vwap,   # VWAP of forced market order (0 if none)
+            # Pure replay traces: background messages only, NO policy orders
+            # Shape: (n_steps, n_bg) → flatten to (n_steps * n_bg,)
+            # Used to compare JaxLOB replay accuracy vs GT (LOBSTER orderbook snapshots)
+            'pure_replay_bid_trace': pure_replay_bid_trace.reshape(-1),
+            'pure_replay_ask_trace': pure_replay_ask_trace.reshape(-1),
         }
 
         # H4: Add Ground Truth Trace for "Whole Data Window" Plot
@@ -2578,6 +2587,11 @@ class ESTrainer:
         aggregated_info['example_gt_trade_qty'] = example_gt_trade_qty
         aggregated_info['example_gt_trade_side'] = example_gt_trade_side
 
+        # Pure replay traces (same for all perturbations - no policy orders)
+        # Used to verify JaxLOB replay accuracy vs GT
+        aggregated_info['example_pure_replay_bid_trace'] = infos['pure_replay_bid_trace'][0]
+        aggregated_info['example_pure_replay_ask_trace'] = infos['pure_replay_ask_trace'][0]
+
         # Add per-perturbation traces (best, worst, mode)
         for label, idx in zip(viz_labels, viz_indices):
             prefix = f'example_{label}'
@@ -2869,6 +2883,73 @@ class ESTrainer:
                         # Log to WandB
                         wandb_run.log({"market_data_trace": wandb.Image(fig)}, commit=False)
                         plt.close(fig)
+
+                        # =====================================================================
+                        # NEW: Pure Replay vs GT Verification Chart
+                        # Compares JaxLOB replay (no agent) with LOBSTER orderbook snapshots
+                        # If these differ, it indicates simulator accuracy issues
+                        # =====================================================================
+                        if 'example_pure_replay_bid_trace' in epoch_info:
+                            pure_bid = epoch_info['example_pure_replay_bid_trace']
+                            pure_ask = epoch_info['example_pure_replay_ask_trace']
+
+                            # pure_replay has shape (n_steps * n_bg,) - only trading phase
+                            # GT has shape (n_warmup + n_steps * n_bg,)
+                            # We need to compare trading phase only: gt[n_warmup:]
+                            gt_trading_bid = gt_bid[n_warmup:]
+                            gt_trading_ask = gt_ask[n_warmup:]
+
+                            # Align lengths (they should match)
+                            min_len = min(len(pure_bid), len(gt_trading_bid))
+                            pure_bid = _np.array(pure_bid[:min_len])
+                            pure_ask = _np.array(pure_ask[:min_len])
+                            gt_trading_bid = _np.array(gt_trading_bid[:min_len])
+                            gt_trading_ask = _np.array(gt_trading_ask[:min_len])
+
+                            fig_pr, (ax_pr1, ax_pr2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+
+                            # Top: Overlay comparison
+                            x_vals = list(range(min_len))
+                            ax_pr1.plot(x_vals, gt_trading_ask, label='GT Ask', color='red', alpha=0.7, linewidth=1.0)
+                            ax_pr1.plot(x_vals, pure_ask, label='Pure Replay Ask', color='orange', alpha=0.7, linewidth=1.0, linestyle='--')
+                            ax_pr1.plot(x_vals, gt_trading_bid, label='GT Bid', color='green', alpha=0.7, linewidth=1.0)
+                            ax_pr1.plot(x_vals, pure_bid, label='Pure Replay Bid', color='lime', alpha=0.7, linewidth=1.0, linestyle='--')
+
+                            # Add step separators
+                            for i in range(1, n_steps + 1):
+                                ax_pr1.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+
+                            ax_pr1.set_title(f"Pure Replay vs GT (#{self.replay_file_idx} {self.replay_data_date}) - Epoch {epoch}")
+                            ax_pr1.set_ylabel("Price")
+                            ax_pr1.legend(loc='upper right')
+                            ax_pr1.grid(True, alpha=0.3)
+
+                            # Bottom: Difference plot
+                            diff_bid = pure_bid - gt_trading_bid
+                            diff_ask = pure_ask - gt_trading_ask
+                            ax_pr2.plot(x_vals, diff_ask, label='Diff Ask (Sim-GT)', color='red', alpha=0.7)
+                            ax_pr2.plot(x_vals, diff_bid, label='Diff Bid (Sim-GT)', color='green', alpha=0.7)
+                            ax_pr2.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+
+                            # Add step separators
+                            for i in range(1, n_steps + 1):
+                                ax_pr2.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+
+                            ax_pr2.set_xlabel("Message Index (Trading Phase)")
+                            ax_pr2.set_ylabel("Price Difference")
+                            ax_pr2.legend(loc='upper right')
+                            ax_pr2.grid(True, alpha=0.3)
+
+                            # Add summary stats as text
+                            max_diff = max(abs(diff_bid).max(), abs(diff_ask).max())
+                            mean_diff = (abs(diff_bid).mean() + abs(diff_ask).mean()) / 2
+                            ax_pr2.text(0.02, 0.95, f"Max |Diff|: {max_diff:.0f}, Mean |Diff|: {mean_diff:.1f}",
+                                       transform=ax_pr2.transAxes, fontsize=10, verticalalignment='top',
+                                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+                            plt.tight_layout()
+                            wandb_run.log({"pure_replay_vs_gt": wandb.Image(fig_pr)}, commit=False)
+                            plt.close(fig_pr)
 
                         # Second chart(s): Market Data with Trade Markers
                         # Generate one chart per visualization perturbation (best, worst, mode)
