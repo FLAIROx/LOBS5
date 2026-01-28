@@ -3133,7 +3133,7 @@ class ESTrainer:
                 ax_pnl2.grid(True, alpha=0.3)
 
                 plt.tight_layout()
-                metrics['pnl/distribution'] = wandb.Image(fig_pnl)
+                metrics['pnl/distribution_plot'] = wandb.Image(fig_pnl)
                 plt.close(fig_pnl)
 
                 # Fitness distribution (histogram for heatmap view)
@@ -3188,7 +3188,7 @@ class ESTrainer:
                 ax_fit2.grid(True, alpha=0.3)
 
                 plt.tight_layout()
-                metrics['fitness/distribution'] = wandb.Image(fig_fit)
+                metrics['fitness/distribution_plot'] = wandb.Image(fig_fit)
                 plt.close(fig_fit)
 
                 wandb_run.log(metrics)
