@@ -3045,6 +3045,9 @@ class ESTrainer:
                     # Fitness metrics (rank_transform(pnl), range [-0.5, 0.5])
                     'fitness/mean': fitness_mean,
                     'fitness/std': fitness_std,
+                    # Per-perturbation distribution histograms (will be overridden by Image below)
+                    'pnl/distribution': wandb.Histogram(pnls.tolist()),
+                    'fitness/distribution': wandb.Histogram(fitnesses.tolist()),
                     # Section 1: Normal Orders (Model Steps)
                     'normal_order/quantity': model_qty,
                     'normal_order/fill_rate': model_fill_rate,
@@ -3133,7 +3136,10 @@ class ESTrainer:
                 ax_pnl2.grid(True, alpha=0.3)
 
                 plt.tight_layout()
-                metrics['pnl/distribution_plot'] = wandb.Image(fig_pnl)
+                # Try 3 ways to log the same figure (debug: see which panel renders correctly)
+                metrics['pnl/distribution'] = wandb.Image(fig_pnl)       # Way 1: override Histogram
+                metrics['pnl/distribution_plot'] = wandb.Image(fig_pnl)  # Way 2: fresh key
+                wandb_run.log({"pnl/distribution_img": wandb.Image(fig_pnl)}, commit=False)  # Way 3: separate log
                 plt.close(fig_pnl)
 
                 # Fitness distribution (histogram for heatmap view)
@@ -3188,7 +3194,9 @@ class ESTrainer:
                 ax_fit2.grid(True, alpha=0.3)
 
                 plt.tight_layout()
-                metrics['fitness/distribution_plot'] = wandb.Image(fig_fit)
+                metrics['fitness/distribution'] = wandb.Image(fig_fit)       # Way 1: override Histogram
+                metrics['fitness/distribution_plot'] = wandb.Image(fig_fit)  # Way 2: fresh key
+                wandb_run.log({"fitness/distribution_img": wandb.Image(fig_fit)}, commit=False)  # Way 3: separate log
                 plt.close(fig_fit)
 
                 wandb_run.log(metrics)
