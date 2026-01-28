@@ -2834,7 +2834,7 @@ class ESTrainer:
 
                         ax.set_xticks(ticks)
 
-                        ax.set_title(f"Market Trace (Data Window) - Epoch {epoch}")
+                        ax.set_title(f"Market Trace (Data Window #{self.replay_file_idx} {self.replay_data_date}) - Epoch {epoch}")
                         ax.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
                         ax.set_ylabel("Price")
                         ax.legend()
@@ -3008,7 +3008,7 @@ class ESTrainer:
                             handles, labels = ax2.get_legend_handles_labels()
                             ax2.legend(handles=legend_elements + handles, loc='lower right')
 
-                            ax2.set_title(f"Market Trace [{viz_label}] PnL={viz_pnl:.0f} - Epoch {epoch}")
+                            ax2.set_title(f"Market Trace [{viz_label}] PnL={viz_pnl:.0f} (#{self.replay_file_idx} {self.replay_data_date}) - Epoch {epoch}")
                             ax2.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
                             ax2.set_ylabel("Price")
                             ax2.set_xticks(ticks2)
@@ -3198,7 +3198,7 @@ class ESTrainer:
                             handles_po, _ = ax_po.get_legend_handles_labels()
                             ax_po.legend(handles=legend_po + handles_po, loc='lower right', fontsize=7)
 
-                            ax_po.set_title(f"Policy Orders [{viz_label}] PnL={viz_pnl:.0f} - Epoch {epoch}")
+                            ax_po.set_title(f"Policy Orders [{viz_label}] PnL={viz_pnl:.0f} (#{self.replay_file_idx} {self.replay_data_date}) - Epoch {epoch}")
                             ax_po.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
                             ax_po.set_ylabel("Price")
                             ax_po.set_xticks(ticks2)
@@ -3266,7 +3266,7 @@ class ESTrainer:
                                 handles, labels = ax3.get_legend_handles_labels()
                                 ax3.legend(handles=legend_elements + handles, loc='upper left')
 
-                                ax3.set_title(f"Market Trace with Historical Trades - Epoch {epoch}")
+                                ax3.set_title(f"Market Trace with Historical Trades (#{self.replay_file_idx} {self.replay_data_date}) - Epoch {epoch}")
                                 ax3.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
                                 ax3.set_ylabel("Price")
                                 ax3.set_xticks(ticks)
