@@ -96,6 +96,7 @@ from jax.experimental.multihost_utils import process_allgather
 from functools import partial
 import argparse
 from tqdm import tqdm
+import optax
 import time
 from typing import Tuple, Optional, NamedTuple, Dict, Any
 
@@ -445,6 +446,10 @@ def create_es_config():
     parser.add_argument('--sigma_min', type=float, default=0.01,
                         help='Minimum sigma (floor). Default: 0.01')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--lr_decay', type=float, default=0.9997,
+                        help='LR decay rate per epoch. Default: 0.9997')
+    parser.add_argument('--lr_min', type=float, default=0.001,
+                        help='Minimum LR (floor). Default: 0.001')
     parser.add_argument('--lora_rank', type=int, default=4, help='LORA rank')
 
     # Training mode (replaces use_lora, freeze_nonlora, lora_v2, freeze_ssm)
@@ -2650,6 +2655,8 @@ class ESTrainer:
                         'sigma_decay': getattr(self.config, 'sigma_decay', 1.0),
                         'sigma_min': getattr(self.config, 'sigma_min', 0.01),
                         'lr': self.config.lr,
+                        'lr_decay': getattr(self.config, 'lr_decay', 1.0),
+                        'lr_min': getattr(self.config, 'lr_min', 0.001),
                         'lora_rank': self.config.lora_rank,
                         'checkpoint': self.config.lobs5_checkpoint,
                         'background_mode': self.config.background_mode,
@@ -2669,6 +2676,10 @@ class ESTrainer:
         sigma_init = self.config.sigma
         sigma_decay = getattr(self.config, 'sigma_decay', 1.0)
         sigma_min = getattr(self.config, 'sigma_min', 0.01)
+        # LR decay setup (mirrors sigma decay)
+        lr_init = self.config.lr
+        lr_decay = getattr(self.config, 'lr_decay', 1.0)
+        lr_min = getattr(self.config, 'lr_min', 0.001)
 
         for epoch in tqdm(range(start_epoch, n_epochs), desc='ES Training', initial=start_epoch, total=n_epochs):
             key, epoch_key = jax.random.split(key)
@@ -2679,6 +2690,13 @@ class ESTrainer:
                 self.noiser_params["sigma"] = current_sigma
             else:
                 current_sigma = sigma_init
+
+            # Apply lr decay: lr_n = max(lr_0 × decay^n, lr_min)
+            if lr_decay < 1.0:
+                current_lr = max(lr_init * (lr_decay ** epoch), lr_min)
+                self.frozen_noiser_params["solver"] = optax.sgd(current_lr)
+            else:
+                current_lr = lr_init
 
             mean_pnl, pnls, epoch_info = self.train_epoch(
                 epoch_key, epoch, initial_sim_state, initial_msg_history
@@ -3074,6 +3092,7 @@ class ESTrainer:
 
                 # Add current sigma (useful for tracking sigma decay)
                 metrics['es/sigma'] = current_sigma
+                metrics['es/lr'] = current_lr
 
                 # Add full distributions as matplotlib plots (wandb.Image gives per-epoch step slider)
                 import numpy as np
