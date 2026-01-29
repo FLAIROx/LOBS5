@@ -2890,6 +2890,7 @@ class ESTrainer:
                         # If these differ, it indicates simulator accuracy issues
                         # =====================================================================
                         if 'example_pure_replay_bid_trace' in epoch_info:
+                            import numpy as _np  # Import here to avoid scope issues
                             pure_bid = epoch_info['example_pure_replay_bid_trace']
                             pure_ask = epoch_info['example_pure_replay_ask_trace']
 
