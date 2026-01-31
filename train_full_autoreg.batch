@@ -39,7 +39,7 @@ echo "============================================"
 # If not set, defaults to individual parameter values below
 # PER_GPU_BSZ overrides the preset's batch size (optional)
 # ============================================
-MODEL_PRESET=${MODEL_PRESET:-1B}
+MODEL_PRESET=${MODEL_PRESET:-55M}
 echo "[*] Model preset: $MODEL_PRESET"
 export MODEL_PRESET
 
@@ -54,6 +54,22 @@ if [ -n "$CURTAIL_EPOCHS" ]; then
     echo "[*] Curtail epochs: $CURTAIL_EPOCHS steps (quick test mode)"
     export CURTAIL_EPOCHS
 fi
+
+# ============================================
+# TBPTT (Truncated Backpropagation Through Time)
+# ============================================
+# Reduces XLA compilation memory by splitting sequences into chunks
+# Memory reduction: ~94% with 4 chunks, ~98% with 8 chunks
+#
+# Usage:
+#   USE_TBPTT=True sbatch train_full_autoreg.batch          # Enable TBPTT with 4 chunks
+#   USE_TBPTT=True N_TBPTT_CHUNKS=8 sbatch train_full_autoreg.batch  # 8 chunks
+#   USE_TBPTT=False sbatch train_full_autoreg.batch         # Disable TBPTT
+# ============================================
+USE_TBPTT=${USE_TBPTT:-True}
+N_TBPTT_CHUNKS=${N_TBPTT_CHUNKS:-4}
+echo "[*] TBPTT: $USE_TBPTT (chunks: $N_TBPTT_CHUNKS)"
+export USE_TBPTT N_TBPTT_CHUNKS
 
 # Create logs directory
 mkdir -p logs_lobs5
@@ -280,6 +296,8 @@ python -u -B run_train.py \
     --lr_patience=2 \
     --use_bf16=True \
     --token_mode=24 \
+    --use_tbptt='"$USE_TBPTT"' \
+    --n_tbptt_chunks='"$N_TBPTT_CHUNKS"' \
     ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS} \
 '
     # NOTE: The following parameters are now controlled by --model_preset:
