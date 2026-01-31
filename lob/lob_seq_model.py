@@ -62,7 +62,7 @@ class LobPredModel(nn.Module):
                             bn_momentum=self.bn_momentum,
                             step_rescale=self.step_rescale,
                                         )
-        self.decoder = nn.Dense(self.d_output)
+        self.decoder = nn.Dense(self.d_output, use_bias=False)
 
     def __call__(self, x, integration_timesteps):
         """
@@ -181,7 +181,7 @@ class LobBookModel(nn.Module):
                 step_rescale=self.step_rescale,
                 dtype=compute_dtype,
             ) for _ in range(self.n_pre_layers))
-        self.projection = nn.Dense(self.d_model, dtype=compute_dtype)  # project to d_model
+        self.projection = nn.Dense(self.d_model, dtype=compute_dtype, use_bias=False)  # project to d_model
         self.post_layers = tuple(
             SequenceLayer(
                 ssm=self.ssm,
@@ -295,7 +295,7 @@ class FullLobPredModel(nn.Module):
             dtype=compute_dtype,
         )
         # applied to transposed message output to get seq len for fusion
-        self.message_out_proj = nn.Dense(self.d_model, dtype=compute_dtype)
+        self.message_out_proj = nn.Dense(self.d_model, dtype=compute_dtype, use_bias=False)
         self.book_encoder = LobBookModel(
             ssm=self.ssm,
             d_book=self.d_book,
@@ -312,7 +312,7 @@ class FullLobPredModel(nn.Module):
             dtype=compute_dtype,
         )
         # applied to transposed book output to get seq len for fusion
-        self.book_out_proj = nn.Dense(self.d_model, dtype=compute_dtype)
+        self.book_out_proj = nn.Dense(self.d_model, dtype=compute_dtype, use_bias=False)
         self.fused_s5 = StackedEncoderModel(
             ssm=self.ssm,
             d_model=self.d_model,
@@ -327,7 +327,7 @@ class FullLobPredModel(nn.Module):
             dtype=compute_dtype,
         )
         # Decoder stays in FP32 for numerical stability
-        self.decoder = nn.Dense(self.d_output)
+        self.decoder = nn.Dense(self.d_output, use_bias=False)
 
     def __call__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):
         """
@@ -462,7 +462,7 @@ class PaddedLobPredModel(nn.Module):
             dtype=compute_dtype,
         )
         # Decoder stays in FP32 for numerical stability
-        self.decoder = nn.Dense(self.d_output)
+        self.decoder = nn.Dense(self.d_output, use_bias=False)
 
     def __call__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):
         """
@@ -470,7 +470,7 @@ class PaddedLobPredModel(nn.Module):
         (L_m x d_input, L_b x [P+1]) input sequence tuple,
         combining message and book inputs.
         Args:
-             x_m: message input sequence (L_m x d_input, 
+             x_m: message input sequence (L_m x d_input,
              x_b: book state (volume series) (L_b x [P+1])
         Returns:
             output (float32): (d_output)

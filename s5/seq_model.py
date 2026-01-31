@@ -54,7 +54,7 @@ class StackedEncoderModel(nn.Module):
         if self.use_embed_layer:
             self.encoder = nn.Embed(self.vocab_size, self.d_model, dtype=compute_dtype)
         else:
-            self.encoder = nn.Dense(self.d_model, dtype=compute_dtype)
+            self.encoder = nn.Dense(self.d_model, dtype=compute_dtype, use_bias=False)
 
         #NOTE:  popjaxrl S5 doesn't have an encoding layer, tbd if this makes a differnce.
 
@@ -203,7 +203,7 @@ class ClassificationModel(nn.Module):
                             bn_momentum=self.bn_momentum,
                             step_rescale=self.step_rescale,
                                         )
-        self.decoder = nn.Dense(self.d_output)
+        self.decoder = nn.Dense(self.d_output, use_bias=False)
 
     def __call__(self, x, integration_timesteps):
         """
@@ -266,8 +266,8 @@ class RetrievalDecoder(nn.Module):
         """
         Initializes 2 dense layers to be used for the MLP.
         """
-        self.layer1 = nn.Dense(self.d_model)
-        self.layer2 = nn.Dense(self.d_output)
+        self.layer1 = nn.Dense(self.d_model, use_bias=False)
+        self.layer2 = nn.Dense(self.d_output, use_bias=False)
 
     def __call__(self, x):
         """
