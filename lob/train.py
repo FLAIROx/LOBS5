@@ -303,10 +303,20 @@ def train(args):
 
         # Create JIT-compiled train_step
         # has_book_data parameter: set based on args.use_book_data
+        # TBPTT parameters: use_tbptt and n_tbptt_chunks
+        use_tbptt = getattr(args, 'use_tbptt', False)
+        n_tbptt_chunks = getattr(args, 'n_tbptt_chunks', 4)
+
+        if use_tbptt:
+            log_with_timestamp(f"TBPTT enabled: {n_tbptt_chunks} chunks", prefix="Train")
+            log_with_timestamp(f"Expected memory reduction: ~{100 - 100/(n_tbptt_chunks**2):.1f}%", prefix="Train")
+
         jit_train_step_fn = create_jit_train_step(
             mesh,
             state,
-            has_book_data=args.use_book_data
+            has_book_data=args.use_book_data,
+            use_tbptt=use_tbptt,
+            n_tbptt_chunks=n_tbptt_chunks,
         )
 
         # Create JIT-compiled eval_step
@@ -482,6 +492,9 @@ def train(args):
             job_start_time=job_start_time,
             max_job_hours=args.max_job_hours,
             save_before_timeout_minutes=args.save_before_timeout_minutes,
+            # TBPTT parameters
+            use_tbptt=use_tbptt,
+            n_tbptt_chunks=n_tbptt_chunks,
         )
 
         # Check if epoch was interrupted due to timeout

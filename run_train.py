@@ -307,6 +307,39 @@ if __name__ == "__main__":
 				     "Use <1.0 for more conservative, >1.0 for more aggressive.")
 
 	# ============================================================================
+	# TBPTT (Truncated Backpropagation Through Time) Gradient Chunking
+	# ============================================================================
+	#
+	# TBPTT splits long sequences into chunks for gradient computation, reducing
+	# XLA compilation memory by O(1/n_chunks²). Use this when:
+	#   - Sequence length is very long (>10k tokens)
+	#   - XLA compilation runs out of memory
+	#   - You want to trade training speed for memory efficiency
+	#
+	# Usage:
+	#   # Enable TBPTT with 4 chunks (reduces memory to ~1/16):
+	#   python run_train.py --model_preset 55M --use_tbptt True --n_tbptt_chunks 4
+	#
+	#   # More chunks = lower memory, slower training:
+	#   python run_train.py --model_preset 55M --use_tbptt True --n_tbptt_chunks 8
+	#
+	# How it works:
+	#   1. Sequence (BSZ, L) is split into (n_chunks, BSZ, L/n_chunks)
+	#   2. Each chunk computes forward pass + gradients independently
+	#   3. Gradients are accumulated and averaged
+	#   4. XLA only compiles for chunk_size, not full sequence length
+	#
+	# Memory formula: expected_memory ≈ (1/n_chunks)² × original_memory
+	#   - 4 chunks: ~6.25% of original (~94% reduction)
+	#   - 8 chunks: ~1.56% of original (~98% reduction)
+	#
+	# ============================================================================
+	parser.add_argument("--use_tbptt", type=str2bool, default=False,
+				help="Enable TBPTT gradient chunking to reduce XLA compilation memory")
+	parser.add_argument("--n_tbptt_chunks", type=int, default=4,
+				help="Number of chunks for TBPTT gradient accumulation (default: 4)")
+
+	# ============================================================================
 	# Step-Level Checkpointing for Long-Running Jobs (12.5-14h epochs, 24h max)
 	# ============================================================================
 	#
