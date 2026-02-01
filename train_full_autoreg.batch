@@ -2,20 +2,16 @@
 #SBATCH --job-name=lobs5_autoreg
 #SBATCH --output=logs_lobs5/lobs5_%j.out
 #SBATCH --error=logs_lobs5/lobs5_%j.err
-# === 1-node config (commented out) ===
-# #SBATCH --nodes=1
-
-# === 25-node 360M config (active) ===
-#SBATCH --nodes=25
+# === 1-node config (for 55M model testing) ===
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
 #SBATCH --time=23:59:59
-#SBATCH --contiguous
 #SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
 
-# === 25-node 360M config: micro_bsz=8 ===
-export PER_GPU_BSZ=8
+# === Default config for 55M model ===
+export PER_GPU_BSZ=${PER_GPU_BSZ:-28}
 
 echo "============================================"
 echo "Job started at: $(date)"
@@ -58,32 +54,57 @@ fi
 # ============================================
 # TBPTT (Truncated Backpropagation Through Time)
 # ============================================
-# Reduces XLA compilation memory by splitting sequences into chunks
-# Memory reduction: ~94% with 4 chunks, ~98% with 8 chunks
+# Two modes available:
+#   1. gradient_chunking: splits sequence, no hidden state carry (simpler)
+#   2. ar_hidden: True TBPTT with hidden state carry across windows (O(log L))
 #
 # Usage:
-#   USE_TBPTT=True sbatch train_full_autoreg.batch          # Enable TBPTT with 4 chunks
-#   USE_TBPTT=True N_TBPTT_CHUNKS=8 sbatch train_full_autoreg.batch  # 8 chunks
-#   USE_TBPTT=False sbatch train_full_autoreg.batch         # Disable TBPTT
+#   # True TBPTT with hidden state (recommended):
+#   TBPTT_MODE=ar_hidden sbatch train_full_autoreg.batch
+#
+#   # Gradient chunking (no hidden carry):
+#   TBPTT_MODE=gradient_chunking sbatch train_full_autoreg.batch
+#
+#   # Disable TBPTT entirely:
+#   USE_TBPTT=False sbatch train_full_autoreg.batch
 # ============================================
 USE_TBPTT=${USE_TBPTT:-True}
-N_TBPTT_CHUNKS=${N_TBPTT_CHUNKS:-4}
-echo "[*] TBPTT: $USE_TBPTT (chunks: $N_TBPTT_CHUNKS)"
-export USE_TBPTT N_TBPTT_CHUNKS
+TBPTT_MODE=${TBPTT_MODE:-ar_hidden}           # ar_hidden (True TBPTT) or gradient_chunking
+TBPTT_WINDOW_SIZE=${TBPTT_WINDOW_SIZE:-500}   # messages per window for ar_hidden mode
+TBPTT_RESET_EVERY_EPOCH=${TBPTT_RESET_EVERY_EPOCH:-False}  # reset hidden at epoch start
+N_TBPTT_CHUNKS=${N_TBPTT_CHUNKS:-4}           # chunks for gradient_chunking mode
+
+echo "[*] TBPTT: $USE_TBPTT"
+echo "[*] TBPTT mode: $TBPTT_MODE"
+if [ "$TBPTT_MODE" = "ar_hidden" ]; then
+    echo "[*] TBPTT window size: $TBPTT_WINDOW_SIZE msgs"
+    echo "[*] TBPTT reset every epoch: $TBPTT_RESET_EVERY_EPOCH"
+else
+    echo "[*] TBPTT chunks: $N_TBPTT_CHUNKS"
+fi
+export USE_TBPTT TBPTT_MODE TBPTT_WINDOW_SIZE TBPTT_RESET_EVERY_EPOCH N_TBPTT_CHUNKS
 
 # Create logs directory
 mkdir -p logs_lobs5
 
 # Change to working directory
-cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5
 
 # Configuration
 GPUS_PER_NODE=4
 NNODES=$SLURM_NNODES
 TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
 
+# Calculate global batch size (PER_GPU_BSZ * TOTAL_GPUS)
+if [ -n "$PER_GPU_BSZ" ]; then
+    GLOBAL_BSZ=$((PER_GPU_BSZ * TOTAL_GPUS))
+else
+    GLOBAL_BSZ=""
+fi
+export GPUS_PER_NODE NNODES TOTAL_GPUS GLOBAL_BSZ
+
 echo "[*] Total GPUs: $TOTAL_GPUS ($NNODES nodes × $GPUS_PER_NODE GPUs/node)"
-echo "[*] Batch size will be set by MODEL_PRESET ($MODEL_PRESET)"
+echo "[*] Global batch size: ${GLOBAL_BSZ:-preset default}"
 
 # Multi-Node Setup
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
@@ -96,8 +117,8 @@ echo "[*] Multi-node mode: $NNODES nodes"
 echo "[*] Coordinator: $JAX_COORDINATOR_ADDRESS"
 
 # Data paths
-DATA_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022"
-TEST_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc"
+export DATA_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022"
+export TEST_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc"
 
 # Launch with srun - inline wrapper
 srun --nodes=$NNODES \
@@ -246,19 +267,13 @@ echo "[Wrapper] Available GPUs:"
 nvidia-smi --list-gpus | head -4
 
 # Run training
-cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
-# === 25-node 360M config (explicit params, bypass preset) ===
-# ssm_lr_base: 0.0002 (1-node) * 25 = 0.0005 (linear scaling)
-# Original preset: --model_preset=360M
+cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5
+
+# === Use MODEL_PRESET (default: 55M for 24tok) ===
 python -u -B run_train.py \
     --USE_WANDB=True \
-    --d_model=2048 \
-    --n_layers=24 \
-    --blocks=32 \
-    --ssm_size_base=2048 \
-    --ssm_lr_base=0.0005 \
-    --lr_factor=1 \
-    --wandb_project=lobs5-360M-25node \
+    --model_preset='"$MODEL_PRESET"' \
+    --wandb_project=lobs5-55M-d1024-tbptt \
     --wandb_entity=kang-oxford \
     --C_init=trunc_standard_normal \
     --prenorm=True \
@@ -297,7 +312,11 @@ python -u -B run_train.py \
     --use_bf16=True \
     --token_mode=24 \
     --use_tbptt='"$USE_TBPTT"' \
+    --tbptt_mode='"$TBPTT_MODE"' \
+    --tbptt_window_size='"$TBPTT_WINDOW_SIZE"' \
+    --tbptt_reset_every_epoch='"$TBPTT_RESET_EVERY_EPOCH"' \
     --n_tbptt_chunks='"$N_TBPTT_CHUNKS"' \
+    ${GLOBAL_BSZ:+--global_bsz=$GLOBAL_BSZ} \
     ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS} \
 '
     # NOTE: The following parameters are now controlled by --model_preset:
@@ -309,7 +328,7 @@ python -u -B run_train.py \
     #   --ssm_lr_base (preset controls)
     #   --lr_factor (preset controls)
     #   --wandb_project (preset controls)
-    # --restore=/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/likely-aardvark-15_p4k79dtn \
+    # --restore=/lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5/checkpoints/likely-aardvark-15_p4k79dtn \
     # --restore_step=6
 
 

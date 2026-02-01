@@ -5,7 +5,7 @@ import numpy as np
 import jax.numpy as jnp
 from jax.experimental import sparse
 import torch
-import torchaudio.functional as TF
+# Note: torchaudio lazy-loaded in ResolutionSequenceDataset (not needed for LOB)
 import torchvision
 from einops import rearrange
 
@@ -120,6 +120,7 @@ class SequenceResolutionCollateMixin(DefaultCollateMixin):
             pass
         elif is_list(resolution): # Resize to first resolution, then apply resampling technique
             # Sample to first resolution
+            import torchaudio.functional as TF  # lazy import for audio resampling
             x = x.squeeze(-1) # (B, L)
             L = x.size(1)
             x = x[:, ::resolution[0]]  # assume length is first axis after batch
