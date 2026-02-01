@@ -12,8 +12,8 @@
 
 # === Default config for 55M model with TBPTT ar_hidden ===
 # Note: ar_hidden mode requires more memory (window=500 fixed)
-# BSZ=20+ OOM, BSZ=16 is max for 85GB GPU
-export PER_GPU_BSZ=${PER_GPU_BSZ:-16}
+# Memory sweep: BSZ=16+ OOM, BSZ=12 is max for 85GB GPU
+export PER_GPU_BSZ=${PER_GPU_BSZ:-12}
 
 echo "============================================"
 echo "Job started at: $(date)"
