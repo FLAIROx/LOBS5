@@ -10,8 +10,10 @@
 #SBATCH --time=23:59:59
 #SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
 
-# === Default config for 55M model ===
-export PER_GPU_BSZ=${PER_GPU_BSZ:-28}
+# === Default config for 55M model with TBPTT ar_hidden ===
+# Note: ar_hidden mode requires more memory than gradient_chunking
+# BSZ=8 + window=125 tested to fit in 85GB GPU
+export PER_GPU_BSZ=${PER_GPU_BSZ:-8}
 
 echo "============================================"
 echo "Job started at: $(date)"
@@ -70,7 +72,7 @@ fi
 # ============================================
 USE_TBPTT=${USE_TBPTT:-True}
 TBPTT_MODE=${TBPTT_MODE:-ar_hidden}           # ar_hidden (True TBPTT) or gradient_chunking
-TBPTT_WINDOW_SIZE=${TBPTT_WINDOW_SIZE:-500}   # messages per window for ar_hidden mode
+TBPTT_WINDOW_SIZE=${TBPTT_WINDOW_SIZE:-125}   # messages per window for ar_hidden mode (125=3k tokens)
 TBPTT_RESET_EVERY_EPOCH=${TBPTT_RESET_EVERY_EPOCH:-False}  # reset hidden at epoch start
 N_TBPTT_CHUNKS=${N_TBPTT_CHUNKS:-4}           # chunks for gradient_chunking mode
 
