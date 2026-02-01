@@ -106,22 +106,30 @@ class SequenceLayer(nn.Module):
             deterministic=not self.training,
         )
 
-    def __call__(self, x):
+    def __call__(self, x, hidden_in=None, return_hidden=False):
         """
         Compute the LxH output of S5 layer given an LxH input.
         Args:
              x (float32): input sequence (L, d_model)
+             hidden_in (complex64): optional initial hidden state (1, P)
+             return_hidden (bool): whether to return final hidden state
         Returns:
-            output sequence (float32): (L, d_model)
+            If return_hidden=False:
+                output sequence (float32): (L, d_model)
+            If return_hidden=True:
+                (hidden_out, output): hidden_out is (1, P) complex64
         """
         #jax.debug.print("call x before prenorm : {}",x)
 
         skip = x
         if self.prenorm:
             x = self.norm(x)
-        
+
         #jax.debug.print("call x before ssm : {}",x)
-        x = self.seq(x)
+        if return_hidden:
+            hidden_out, x = self.seq(x, hidden_in=hidden_in, return_hidden=True)
+        else:
+            x = self.seq(x, hidden_in=hidden_in, return_hidden=False)
         #jax.debug.print("call x_m after ssm : {}",x)
         if self.activation in ["full_glu"]:
             x = self.drop(nn.gelu(x))
@@ -141,7 +149,7 @@ class SequenceLayer(nn.Module):
         else:
             raise NotImplementedError(
                    "Activation: {} not implemented".format(self.activation))
-        
+
         #jax.debug.print("call x_m[0:5] after activation : {}",x[0:2][0][0:2])
 
 
@@ -149,7 +157,8 @@ class SequenceLayer(nn.Module):
         if not self.prenorm:
             x = self.norm(x)
 
-
+        if return_hidden:
+            return hidden_out, x
         return x
 
     def __call_rnn__(self,hidden, x,d):

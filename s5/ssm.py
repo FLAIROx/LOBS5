@@ -281,7 +281,8 @@ def complex_matvec_bf16(A_complex, x_complex):
 # Correct BF16 SSM: BF16 matmul + FP32 scan (Reference: 7DEC working implementation)
 # ============================================================================
 
-def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional):
+def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional,
+              hidden_in=None, return_hidden=False):
     """Compute the LxH output of discretized SSM given an LxH input.
 
     BF16 strategy: Use BF16 for matmul (Tensor Core), FP32 for scan (stability)
@@ -293,8 +294,13 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
         input_sequence (float32/bfloat16): input sequence            (L, H)
         conj_sym (bool):         whether conjugate symmetry is enforced
         bidirectional (bool):    whether bidirectional setup is used
+        hidden_in (complex64):   optional initial hidden state       (1, P)
+        return_hidden (bool):    whether to return final hidden state
     Returns:
-        ys (float32): the SSM outputs (S5 layer preactivations)      (L, H)
+        If return_hidden=False:
+            ys (float32): the SSM outputs (S5 layer preactivations)  (L, H)
+        If return_hidden=True:
+            (hidden_out, ys): hidden_out is (1, P) complex64
     """
     # [DEBUG BF16] Check inputs for NaN
     # jax.debug.print("[apply_ssm] Lambda_bar has NaN: {}, shape: {}", np.any(np.isnan(Lambda_bar)), Lambda_bar.shape)  # DEBUG BF16
@@ -324,13 +330,35 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
     Bu_elements = (Bu_re.astype(np.float32) + 1j * Bu_im.astype(np.float32)).T
     # jax.debug.print("[apply_ssm] Bu_elements has NaN: {}, dtype: {}", np.any(np.isnan(Bu_elements)), Bu_elements.dtype)  # DEBUG BF16
 
+    # If hidden_in provided, prepend to sequence (True TBPTT support)
+    # This technique is borrowed from apply_ssm_rnn: prepend hidden state,
+    # use identity element for Lambda, then extract final hidden after scan
+    if hidden_in is not None:
+        Lambda_elements = np.concatenate([
+            np.ones((1, Lambda_bar.shape[0])),  # Identity element for hidden
+            Lambda_elements,
+        ])
+        Bu_elements = np.concatenate([
+            hidden_in,
+            Bu_elements,
+        ])
+
     # FP32 scan: binary_operator works on complex64 for numerical stability
     _, xs = jax.lax.associative_scan(binary_operator, (Lambda_elements, Bu_elements))
     # jax.debug.print("[apply_ssm] After FP32 scan - xs has NaN: {}, dtype: {}, range: [{}, {}]", np.any(np.isnan(xs)), xs.dtype, np.min(np.abs(xs)), np.max(np.abs(xs)))  # DEBUG BF16
 
+    # If hidden was prepended, extract hidden_out and remove from xs
+    hidden_out = None
+    if hidden_in is not None:
+        hidden_out = xs[np.newaxis, -1]  # Final state as new hidden (1, P)
+        xs = xs[1:]  # Remove prepended hidden from output sequence
+
     if bidirectional:
+        # Note: bidirectional with hidden_in is not fully supported
+        # (would need separate backward hidden state)
         _, xs2 = jax.lax.associative_scan(binary_operator,
-                                          (Lambda_elements, Bu_elements),
+                                          (Lambda_elements if hidden_in is None else Lambda_elements[1:],
+                                           Bu_elements if hidden_in is None else Bu_elements[1:]),
                                           reverse=True)
         xs = np.concatenate((xs, xs2), axis=-1)
 
@@ -351,6 +379,8 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
 
     # jax.debug.print("[apply_ssm] Final ys has NaN: {}, dtype: {}, range: [{}, {}]", np.any(np.isnan(ys)), ys.dtype, np.min(ys), np.max(ys))  # DEBUG BF16
 
+    if return_hidden:
+        return hidden_out, ys
     return ys
 
 def apply_ssm_rnn(Lambda_bar, B_bar, C_tilde, hidden, input_sequence, resets, conj_sym, bidirectional):
@@ -577,7 +607,7 @@ class S5SSM(nn.Module):
         # jax.debug.print("[S5SSM.setup] After discretization - C_tilde has NaN: {}", np.any(np.isnan(self.C_tilde)))  # DEBUG BF16
         # jax.debug.print("[S5SSM.setup] After discretization - D has NaN: {}", np.any(np.isnan(self.D)))  # DEBUG BF16
 
-    def __call__(self, input_sequence):
+    def __call__(self, input_sequence, hidden_in=None, return_hidden=False):
         """
         Compute the LxH output of the S5 SSM given an LxH input sequence
         using a parallel scan.
@@ -586,8 +616,13 @@ class S5SSM(nn.Module):
 
         Args:
              input_sequence (float32/bfloat16): input sequence (L, H)
+             hidden_in (complex64): optional initial hidden state (1, P)
+             return_hidden (bool): whether to return final hidden state
         Returns:
-            output sequence (float32/bfloat16): (L, H)
+            If return_hidden=False:
+                output sequence (float32/bfloat16): (L, H)
+            If return_hidden=True:
+                (hidden_out, output): hidden_out is (1, P) complex64
         """
         # [DEBUG BF16] Check discretized params in setup()
         # jax.debug.print("[S5SSM.__call__] self.Lambda_bar has NaN: {}", np.any(np.isnan(self.Lambda_bar)))  # DEBUG BF16
@@ -600,13 +635,25 @@ class S5SSM(nn.Module):
         input_dtype = input_sequence.dtype
         input_fp32 = input_sequence.astype(np.float32)
 
-        # apply_ssm: BF16 matmul + FP32 scan, returns FP32
-        ys = apply_ssm(self.Lambda_bar,
-                       self.B_bar,
-                       self.C_tilde,
-                       input_fp32,
-                       self.conj_sym,
-                       self.bidirectional)
+        # apply_ssm: BF16 matmul + FP32 scan, returns FP32 (or tuple if return_hidden)
+        if return_hidden:
+            hidden_out, ys = apply_ssm(self.Lambda_bar,
+                                        self.B_bar,
+                                        self.C_tilde,
+                                        input_fp32,
+                                        self.conj_sym,
+                                        self.bidirectional,
+                                        hidden_in=hidden_in,
+                                        return_hidden=True)
+        else:
+            ys = apply_ssm(self.Lambda_bar,
+                           self.B_bar,
+                           self.C_tilde,
+                           input_fp32,
+                           self.conj_sym,
+                           self.bidirectional,
+                           hidden_in=hidden_in,
+                           return_hidden=False)
 
         # jax.debug.print("[S5SSM.__call__] ys from apply_ssm has NaN: {}, dtype: {}", np.any(np.isnan(ys)), ys.dtype)  # DEBUG BF16
 
@@ -618,6 +665,8 @@ class S5SSM(nn.Module):
         # jax.debug.print("[S5SSM.__call__] Final output has NaN: {}, range: [{}, {}]", np.any(np.isnan(output)), np.min(output), np.max(output))  # DEBUG BF16
 
         # Cast output back to input dtype (BF16 if needed)
+        if return_hidden:
+            return hidden_out, output.astype(input_dtype)
         return output.astype(input_dtype)
 
     def __call_rnn__(self, hidden, input_sequence, resets):

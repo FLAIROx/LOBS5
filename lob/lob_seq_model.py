@@ -198,23 +198,48 @@ class LobBookModel(nn.Module):
             for _ in range(self.n_post_layers)
         )
 
-    def __call__(self, x, integration_timesteps):
+    def __call__(self, x, integration_timesteps, hidden_list=None, return_hidden=False):
         """
         Compute the LxH output of the stacked encoder given an Lxd_input
         input sequence.
         Args:
              x (float32): input sequence (L, d_input)
+             hidden_list (tuple): optional (hidden_pre, hidden_post) lists
+             return_hidden (bool): whether to return final hidden states
         Returns:
-            output sequence (float32): (L, d_model)
+            If return_hidden=False:
+                output sequence (float32): (L, d_model)
+            If return_hidden=True:
+                ((hidden_pre, hidden_post), output)
         """
-        for layer in self.pre_layers:
-            x = layer(x)
-        x=self.projection(x)
-        for layer in self.post_layers:
-            x = layer(x)
+        hidden_pre = hidden_list[0] if hidden_list is not None else None
+        hidden_post = hidden_list[1] if hidden_list is not None else None
+        new_hiddens_pre = [] if return_hidden else None
+        new_hiddens_post = [] if return_hidden else None
+
+        for i, layer in enumerate(self.pre_layers):
+            h_in = hidden_pre[i] if hidden_pre is not None else None
+            if return_hidden:
+                h_out, x = layer(x, hidden_in=h_in, return_hidden=True)
+                new_hiddens_pre.append(h_out)
+            else:
+                x = layer(x, hidden_in=h_in, return_hidden=False)
+
+        x = self.projection(x)
+
+        for i, layer in enumerate(self.post_layers):
+            h_in = hidden_post[i] if hidden_post is not None else None
+            if return_hidden:
+                h_out, x = layer(x, hidden_in=h_in, return_hidden=True)
+                new_hiddens_post.append(h_out)
+            else:
+                x = layer(x, hidden_in=h_in, return_hidden=False)
+
+        if return_hidden:
+            return (new_hiddens_pre, new_hiddens_post), x
         return x
-    
-    def __call_rnn__(self, hiddens, x, d,integration_timesteps):
+
+    def __call_rnn__(self, hiddens, x, d, integration_timesteps):
         """
         Compute the LxH output of the stacked encoder given an Lxd_input
         input sequence.
@@ -575,16 +600,47 @@ class PaddedLobPredModel(nn.Module):
         """
         AR-style forward with hidden carry for True TBPTT.
 
-        This keeps the parallel (associative_scan) path, but seeds it with
-        the provided hidden state. Hidden is carried across windows/batches.
+        This keeps the parallel (associative_scan) path via __call__ with
+        hidden_in/return_hidden parameters, seeding it with the provided
+        hidden state. Hidden is carried across TBPTT windows.
+
+        Uses O(log L) parallel scan, NOT sequential RNN.
         """
-        d_m = jnp.zeros((x_m.shape[0],), dtype=bool)
-        d_b = jnp.zeros((x_b.shape[0],), dtype=bool)
-        d_f = jnp.zeros((x_m.shape[0],), dtype=bool)
-        return self.__call_rnn__(hiddens_tuple,
-                                 x_m, x_b,
-                                 d_m, d_b, d_f,
-                                 message_integration_timesteps, book_integration_timesteps)
+        hiddens_m, hiddens_b, hiddens_fused, ema = hiddens_tuple
+        fo, override = ema
+
+        # Use parallel __call__ with hidden state support
+        hiddens_m, x_m = self.message_encoder(
+            x_m, message_integration_timesteps,
+            hidden_list=hiddens_m, return_hidden=True
+        )
+        hiddens_b, x_b = self.book_encoder(
+            x_b, book_integration_timesteps,
+            hidden_list=hiddens_b, return_hidden=True
+        )
+
+        # Fuse message and book
+        x = jnp.concatenate([x_m, x_b], axis=1)
+        hiddens_fused, x = self.fused_s5(
+            x, jnp.ones(x.shape[0]),
+            hidden_list=hiddens_fused, return_hidden=True
+        )
+
+        # Mode handling (pool/last/none/ema)
+        if self.mode in ["pool"]:
+            x = jnp.mean(x, axis=0)
+        elif self.mode in ["last"]:
+            x = x[-1]
+        elif self.mode in ["none"]:
+            pass
+        elif self.mode in ['ema']:
+            x, fo = ewma_vectorized_safe(x, 2 / (22 + 1.0), fo, override)
+        else:
+            raise NotImplementedError("Mode must be in ['pool', 'last', 'none', 'ema']")
+
+        x = self.decoder(x)
+        new_hiddens_tuple = (hiddens_m, hiddens_b, hiddens_fused, (fo, jnp.zeros_like(override)))
+        return new_hiddens_tuple, nn.log_softmax(x, axis=-1)
 
     def __call_ar__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):
         """
