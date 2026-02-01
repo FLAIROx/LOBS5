@@ -568,6 +568,24 @@ class PaddedLobPredModel(nn.Module):
         x = self.decoder(x)
         return (hiddens_m, hiddens_b, hiddens_fused, (fo,jnp.zeros_like(override))), nn.log_softmax(x, axis=-1)
 
+    def __call_ar_tbptt__(self,
+                          hiddens_tuple,
+                          x_m, x_b,
+                          message_integration_timesteps, book_integration_timesteps):
+        """
+        AR-style forward with hidden carry for True TBPTT.
+
+        This keeps the parallel (associative_scan) path, but seeds it with
+        the provided hidden state. Hidden is carried across windows/batches.
+        """
+        d_m = jnp.zeros((x_m.shape[0],), dtype=bool)
+        d_b = jnp.zeros((x_b.shape[0],), dtype=bool)
+        d_f = jnp.zeros((x_m.shape[0],), dtype=bool)
+        return self.__call_rnn__(hiddens_tuple,
+                                 x_m, x_b,
+                                 d_m, d_b, d_f,
+                                 message_integration_timesteps, book_integration_timesteps)
+
     def __call_ar__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):
         """
         Compute the size d_output log softmax output given a
@@ -654,6 +672,11 @@ BatchPaddedLobPredModel = nn.vmap(
                          'split_rngs':split_rngs_args,
                          'axis_name':'batch'},
             '__call_rnn__':{'in_axes':(0,0, 0, 0, 0, 0,0,0),
+                         'out_axes':0,
+                         'variable_axes':variable_axes_args,
+                         'split_rngs':split_rngs_args,
+                         'axis_name':'batch'},
+            '__call_ar_tbptt__':{'in_axes':(0, 0, 0, 0, 0),
                          'out_axes':0,
                          'variable_axes':variable_axes_args,
                          'split_rngs':split_rngs_args,

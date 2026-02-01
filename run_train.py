@@ -335,9 +335,16 @@ if __name__ == "__main__":
 	#
 	# ============================================================================
 	parser.add_argument("--use_tbptt", type=str2bool, default=False,
-				help="Enable TBPTT gradient chunking to reduce XLA compilation memory")
+			help="Enable TBPTT gradient chunking to reduce XLA compilation memory")
 	parser.add_argument("--n_tbptt_chunks", type=int, default=4,
-				help="Number of chunks for TBPTT gradient accumulation (default: 4)")
+			help="Number of chunks for TBPTT gradient accumulation (default: 4)")
+	parser.add_argument("--tbptt_mode", type=str, default="gradient_chunking",
+			choices=["gradient_chunking", "ar_hidden"],
+			help="TBPTT mode: gradient_chunking (no hidden carry) or ar_hidden (hidden carry)")
+	parser.add_argument("--tbptt_window_size", type=int, default=500,
+			help="Window size in messages for TBPTT ar_hidden mode (default: 500)")
+	parser.add_argument("--tbptt_reset_every_epoch", type=str2bool, default=True,
+			help="Reset hidden state at start of each epoch for ar_hidden mode")
 
 	# ============================================================================
 	# Step-Level Checkpointing for Long-Running Jobs (12.5-14h epochs, 24h max)

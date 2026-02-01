@@ -958,8 +958,12 @@ def train_epoch(
         max_job_hours=24.0,  # Maximum job duration in hours
         save_before_timeout_minutes=30,  # Save checkpoint this many minutes before timeout
         # TBPTT parameters
-        use_tbptt=False,  # Enable TBPTT gradient chunking
-        n_tbptt_chunks=4,  # Number of chunks for TBPTT
+        use_tbptt=False,  # Enable TBPTT
+        n_tbptt_chunks=4,  # Number of chunks for TBPTT gradient chunking
+        tbptt_mode: str = "gradient_chunking",
+        tbptt_window_size: int = 500,
+        tbptt_hidden_in=None,
+        tbptt_reset_every_epoch: bool = True,
     ):
 
     """
@@ -1003,6 +1007,14 @@ def train_epoch(
     # No more lr_params unpacking - optax handles LR scheduling internally
     # Step tracking is done via state.step (maintained by optax)
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
+    use_ar_hidden = use_tbptt and tbptt_mode == "ar_hidden"
+    tbptt_hidden = tbptt_hidden_in
+    if use_ar_hidden:
+        if tbptt_hidden is None or tbptt_reset_every_epoch:
+            tbptt_hidden = init_hiddens
+        if tbptt_hidden is None:
+            raise ValueError("tbptt_mode=ar_hidden requires init_hiddens to be provided")
+
     pbar = tqdm(trainloader)
     for batch_idx, batch in enumerate(pbar):
         # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
@@ -1036,12 +1048,54 @@ def train_epoch(
             #     init_hiddens)
 
             # print("Gets to train")
-            # Use JIT-compiled train_step if provided
-            train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
+            if use_ar_hidden:
+                # Use JIT-compiled TBPTT AR-hidden train_step if provided
+                train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step_tbptt_ar_hidden
 
-            # Monitor train_step time if goodput_monitor provided
-            if goodput_monitor:
-                with goodput_monitor.record('train_step'):
+                if goodput_monitor:
+                    with goodput_monitor.record('train_step'):
+                        state, loss, ce, logits, tbptt_hidden = train_fn(
+                            state,
+                            drop_rng,
+                            inputs,
+                            labels,
+                            integration_times,
+                            tbptt_hidden,
+                            batchnorm,
+                            ignore_times,
+                            tbptt_window_size,
+                        )
+                else:
+                    state, loss, ce, logits, tbptt_hidden = train_fn(
+                        state,
+                        drop_rng,
+                        inputs,
+                        labels,
+                        integration_times,
+                        tbptt_hidden,
+                        batchnorm,
+                        ignore_times,
+                        tbptt_window_size,
+                    )
+            else:
+                # Use JIT-compiled train_step if provided
+                train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
+
+                # Monitor train_step time if goodput_monitor provided
+                if goodput_monitor:
+                    with goodput_monitor.record('train_step'):
+                        state, loss, ce, logits = train_fn(
+                            state,
+                            drop_rng,
+                            inputs,
+                            labels,
+                            integration_times,
+                            batchnorm,
+                            ignore_times,
+                            use_tbptt,       # TBPTT: enable gradient chunking
+                            n_tbptt_chunks,  # TBPTT: number of chunks
+                        )
+                else:
                     state, loss, ce, logits = train_fn(
                         state,
                         drop_rng,
@@ -1053,20 +1107,11 @@ def train_epoch(
                         use_tbptt,       # TBPTT: enable gradient chunking
                         n_tbptt_chunks,  # TBPTT: number of chunks
                     )
-            else:
-                state, loss, ce, logits = train_fn(
-                    state,
-                    drop_rng,
-                    inputs,
-                    labels,
-                    integration_times,
-                    batchnorm,
-                    ignore_times,
-                    use_tbptt,       # TBPTT: enable gradient chunking
-                    n_tbptt_chunks,  # TBPTT: number of chunks
-                )
             if debug_profiler:
                 loss.block_until_ready()
+
+            if use_ar_hidden:
+                tbptt_hidden = jax.lax.stop_gradient(tbptt_hidden)
 
             # print("completes train step")
             # if (batch_idx==0) & (epoch%100==0):
@@ -1169,7 +1214,7 @@ def train_epoch(
                     print(f"[Checkpoint] Resume from: epoch={epoch}, step={batch_idx+1}")
                     # Return early with partial epoch results
                     loss_mean = np.mean(np.array(batch_losses)) if batch_losses else float('nan')
-                    return state, loss_mean, None, batch_idx + 1  # Return step for resume
+                    return state, loss_mean, None, batch_idx + 1, (tbptt_hidden if use_ar_hidden else None)  # Return step for resume
 
             if (state.step>20) & (state.step<=21) & debug_profiler:
                 jax.profiler.stop_trace()
@@ -1191,7 +1236,7 @@ def train_epoch(
     loss_mean=np.mean(np.array(batch_losses))
     # No more returning step - optax tracks it internally via state.step
     # Return None for completed_step to indicate full epoch completed
-    return state, loss_mean, ce_means, None
+    return state, loss_mean, ce_means, None, (tbptt_hidden if use_ar_hidden else None)
 
 
 @partial(jax.vmap,in_axes=(0,0,None),out_axes=(0,0))
@@ -1300,6 +1345,34 @@ def split_sequence_for_tbptt(
         labels_chunked,
         (msg_times_chunked, book_times_chunked),
         chunk_size,
+    )
+
+def split_sequence_for_tbptt_windows(
+    batch_inputs: Tuple[jax.Array, jax.Array],
+    batch_labels: jax.Array,
+    batch_integration_timesteps: Tuple[jax.Array, jax.Array],
+    window_size_msgs: int,
+    msg_len: int = 24,
+) -> Tuple:
+    """Split sequence into fixed-size message windows for True TBPTT.
+
+    Args:
+        window_size_msgs: number of messages per window (e.g., 500)
+    """
+    messages, _ = batch_inputs
+    L = messages.shape[1]
+    n_messages = L // msg_len
+    if n_messages % window_size_msgs != 0:
+        raise ValueError(
+            f"window_size_msgs={window_size_msgs} must divide n_messages={n_messages}"
+        )
+    n_chunks = n_messages // window_size_msgs
+    return split_sequence_for_tbptt(
+        batch_inputs,
+        batch_labels,
+        batch_integration_timesteps,
+        n_chunks=n_chunks,
+        msg_len=msg_len,
     )
 
 # ============================================================================
@@ -1499,6 +1572,115 @@ def train_step(
 
 
 # ============================================================================
+# True TBPTT (AR-style with hidden carry)
+# ============================================================================
+def train_step_tbptt_ar_hidden(
+        state: train_state.TrainState,
+        rng: jax.dtypes.prng_key,
+        batch_inputs: Tuple[jax.Array, jax.Array],
+        batch_labels: jax.Array,
+        batch_integration_timesteps: Tuple[jax.Array, jax.Array],
+        hiddens: Tuple,
+        batchnorm: bool,
+        ignore_times: bool,
+        tbptt_window_size: int = 500,
+    ):
+    """True TBPTT using AR-style forward with hidden carry."""
+    batch_inputs = repeat_book(*batch_inputs, True)
+
+    (chunked_inputs, chunked_labels, chunked_times, chunk_size) = split_sequence_for_tbptt_windows(
+        batch_inputs,
+        batch_labels,
+        batch_integration_timesteps,
+        window_size_msgs=tbptt_window_size,
+        msg_len=Message_Tokenizer.MSG_LEN,
+    )
+
+    messages_chunked, books_chunked = chunked_inputs
+    msg_times_chunked, book_times_chunked = chunked_times
+    n_windows = messages_chunked.shape[0]
+
+    def compute_window(carry, window_idx):
+        grads_accum, loss_accum, hiddens_carry, rng_carry = carry
+
+        msgs_chunk = messages_chunked[window_idx]
+        books_chunk = books_chunked[window_idx]
+        labels_chunk = chunked_labels[window_idx]
+        msg_t_chunk = msg_times_chunked[window_idx]
+        book_t_chunk = book_times_chunked[window_idx]
+
+        rng_carry, rng_window = jax.random.split(rng_carry)
+
+        def loss_fn(params):
+            if batchnorm:
+                (new_hiddens, logits_chunk), _ = state.apply_fn(
+                    {"params": params, "batch_stats": state.batch_stats},
+                    hiddens_carry,
+                    msgs_chunk, books_chunk,
+                    msg_t_chunk, book_t_chunk,
+                    rngs={"dropout": rng_window},
+                    mutable=["intermediates", "batch_stats"],
+                    method='__call_ar_tbptt__'
+                )
+            else:
+                (new_hiddens, logits_chunk), _ = state.apply_fn(
+                    {"params": params},
+                    hiddens_carry,
+                    msgs_chunk, books_chunk,
+                    msg_t_chunk, book_t_chunk,
+                    rngs={"dropout": rng_window},
+                    mutable=["intermediates"],
+                    method='__call_ar_tbptt__'
+                )
+
+            ce_chunk = cross_entropy_loss(logits_chunk, labels_chunk)
+            if ignore_times:
+                ce_chunk = ce_chunk.reshape(ce_chunk.shape[0], -1, Message_Tokenizer.MSG_LEN)
+                ce_1 = ce_chunk[:, :, :TIME_START_I]
+                ce_2 = ce_chunk[:, :, (TIME_END_I+1):]
+                ce_chunk = np.concatenate([ce_1, ce_2], axis=2)
+                ce_chunk = ce_chunk.reshape(ce_chunk.shape[0], -1)
+
+            ce_chunk = np.mean(ce_chunk, axis=0)
+            loss_chunk = np.mean(ce_chunk)
+            return loss_chunk, (new_hiddens, logits_chunk, ce_chunk)
+
+        (loss_chunk, (new_hiddens, logits_chunk, ce_chunk)), grads_chunk = \
+            jax.value_and_grad(loss_fn, has_aux=True)(state.params)
+
+        # Truncate gradients between windows but keep hidden carry
+        new_hiddens = jax.lax.stop_gradient(new_hiddens)
+
+        grads_accum = jax.tree_util.tree_map(
+            lambda a, g: a + g, grads_accum, grads_chunk
+        )
+        loss_accum = loss_accum + loss_chunk
+
+        new_carry = (grads_accum, loss_accum, new_hiddens, rng_carry)
+        return new_carry, (logits_chunk, ce_chunk)
+
+    init_grads = jax.tree_util.tree_map(np.zeros_like, state.params)
+    init_loss = np.array(0.0)
+    init_carry = (init_grads, init_loss, hiddens, rng)
+
+    (final_grads, final_loss, final_hiddens, _), (logits_chunks, ce_chunks) = jax.lax.scan(
+        compute_window,
+        init_carry,
+        np.arange(n_windows),
+        length=n_windows,
+    )
+
+    grads = jax.tree_util.tree_map(lambda g: g / n_windows, final_grads)
+    loss = final_loss / n_windows
+
+    logits = np.transpose(logits_chunks, (1, 0, 2, 3))
+    logits = logits.reshape(logits.shape[0], -1, logits.shape[-1])
+    ce = ce_chunks.reshape(-1)
+
+    state = state.apply_gradients(grads=grads)
+    return state, loss, ce, logits, final_hiddens
+
+# ============================================================================
 # Create JIT-compiled train_step
 # ============================================================================
 def create_jit_train_step(
@@ -1608,6 +1790,59 @@ def create_jit_train_step(
     if use_tbptt:
         print(f"[JIT] TBPTT enabled: {n_tbptt_chunks} chunks (memory reduction ~{100 - 100/(n_tbptt_chunks**2):.1f}%)")
 
+    return jit_train_step
+
+
+# ============================================================================
+# Create JIT-compiled train_step for True TBPTT (AR + hidden carry)
+# ============================================================================
+def create_jit_train_step_tbptt_ar_hidden(
+    mesh: Mesh,
+    state: train_state.TrainState,
+    has_book_data: bool = True,
+    tbptt_window_size: int = 500,
+):
+    """
+    Create JIT-compiled train_step for AR-style TBPTT with hidden carry.
+    """
+    # 1. Create shardings for state (everything replicated)
+    state_shardings = create_state_shardings(state, mesh)
+
+    # 2. Create shardings for data
+    inputs_shardings, labels_sharding, timesteps_shardings = get_data_shardings_for_batch(
+        mesh, has_book_data=has_book_data
+    )
+
+    # 3. Define in_shardings (non-static params only)
+    in_shardings = (
+        state_shardings,          # state
+        None,                     # rng
+        inputs_shardings,         # batch_inputs
+        labels_sharding,          # batch_labels
+        timesteps_shardings,      # batch_integration_timesteps
+        None,                     # hiddens (pytree)
+    )
+
+    # 4. Define out_shardings
+    out_shardings = (
+        state_shardings,          # state
+        None,                     # loss
+        None,                     # ce
+        None,                     # logits
+        None,                     # hiddens_out
+    )
+
+    # 5. Create JIT-compiled function
+    jit_train_step = jax.jit(
+        train_step_tbptt_ar_hidden,
+        in_shardings=in_shardings,
+        out_shardings=out_shardings,
+        static_argnums=(6, 7, 8),  # batchnorm, ignore_times, tbptt_window_size
+        donate_argnums=(0,),       # donate state
+    )
+
+    print("[JIT] Created JIT-compiled train_step (TBPTT AR hidden)")
+    print(f"[JIT] TBPTT window size (msgs): {tbptt_window_size}")
     return jit_train_step
 
 
@@ -1898,7 +2133,3 @@ def swap_leading(targetsize,x):
     x=np.expand_dims(x,0)
     x=np.swapaxes(x,0,x.shape.index(targetsize))
     return x
-
-
-
-

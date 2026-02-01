@@ -22,7 +22,8 @@ from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import (
     reduce_lr_on_plateau, linear_warmup,
     cosine_annealing, constant_lr, train_epoch, validate,
-    create_jit_train_step, create_jit_eval_step, initialize_mesh, get_global_mesh,
+    create_jit_train_step, create_jit_train_step_tbptt_ar_hidden,
+    create_jit_eval_step, initialize_mesh, get_global_mesh,
     create_lobs5_learning_rate_schedule,
     # Prodigy LR estimation (Plan B)
     extract_prodigy_estimated_lr,
@@ -284,7 +285,7 @@ def train(args):
             state = ckpt['model']
         
         val_model = model_cls(training=False, step_rescale=1)
-        init_hidden=model_cls().initialize_carry(batch_size=args.global_bsz//args.num_devices,
+        init_hidden=model_cls().initialize_carry(batch_size=args.global_bsz,
                                                 hidden_size=(ssm_size // pow(2,int(args.conj_sym))),
                                                 n_message_layers=args.n_message_layers,
                                                 n_book_pre_layers=args.n_book_pre_layers ,
@@ -303,21 +304,39 @@ def train(args):
 
         # Create JIT-compiled train_step
         # has_book_data parameter: set based on args.use_book_data
-        # TBPTT parameters: use_tbptt and n_tbptt_chunks
+        # TBPTT parameters
         use_tbptt = getattr(args, 'use_tbptt', False)
         n_tbptt_chunks = getattr(args, 'n_tbptt_chunks', 4)
+        tbptt_mode = getattr(args, 'tbptt_mode', 'gradient_chunking')
+        tbptt_window_size = getattr(args, 'tbptt_window_size', 500)
+        tbptt_reset_every_epoch = getattr(args, 'tbptt_reset_every_epoch', True)
 
         if use_tbptt:
-            log_with_timestamp(f"TBPTT enabled: {n_tbptt_chunks} chunks", prefix="Train")
-            log_with_timestamp(f"Expected memory reduction: ~{100 - 100/(n_tbptt_chunks**2):.1f}%", prefix="Train")
+            if tbptt_mode == "gradient_chunking":
+                log_with_timestamp(f"TBPTT enabled: {n_tbptt_chunks} chunks", prefix="Train")
+                log_with_timestamp(f"Expected memory reduction: ~{100 - 100/(n_tbptt_chunks**2):.1f}%", prefix="Train")
+            elif tbptt_mode == "ar_hidden":
+                if args.merging != "padded":
+                    raise NotImplementedError("tbptt_mode=ar_hidden currently supports merging='padded' only")
+                log_with_timestamp(f"TBPTT (AR hidden) enabled: window_size={tbptt_window_size} msgs", prefix="Train")
+            else:
+                raise ValueError(f"Unknown tbptt_mode: {tbptt_mode}")
 
-        jit_train_step_fn = create_jit_train_step(
-            mesh,
-            state,
-            has_book_data=args.use_book_data,
-            use_tbptt=use_tbptt,
-            n_tbptt_chunks=n_tbptt_chunks,
-        )
+        if use_tbptt and tbptt_mode == "ar_hidden":
+            jit_train_step_fn = create_jit_train_step_tbptt_ar_hidden(
+                mesh,
+                state,
+                has_book_data=args.use_book_data,
+                tbptt_window_size=tbptt_window_size,
+            )
+        else:
+            jit_train_step_fn = create_jit_train_step(
+                mesh,
+                state,
+                has_book_data=args.use_book_data,
+                use_tbptt=use_tbptt,
+                n_tbptt_chunks=n_tbptt_chunks,
+            )
 
         # Create JIT-compiled eval_step
         jit_eval_step_fn = create_jit_eval_step(
@@ -456,6 +475,9 @@ def train(args):
     # Track Prodigy optimizer switch status
     prodigy_switched = False
 
+    # Hidden carry for AR TBPTT
+    tbptt_hidden = init_hidden if (use_tbptt and tbptt_mode == "ar_hidden") else None
+
     for epoch in range(args.epochs):
         print(f"[*] Starting Training Epoch {epoch + 1}...")
         # LR scheduling now handled by optax schedules - no manual switching needed
@@ -465,7 +487,7 @@ def train(args):
         train_rng, skey = random.split(train_rng)
 
         #Pass an initial hidden state to be used in case of the 'RNN' forward pass being used.
-        state, train_loss, ce_by_tok, interrupted_at_step = train_epoch(
+        state, train_loss, ce_by_tok, interrupted_at_step, tbptt_hidden_out = train_epoch(
             state,
             skey,
             trainloader,
@@ -495,7 +517,14 @@ def train(args):
             # TBPTT parameters
             use_tbptt=use_tbptt,
             n_tbptt_chunks=n_tbptt_chunks,
+            tbptt_mode=tbptt_mode,
+            tbptt_window_size=tbptt_window_size,
+            tbptt_hidden_in=tbptt_hidden,
+            tbptt_reset_every_epoch=tbptt_reset_every_epoch,
         )
+
+        if use_tbptt and tbptt_mode == "ar_hidden" and not tbptt_reset_every_epoch:
+            tbptt_hidden = tbptt_hidden_out
 
         # Check if epoch was interrupted due to timeout
         if interrupted_at_step is not None:
@@ -766,4 +795,3 @@ def train(args):
         # jax.profiler.stop_trace()
         if count > args.early_stop_patience:
             break
-
