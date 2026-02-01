@@ -1084,3 +1084,99 @@ Exponential scaling test values:
 
 - `9ec0d2d` feat(scripts): add pergpu perturbations sweep script
 - `987a042` docs(scripts): add LORA_V1.5 scaling test results
+
+---
+
+## 2026-02-01
+
+### Slurm 作业提交工作流
+
+**规则：先 commit，后 submit slurm job**
+
+在修改代码后提交 Slurm 作业时，必须遵循以下顺序：
+
+1. **先 commit** - 确保代码修改被版本控制记录
+2. **后 submit** - 使用 `sbatch` 提交作业
+
+**原因：**
+- 作业可能运行数小时，期间代码可能被进一步修改
+- 如果作业失败，可以精确追溯是哪个版本的代码
+- 避免"到底用的是哪个版本"的困惑
+
+### SBATCH 脚本调试常见问题
+
+#### 1. 环境变量在 srun bash -c 中的展开
+
+**问题：** `bash -c '...'` 单引号内的变量不会展开
+
+```bash
+# 错误 - 变量在单引号内不展开
+srun bash -c 'echo $MY_VAR'  # 输出空
+
+# 正确 - 使用引号技巧
+srun bash -c 'echo '"$MY_VAR"''  # 先关闭单引号，展开变量，再开单引号
+```
+
+**更好的方法：** 预先计算并 export
+
+```bash
+# 在 srun 前计算
+GLOBAL_BSZ=$((PER_GPU_BSZ * TOTAL_GPUS))
+export GLOBAL_BSZ
+
+# srun 内使用已展开的变量
+srun --export=ALL bash -c 'echo $GLOBAL_BSZ'
+```
+
+#### 2. 路径不一致问题
+
+**常见错误：** `home` 目录 vs `projects` 目录
+
+```bash
+# 错误路径
+cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+
+# 正确路径
+cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5
+```
+
+**验证方法：**
+```bash
+ls -la /path/to/expected/file.py
+```
+
+#### 3. 模块导入依赖问题
+
+**问题：** 导入链中某个模块依赖未安装的包
+
+```
+run_train.py → dataloading.py → lobster_dataloader.py
+             → s5/dataloaders/__init__.py → audio.py → torchaudio ❌
+```
+
+**解决方法：** Lazy import
+
+```python
+# 在 __init__.py 移除不需要的导入
+from . import basic  # 移除 audio
+
+# 在使用处 lazy import
+def resample_audio(...):
+    import torchaudio.functional as TF  # 只在需要时导入
+    return TF.resample(...)
+```
+
+#### 4. Srun 日志不生成
+
+**症状：** `--output=logs/training_*.log` 指定的文件不存在
+
+**原因：** bash -c 命令在解析阶段就失败（语法错误、路径不存在）
+
+**调试方法：**
+1. 创建简化测试脚本
+2. 逐步添加命令直到找到失败点
+3. 检查 sbatch 主日志 (`.out` / `.err`)
+
+### Commit
+
+- `d2b34a8` fix(deps): lazy-load torchaudio to avoid import error
