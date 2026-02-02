@@ -237,7 +237,9 @@ def init_train_state(
         dt_max=args.dt_max,
         conj_sym=args.conj_sym,
         clip_eigs=args.clip_eigs,
-        bidirectional=args.bidirectional
+        bidirectional=args.bidirectional,
+        use_swr=getattr(args, 'use_swr', False),
+        swr_window_size=getattr(args, 'swr_window_size', 16)
     )
     
     if args.use_book_data:
@@ -445,7 +447,9 @@ def init_train_state_with_prodigy(
         dt_max=args.dt_max,
         conj_sym=args.conj_sym,
         clip_eigs=args.clip_eigs,
-        bidirectional=args.bidirectional
+        bidirectional=args.bidirectional,
+        use_swr=getattr(args, 'use_swr', False),
+        swr_window_size=getattr(args, 'swr_window_size', 16)
     )
 
     # Model class setup (same as normal init)

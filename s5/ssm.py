@@ -5,6 +5,7 @@ from flax import linen as nn
 from jax.nn.initializers import lecun_normal, normal
 
 from .ssm_init import init_CV, init_VinvB, init_log_steps, trunc_standard_normal
+from .swr import apply_ssm_swr
 
 
 # Discretization functions
@@ -470,6 +471,8 @@ class S5SSM(nn.Module):
     clip_eigs: bool = False
     bidirectional: bool = False
     step_rescale: float = 1.0
+    use_swr: bool = False
+    swr_window_size: int = 16
 
     """ The S5 SSM
         Args:
@@ -635,25 +638,50 @@ class S5SSM(nn.Module):
         input_dtype = input_sequence.dtype
         input_fp32 = input_sequence.astype(np.float32)
 
-        # apply_ssm: BF16 matmul + FP32 scan, returns FP32 (or tuple if return_hidden)
-        if return_hidden:
-            hidden_out, ys = apply_ssm(self.Lambda_bar,
-                                        self.B_bar,
-                                        self.C_tilde,
-                                        input_fp32,
-                                        self.conj_sym,
-                                        self.bidirectional,
-                                        hidden_in=hidden_in,
-                                        return_hidden=True)
+        # Choose between standard associative_scan and SWR (Sliding Window Recurrences)
+        # SWR provides higher Arithmetic Intensity by using matmul instead of scan
+        if self.use_swr:
+            # SWR: Block Two-Pass algorithm for higher Arithmetic Intensity
+            if return_hidden:
+                hidden_out, ys = apply_ssm_swr(self.Lambda_bar,
+                                                self.B_bar,
+                                                self.C_tilde,
+                                                input_fp32,
+                                                self.conj_sym,
+                                                self.bidirectional,
+                                                window_size=self.swr_window_size,
+                                                hidden_in=hidden_in,
+                                                return_hidden=True)
+            else:
+                ys = apply_ssm_swr(self.Lambda_bar,
+                                   self.B_bar,
+                                   self.C_tilde,
+                                   input_fp32,
+                                   self.conj_sym,
+                                   self.bidirectional,
+                                   window_size=self.swr_window_size,
+                                   hidden_in=hidden_in,
+                                   return_hidden=False)
         else:
-            ys = apply_ssm(self.Lambda_bar,
-                           self.B_bar,
-                           self.C_tilde,
-                           input_fp32,
-                           self.conj_sym,
-                           self.bidirectional,
-                           hidden_in=hidden_in,
-                           return_hidden=False)
+            # Standard: BF16 matmul + FP32 scan, returns FP32 (or tuple if return_hidden)
+            if return_hidden:
+                hidden_out, ys = apply_ssm(self.Lambda_bar,
+                                            self.B_bar,
+                                            self.C_tilde,
+                                            input_fp32,
+                                            self.conj_sym,
+                                            self.bidirectional,
+                                            hidden_in=hidden_in,
+                                            return_hidden=True)
+            else:
+                ys = apply_ssm(self.Lambda_bar,
+                               self.B_bar,
+                               self.C_tilde,
+                               input_fp32,
+                               self.conj_sym,
+                               self.bidirectional,
+                               hidden_in=hidden_in,
+                               return_hidden=False)
 
         # jax.debug.print("[S5SSM.__call__] ys from apply_ssm has NaN: {}, dtype: {}", np.any(np.isnan(ys)), ys.dtype)  # DEBUG BF16
 
@@ -717,10 +745,17 @@ def init_S5SSM(H,
                dt_max,
                conj_sym,
                clip_eigs,
-               bidirectional
+               bidirectional,
+               use_swr=False,
+               swr_window_size=16
                ):
     """Convenience function that will be used to initialize the SSM.
-       Same arguments as defined in S5SSM above."""
+       Same arguments as defined in S5SSM above.
+
+       Additional SWR (Sliding Window Recurrences) arguments:
+           use_swr (bool): Whether to use SWR for higher Arithmetic Intensity
+           swr_window_size (int): Window size for SWR (default 16)
+    """
     return partial(S5SSM,
                    H=H,
                    P=P,
@@ -734,4 +769,6 @@ def init_S5SSM(H,
                    dt_max=dt_max,
                    conj_sym=conj_sym,
                    clip_eigs=clip_eigs,
-                   bidirectional=bidirectional)
+                   bidirectional=bidirectional,
+                   use_swr=use_swr,
+                   swr_window_size=swr_window_size)

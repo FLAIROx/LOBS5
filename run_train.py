@@ -208,6 +208,10 @@ if __name__ == "__main__":
 						help="whether to enforce the left-half plane condition")
 	parser.add_argument("--bidirectional", type=str2bool, default=False,  #False,
 						help="whether to use bidirectional model")
+	parser.add_argument("--use_swr", type=str2bool, default=False,
+						help="use Sliding Window Recurrences (SWR) for higher Arithmetic Intensity")
+	parser.add_argument("--swr_window_size", type=int, default=16,
+						help="window size for SWR (default 16, should align with GPU warp size)")
 	parser.add_argument("--dt_min", type=float, default=0.001,
 						help="min value to sample initial timescale params from")
 	parser.add_argument("--dt_max", type=float, default=0.1,
