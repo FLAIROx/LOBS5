@@ -84,8 +84,14 @@ def train(args):
         # Only main process initializes WandB in online mode
         if is_main_process:
             if args.USE_WANDB:
+                # Build wandb run name: d{d_model}_l{n_layers}_b{blocks}_bsz{micro}x{gpus}_seed{seed}_jid{job_id}
+                slurm_job_id = os.environ.get('SLURM_JOB_ID', 'local')
+                micro_bsz = args.global_bsz // args.num_devices
+                wandb_run_name = f"d{args.d_model}_l{args.n_layers}_b{args.blocks}_bsz{micro_bsz}x{args.num_devices}_seed{args.jax_seed}_jid{slurm_job_id}"
+
                 # Make wandb config dictionary
                 run = wandb.init(
+                    name=wandb_run_name,
                     project=args.wandb_project,
                     job_type='model_training',
                     config=vars(args),
