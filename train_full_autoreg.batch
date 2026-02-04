@@ -13,7 +13,7 @@
 # === Default config for 55M model with TBPTT ar_hidden ===
 # Note: ar_hidden mode requires more memory (window=500 fixed)
 # Memory sweep: BSZ=16+ OOM, BSZ=12 is max for 85GB GPU
-export PER_GPU_BSZ=${PER_GPU_BSZ:-12}
+export PER_GPU_BSZ=${PER_GPU_BSZ:-4}  # Reduced for 10k msg sequences (20x longer)
 
 echo "============================================"
 echo "Job started at: $(date)"
@@ -104,7 +104,7 @@ esac
 USE_TBPTT=${USE_TBPTT:-True}
 TBPTT_MODE=${TBPTT_MODE:-ar_hidden}           # ar_hidden (True TBPTT) or gradient_chunking
 TBPTT_WINDOW_SIZE=${TBPTT_WINDOW_SIZE:-500}   # messages per window for ar_hidden mode (500=12k tokens, fixed)
-TBPTT_RESET_EVERY_EPOCH=${TBPTT_RESET_EVERY_EPOCH:-False}  # reset hidden at epoch start
+TBPTT_RESET_EVERY_EPOCH=${TBPTT_RESET_EVERY_EPOCH:-True}  # reset hidden at epoch start (zero-reset per Sascha)
 N_TBPTT_CHUNKS=${N_TBPTT_CHUNKS:-4}           # chunks for gradient_chunking mode
 
 echo "[*] TBPTT: $USE_TBPTT"
@@ -327,7 +327,7 @@ python -u -B run_train.py \
     --p_dropout=0.0 \
     --warmup_end=1 \
     --weight_decay=0.05 \
-    --msg_seq_len=500 \
+    --msg_seq_len=10000 \
     --use_book_data=True \
     --use_simple_book=False \
     --book_transform=True \
