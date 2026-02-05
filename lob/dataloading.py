@@ -77,10 +77,12 @@ def create_lobster_prediction_dataset(
 	# NOTE: drop_last=True recompiles the model for a smaller batch size
 	val_loader = make_data_loader(
 		dataset_obj.dataset_val, dataset_obj, seed=seed, batch_size=bsz,
-		drop_last=True, shuffle=False, num_workers=n_data_workers)
+		drop_last=True, shuffle=False, num_workers=n_data_workers,
+		worker_init_fn=force_cpu)
 	tst_loader = make_data_loader(
 		dataset_obj.dataset_test, dataset_obj, seed=seed, batch_size=bsz,
-		drop_last=True, shuffle=False, num_workers=n_data_workers)
+		drop_last=True, shuffle=False, num_workers=n_data_workers,
+		worker_init_fn=force_cpu)
 
 	N_CLASSES = dataset_obj.d_output
 	SEQ_LENGTH = dataset_obj.L
