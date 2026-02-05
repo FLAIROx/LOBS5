@@ -131,6 +131,7 @@ def load_checkpoint(
         # config_dict: dict,
         step: Optional[int] = None,
         train: bool = True,
+        partial_restore: bool = False,
     ) -> dict[str, Any]:
 
     mngr = ocp.CheckpointManager(
@@ -143,12 +144,14 @@ def load_checkpoint(
     if step is None:
         step = mngr.latest_step()
 
+    # Prepare restore args with optional partial restore
+    # strict=False allows loading checkpoints even when model structure changed
     loaded = mngr.restore(
         step,
         args=ocp.args.Composite(
             state=ocp.args.StandardRestore(
-                # only stored trainstate from a single device (as they are all the same)
-                deduplicate_trainstate(state)
+                deduplicate_trainstate(state),
+                strict=(not partial_restore),  # Allow mismatched params if partial_restore=True
             ),
             metadata=ocp.args.JsonRestore()
         )
@@ -237,7 +240,9 @@ def init_train_state(
         dt_max=args.dt_max,
         conj_sym=args.conj_sym,
         clip_eigs=args.clip_eigs,
-        bidirectional=args.bidirectional
+        bidirectional=args.bidirectional,
+        use_swr=getattr(args, 'use_swr', False),
+        swr_window_size=getattr(args, 'swr_window_size', 16)
     )
     
     if args.use_book_data:
@@ -445,7 +450,9 @@ def init_train_state_with_prodigy(
         dt_max=args.dt_max,
         conj_sym=args.conj_sym,
         clip_eigs=args.clip_eigs,
-        bidirectional=args.bidirectional
+        bidirectional=args.bidirectional,
+        use_swr=getattr(args, 'use_swr', False),
+        swr_window_size=getattr(args, 'swr_window_size', 16)
     )
 
     # Model class setup (same as normal init)

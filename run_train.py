@@ -153,6 +153,8 @@ if __name__ == "__main__":
 	parser.add_argument("--restore", type=str,
 		     			help="if given restore from given checkpoint dir")
 	parser.add_argument("--restore_step", type=int)
+	parser.add_argument("--partial_restore", type=bool, default=True,
+		     			help="allow partial checkpoint restore when model structure changed (default: True)")
 	parser.add_argument("--msg_seq_len", type=int, default=500,  # 500
 						help="How many past messages to include in each sample")
 	parser.add_argument("--n_data_workers", type=int, default=0,
@@ -208,6 +210,10 @@ if __name__ == "__main__":
 						help="whether to enforce the left-half plane condition")
 	parser.add_argument("--bidirectional", type=str2bool, default=False,  #False,
 						help="whether to use bidirectional model")
+	parser.add_argument("--use_swr", type=str2bool, default=False,
+						help="use Sliding Window Recurrences (SWR) for higher Arithmetic Intensity")
+	parser.add_argument("--swr_window_size", type=int, default=16,
+						help="window size for SWR (default 16, should align with GPU warp size)")
 	parser.add_argument("--dt_min", type=float, default=0.001,
 						help="min value to sample initial timescale params from")
 	parser.add_argument("--dt_max", type=float, default=0.1,
@@ -279,29 +285,6 @@ if __name__ == "__main__":
 				help="Use BF16 mixed precision training")
 
 	# ============================================================================
-	# Backend Selection: S5 (SSM) or Transformer (MaxText)
-	# ============================================================================
-	parser.add_argument("--backend", type=str, default="s5",
-				choices=["s5", "transformer"],
-				help="Model backend: 's5' (default, SSM-based) or 'transformer' (MaxText LLaMA-style)")
-	
-	# Transformer-specific parameters (only used when backend=transformer)
-	parser.add_argument("--num_heads", type=int, default=16,
-				help="[Transformer] Number of attention heads")
-	parser.add_argument("--num_kv_heads", type=int, default=None,
-				help="[Transformer] Number of KV heads for GQA (default: same as num_heads)")
-	parser.add_argument("--head_dim", type=int, default=None,
-				help="[Transformer] Dimension per head (default: d_model / num_heads)")
-	parser.add_argument("--mlp_dim", type=int, default=None,
-				help="[Transformer] FFN intermediate dimension (default: 4 * d_model)")
-	parser.add_argument("--attention_kernel", type=str, default="flash",
-				choices=["dot_product", "flash", "cudnn_flash_te"],
-				help="[Transformer] Attention kernel: dot_product, flash (default), cudnn_flash_te")
-	parser.add_argument("--rope_type", type=str, default="llama3.1",
-				choices=["default", "llama3.1", "yarn"],
-				help="[Transformer] RoPE type: default, llama3.1 (default), yarn")
-
-	# ============================================================================
 	# Prodigy LR Estimation Mode (Plan B)
 	# ============================================================================
 	#
@@ -328,6 +311,46 @@ if __name__ == "__main__":
 	parser.add_argument("--prodigy_lr_multiplier", type=float, default=1.0,
 				help="Multiplier for Prodigy's estimated LR (default 1.0). "
 				     "Use <1.0 for more conservative, >1.0 for more aggressive.")
+
+	# ============================================================================
+	# TBPTT (Truncated Backpropagation Through Time) Gradient Chunking
+	# ============================================================================
+	#
+	# TBPTT splits long sequences into chunks for gradient computation, reducing
+	# XLA compilation memory by O(1/n_chunks²). Use this when:
+	#   - Sequence length is very long (>10k tokens)
+	#   - XLA compilation runs out of memory
+	#   - You want to trade training speed for memory efficiency
+	#
+	# Usage:
+	#   # Enable TBPTT with 4 chunks (reduces memory to ~1/16):
+	#   python run_train.py --model_preset 55M --use_tbptt True --n_tbptt_chunks 4
+	#
+	#   # More chunks = lower memory, slower training:
+	#   python run_train.py --model_preset 55M --use_tbptt True --n_tbptt_chunks 8
+	#
+	# How it works:
+	#   1. Sequence (BSZ, L) is split into (n_chunks, BSZ, L/n_chunks)
+	#   2. Each chunk computes forward pass + gradients independently
+	#   3. Gradients are accumulated and averaged
+	#   4. XLA only compiles for chunk_size, not full sequence length
+	#
+	# Memory formula: expected_memory ≈ (1/n_chunks)² × original_memory
+	#   - 4 chunks: ~6.25% of original (~94% reduction)
+	#   - 8 chunks: ~1.56% of original (~98% reduction)
+	#
+	# ============================================================================
+	parser.add_argument("--use_tbptt", type=str2bool, default=False,
+			help="Enable TBPTT gradient chunking to reduce XLA compilation memory")
+	parser.add_argument("--n_tbptt_chunks", type=int, default=4,
+			help="Number of chunks for TBPTT gradient accumulation (default: 4)")
+	parser.add_argument("--tbptt_mode", type=str, default="gradient_chunking",
+			choices=["gradient_chunking", "ar_hidden"],
+			help="TBPTT mode: gradient_chunking (no hidden carry) or ar_hidden (hidden carry)")
+	parser.add_argument("--tbptt_window_size", type=int, default=500,
+			help="Window size in messages for TBPTT ar_hidden mode (default: 500)")
+	parser.add_argument("--tbptt_reset_every_epoch", type=str2bool, default=True,
+			help="Reset hidden state at start of each epoch for ar_hidden mode")
 
 	# ============================================================================
 	# Step-Level Checkpointing for Long-Running Jobs (12.5-14h epochs, 24h max)
@@ -406,26 +429,6 @@ if __name__ == "__main__":
 
 	# Set BF16 environment variable based on command-line argument
 	os.environ['USE_BF16'] = '1' if args.use_bf16 else '0'
-
-	# ============================================
-	# Transformer Default Parameters
-	# ============================================
-	if args.backend == "transformer":
-		print(f"[*] Using Transformer backend (MaxText LLaMA-style)")
-		# Fill in Transformer defaults if not specified
-		if args.num_kv_heads is None:
-			args.num_kv_heads = args.num_heads
-		if args.head_dim is None:
-			args.head_dim = args.d_model // args.num_heads
-		if args.mlp_dim is None:
-			args.mlp_dim = 4 * args.d_model
-		
-		print(f"    d_model={args.d_model}, n_layers={args.n_layers}")
-		print(f"    num_heads={args.num_heads}, num_kv_heads={args.num_kv_heads}, head_dim={args.head_dim}")
-		print(f"    mlp_dim={args.mlp_dim}")
-		print(f"    attention_kernel={args.attention_kernel}, rope_type={args.rope_type}")
-	else:
-		print(f"[*] Using S5 backend (SSM-based)")
 
 	# Parse checkpoint_every_n_steps: "auto", "0", or integer
 	if args.checkpoint_every_n_steps.lower() == "auto":

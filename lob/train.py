@@ -17,19 +17,13 @@ from lob.init_train import (
     save_checkpoint,
     deduplicate_trainstate,
 )
-# LOBMAX (Transformer backend) initialization
-try:
-    from lobmax.init_train import init_lobmax_train_state
-    LOBMAX_AVAILABLE = True
-except ImportError:
-    LOBMAX_AVAILABLE = False
-
 from lob.dataloading import create_lobster_prediction_dataset, create_lobster_train_loader#, Datasets
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import (
     reduce_lr_on_plateau, linear_warmup,
     cosine_annealing, constant_lr, train_epoch, validate,
-    create_jit_train_step, create_jit_eval_step, initialize_mesh, get_global_mesh,
+    create_jit_train_step, create_jit_train_step_tbptt_ar_hidden,
+    create_jit_eval_step, initialize_mesh, get_global_mesh,
     create_lobs5_learning_rate_schedule,
     # Prodigy LR estimation (Plan B)
     extract_prodigy_estimated_lr,
@@ -90,8 +84,14 @@ def train(args):
         # Only main process initializes WandB in online mode
         if is_main_process:
             if args.USE_WANDB:
+                # Build wandb run name: d{d_model}_l{n_layers}_b{blocks}_bsz{micro}x{gpus}_seed{seed}_jid{job_id}
+                slurm_job_id = os.environ.get('SLURM_JOB_ID', 'local')
+                micro_bsz = args.global_bsz // args.num_devices
+                wandb_run_name = f"d{args.d_model}_l{args.n_layers}_b{args.blocks}_bsz{micro_bsz}x{args.num_devices}_seed{args.jax_seed}_jid{slurm_job_id}"
+
                 # Make wandb config dictionary
                 run = wandb.init(
+                    name=wandb_run_name,
                     project=args.wandb_project,
                     job_type='model_training',
                     config=vars(args),
@@ -217,51 +217,16 @@ def train(args):
             warmup_end_step = prodigy_schedule_info['warmup_end_step']
         else:
             # Standard initialization (no Prodigy)
-            # ==================================================================
-            # Check backend: S5 (SSM) or Transformer (LOBMAX)
-            # ==================================================================
-            backend = getattr(args, 'backend', 's5')
-            
-            if backend == 'transformer':
-                # LOBMAX Transformer backend
-                if not LOBMAX_AVAILABLE:
-                    raise ImportError(
-                        "LOBMAX not available. Make sure lobmax/ directory exists "
-                        "and MaxText is in the path."
-                    )
-                log_with_timestamp(f"Initializing LOBMAX (Transformer) model...")
-                
-                # Initialize mesh for LOBMAX
-                from lob.sharding_utils import initialize_mesh, get_global_mesh
-                mesh = get_global_mesh()
-                if mesh is None:
-                    mesh = initialize_mesh(args.num_devices)
-                
-                state, model_cls, total_params = init_lobmax_train_state(
-                    args,
-                    n_classes=n_classes,
-                    seq_len=seq_len,
-                    book_dim=book_dim,
-                    book_seq_len=book_seq_len,
-                    train_size=train_size,
-                    mesh=mesh,
-                    print_shapes=True
-                )
-                # For Transformer, use lr_base instead of ssm_lr_base
-                ssm_lr = getattr(args, 'lr_base', getattr(args, 'ssm_lr_base', 0.0005))
-            else:
-                # S5 SSM backend (original)
-                state, model_cls, total_params = init_train_state(
-                    args,
-                    n_classes=n_classes,
-                    seq_len=seq_len,
-                    book_dim=book_dim,
-                    book_seq_len=book_seq_len,
-                    train_size=train_size,  # NEW: for schedule calculation
-                    print_shapes=True
-                )
-                ssm_lr = args.ssm_lr_base
-            
+            state, model_cls, total_params = init_train_state(
+                args,
+                n_classes=n_classes,
+                seq_len=seq_len,
+                book_dim=book_dim,
+                book_seq_len=book_seq_len,
+                train_size=train_size,  # NEW: for schedule calculation
+                print_shapes=True
+            )
+            ssm_lr = args.ssm_lr_base
             lr = args.lr_factor * ssm_lr
             steps_per_epoch = train_size // args.global_bsz
             if hasattr(args, 'curtail_epochs') and args.curtail_epochs is not None:
@@ -291,7 +256,6 @@ def train(args):
         # ==================================================================
 
         # Log BF16 status
-        import os
         use_bf16 = os.environ.get('USE_BF16', '1') == '1'
         log_with_timestamp(f"Training precision: {'BF16 (mixed)' if use_bf16 else 'FP32'}")
         if use_bf16:
@@ -317,33 +281,25 @@ def train(args):
 
         if args.restore is not None and args.restore != '':
             print(f"[*] Restoring weights from {args.restore}")
+            partial_restore = getattr(args, 'partial_restore', True)
+            print(f"[*] Partial restore: {partial_restore}")
             ckpt = load_checkpoint(
                 state,
                 args.restore,
                 # args.__dict__,
                 step=args.restore_step,
+                partial_restore=partial_restore,
             )
             state = ckpt['model']
         
         val_model = model_cls(training=False, step_rescale=1)
-        
-        # Initialize hidden state (S5 only - Transformer doesn't use hidden state)
-        backend = getattr(args, 'backend', 's5')
-        if backend == 'transformer':
-            # Transformer doesn't have hidden state - use None placeholder
-            init_hidden = None
-            log_with_timestamp("Transformer backend: No hidden state initialization needed")
-        else:
-            # S5 SSM backend: initialize hidden state
-            init_hidden = model_cls().initialize_carry(
-                batch_size=args.global_bsz // args.num_devices,
-                hidden_size=(ssm_size // pow(2, int(args.conj_sym))),
-                n_message_layers=args.n_message_layers,
-                n_book_pre_layers=args.n_book_pre_layers,
-                n_book_post_layers=args.n_book_post_layers,
-                n_fused_layers=args.n_layers,
-                h_size_ema=ssm_size
-            )
+        init_hidden=model_cls().initialize_carry(batch_size=args.global_bsz,
+                                                hidden_size=(ssm_size // pow(2,int(args.conj_sym))),
+                                                n_message_layers=args.n_message_layers,
+                                                n_book_pre_layers=args.n_book_pre_layers ,
+                                                n_book_post_layers=args.n_book_post_layers,
+                                                n_fused_layers=args.n_layers,
+                                                h_size_ema=ssm_size)
 
         # ====================================================================
         # New: Initialize mesh and JIT-compiled train_step (jax.jit + shardings migration)
@@ -356,11 +312,39 @@ def train(args):
 
         # Create JIT-compiled train_step
         # has_book_data parameter: set based on args.use_book_data
-        jit_train_step_fn = create_jit_train_step(
-            mesh,
-            state,
-            has_book_data=args.use_book_data
-        )
+        # TBPTT parameters
+        use_tbptt = getattr(args, 'use_tbptt', False)
+        n_tbptt_chunks = getattr(args, 'n_tbptt_chunks', 4)
+        tbptt_mode = getattr(args, 'tbptt_mode', 'gradient_chunking')
+        tbptt_window_size = getattr(args, 'tbptt_window_size', 500)
+        tbptt_reset_every_epoch = getattr(args, 'tbptt_reset_every_epoch', True)
+
+        if use_tbptt:
+            if tbptt_mode == "gradient_chunking":
+                log_with_timestamp(f"TBPTT enabled: {n_tbptt_chunks} chunks", prefix="Train")
+                log_with_timestamp(f"Expected memory reduction: ~{100 - 100/(n_tbptt_chunks**2):.1f}%", prefix="Train")
+            elif tbptt_mode == "ar_hidden":
+                if args.merging != "padded":
+                    raise NotImplementedError("tbptt_mode=ar_hidden currently supports merging='padded' only")
+                log_with_timestamp(f"TBPTT (AR hidden) enabled: window_size={tbptt_window_size} msgs", prefix="Train")
+            else:
+                raise ValueError(f"Unknown tbptt_mode: {tbptt_mode}")
+
+        if use_tbptt and tbptt_mode == "ar_hidden":
+            jit_train_step_fn = create_jit_train_step_tbptt_ar_hidden(
+                mesh,
+                state,
+                has_book_data=args.use_book_data,
+                tbptt_window_size=tbptt_window_size,
+            )
+        else:
+            jit_train_step_fn = create_jit_train_step(
+                mesh,
+                state,
+                has_book_data=args.use_book_data,
+                use_tbptt=use_tbptt,
+                n_tbptt_chunks=n_tbptt_chunks,
+            )
 
         # Create JIT-compiled eval_step
         jit_eval_step_fn = create_jit_eval_step(
@@ -499,6 +483,9 @@ def train(args):
     # Track Prodigy optimizer switch status
     prodigy_switched = False
 
+    # Hidden carry for AR TBPTT
+    tbptt_hidden = init_hidden if (use_tbptt and tbptt_mode == "ar_hidden") else None
+
     for epoch in range(args.epochs):
         print(f"[*] Starting Training Epoch {epoch + 1}...")
         # LR scheduling now handled by optax schedules - no manual switching needed
@@ -508,7 +495,7 @@ def train(args):
         train_rng, skey = random.split(train_rng)
 
         #Pass an initial hidden state to be used in case of the 'RNN' forward pass being used.
-        state, train_loss, ce_by_tok, interrupted_at_step = train_epoch(
+        state, train_loss, ce_by_tok, interrupted_at_step, tbptt_hidden_out = train_epoch(
             state,
             skey,
             trainloader,
@@ -527,7 +514,7 @@ def train(args):
             # MFU tracking parameters
             model_params=total_params,
             batch_size=args.global_bsz,
-            peak_tflops=495.0,  # GH200 BF16 Tensor Core peak
+            peak_tflops=1000.0,
             goodput_monitor=goodput_monitor,
             # Step-level checkpointing parameters
             checkpoint_callback=step_checkpoint_callback,
@@ -535,7 +522,19 @@ def train(args):
             job_start_time=job_start_time,
             max_job_hours=args.max_job_hours,
             save_before_timeout_minutes=args.save_before_timeout_minutes,
+            # TBPTT parameters
+            use_tbptt=use_tbptt,
+            n_tbptt_chunks=n_tbptt_chunks,
+            tbptt_mode=tbptt_mode,
+            tbptt_window_size=tbptt_window_size,
+            tbptt_hidden_in=tbptt_hidden,
+            tbptt_reset_every_epoch=tbptt_reset_every_epoch,
         )
+
+        # Note: tbptt_hidden is NOT carried across epochs
+        # Each epoch starts with zero-initialized hidden state
+        # This ensures samples from different time periods don't share history
+        # (Removed cross-epoch hidden carry as it violates temporal independence)
 
         # Check if epoch was interrupted due to timeout
         if interrupted_at_step is not None:
@@ -806,4 +805,3 @@ def train(args):
         # jax.profiler.stop_trace()
         if count > args.early_stop_patience:
             break
-

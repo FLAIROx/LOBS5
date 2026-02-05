@@ -2,20 +2,18 @@
 #SBATCH --job-name=lobs5_autoreg
 #SBATCH --output=logs_lobs5/lobs5_%j.out
 #SBATCH --error=logs_lobs5/lobs5_%j.err
-# === 1-node config (commented out) ===
-# #SBATCH --nodes=1
-
-# === 25-node 360M config (active) ===
-#SBATCH --nodes=25
+# === 1-node config (for 55M model testing) ===
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
 #SBATCH --time=23:59:59
-#SBATCH --contiguous
 #SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
 
-# === 25-node 360M config: micro_bsz=8 ===
-export PER_GPU_BSZ=8
+# === Default config for 55M model with TBPTT ar_hidden ===
+# Note: ar_hidden mode requires more memory (window=500 fixed)
+# Memory sweep: BSZ=16+ OOM, BSZ=12 is max for 85GB GPU
+export PER_GPU_BSZ=${PER_GPU_BSZ:-4}  # Reduced for 10k msg sequences (20x longer)
 
 echo "============================================"
 echo "Job started at: $(date)"
@@ -39,7 +37,7 @@ echo "============================================"
 # If not set, defaults to individual parameter values below
 # PER_GPU_BSZ overrides the preset's batch size (optional)
 # ============================================
-MODEL_PRESET=${MODEL_PRESET:-1B}
+MODEL_PRESET=${MODEL_PRESET:-55M}
 echo "[*] Model preset: $MODEL_PRESET"
 export MODEL_PRESET
 
@@ -55,19 +53,104 @@ if [ -n "$CURTAIL_EPOCHS" ]; then
     export CURTAIL_EPOCHS
 fi
 
+# ============================================
+# Training Version Selection
+# ============================================
+# TRAIN_VERSION: v2 | v2.5 | v3
+#   v2   = Full Autoregressive (no TBPTT)
+#   v2.5 = Full AR + TBPTT (ar_hidden mode)  [DEFAULT]
+#   v3   = Sliding Window Recurrences (SWR)
+#
+# Usage:
+#   TRAIN_VERSION=v2 sbatch train_full_autoreg.batch
+#   TRAIN_VERSION=v2.5 sbatch train_full_autoreg.batch
+#   TRAIN_VERSION=v3 sbatch train_full_autoreg.batch
+# ============================================
+TRAIN_VERSION=${TRAIN_VERSION:-v2.5}
+
+# Configure based on version
+case $TRAIN_VERSION in
+    v2)
+        USE_TBPTT=False
+        USE_SWR=False
+        echo "[*] Version: v2 (Full Autoregressive, no TBPTT)"
+        ;;
+    v2.5)
+        USE_TBPTT=True
+        TBPTT_MODE=ar_hidden
+        USE_SWR=False
+        echo "[*] Version: v2.5 (Full AR + TBPTT ar_hidden)"
+        ;;
+    v3)
+        USE_TBPTT=False
+        USE_SWR=True
+        SWR_WINDOW_SIZE=${SWR_WINDOW_SIZE:-16}
+        echo "[*] Version: v3 (Sliding Window Recurrences, window=$SWR_WINDOW_SIZE)"
+        ;;
+    *)
+        echo "Error: Unknown TRAIN_VERSION=$TRAIN_VERSION"
+        echo "Valid options: v2, v2.5, v3"
+        exit 1
+        ;;
+esac
+
+# ============================================
+# TBPTT (Truncated Backpropagation Through Time)
+# ============================================
+# Note: TBPTT settings are auto-configured by TRAIN_VERSION above
+# Manual override still available:
+#   USE_TBPTT=True TBPTT_MODE=ar_hidden sbatch train_full_autoreg.batch
+# ============================================
+USE_TBPTT=${USE_TBPTT:-True}
+TBPTT_MODE=${TBPTT_MODE:-ar_hidden}           # ar_hidden (True TBPTT) or gradient_chunking
+TBPTT_WINDOW_SIZE=${TBPTT_WINDOW_SIZE:-500}   # messages per window for ar_hidden mode (500=12k tokens, fixed)
+TBPTT_RESET_EVERY_EPOCH=${TBPTT_RESET_EVERY_EPOCH:-True}  # reset hidden at epoch start (zero-reset per Sascha)
+N_TBPTT_CHUNKS=${N_TBPTT_CHUNKS:-4}           # chunks for gradient_chunking mode
+
+echo "[*] TBPTT: $USE_TBPTT"
+echo "[*] TBPTT mode: $TBPTT_MODE"
+if [ "$TBPTT_MODE" = "ar_hidden" ]; then
+    echo "[*] TBPTT window size: $TBPTT_WINDOW_SIZE msgs"
+    echo "[*] TBPTT reset every epoch: $TBPTT_RESET_EVERY_EPOCH"
+else
+    echo "[*] TBPTT chunks: $N_TBPTT_CHUNKS"
+fi
+export USE_TBPTT TBPTT_MODE TBPTT_WINDOW_SIZE TBPTT_RESET_EVERY_EPOCH N_TBPTT_CHUNKS
+export USE_SWR SWR_WINDOW_SIZE TRAIN_VERSION
+
+# ============================================
+# Checkpoint Restore Settings
+# ============================================
+# Usage: RESTORE_PATH=/path/to/checkpoint RESTORE_STEP=12345 sbatch train_full_autoreg.batch
+RESTORE_PATH=${RESTORE_PATH:-}
+RESTORE_STEP=${RESTORE_STEP:-}
+if [ -n "$RESTORE_PATH" ]; then
+    echo "[*] Restoring from: $RESTORE_PATH"
+    echo "[*] Restore step: $RESTORE_STEP"
+fi
+export RESTORE_PATH RESTORE_STEP
+
 # Create logs directory
 mkdir -p logs_lobs5
 
 # Change to working directory
-cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
+cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5
 
 # Configuration
 GPUS_PER_NODE=4
 NNODES=$SLURM_NNODES
 TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
 
+# Calculate global batch size (PER_GPU_BSZ * TOTAL_GPUS)
+if [ -n "$PER_GPU_BSZ" ]; then
+    GLOBAL_BSZ=$((PER_GPU_BSZ * TOTAL_GPUS))
+else
+    GLOBAL_BSZ=""
+fi
+export GPUS_PER_NODE NNODES TOTAL_GPUS GLOBAL_BSZ
+
 echo "[*] Total GPUs: $TOTAL_GPUS ($NNODES nodes × $GPUS_PER_NODE GPUs/node)"
-echo "[*] Batch size will be set by MODEL_PRESET ($MODEL_PRESET)"
+echo "[*] Global batch size: ${GLOBAL_BSZ:-preset default}"
 
 # Multi-Node Setup
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
@@ -80,8 +163,9 @@ echo "[*] Multi-node mode: $NNODES nodes"
 echo "[*] Coordinator: $JAX_COORDINATOR_ADDRESS"
 
 # Data paths
-DATA_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022"
-TEST_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/JAN2023/GOOG_24tok_preproc"
+# Data paths: train on 2022, test on 2021
+export DATA_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022"
+export TEST_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2021"
 
 # Launch with srun - inline wrapper
 srun --nodes=$NNODES \
@@ -230,19 +314,13 @@ echo "[Wrapper] Available GPUs:"
 nvidia-smi --list-gpus | head -4
 
 # Run training
-cd /lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5
-# === 25-node 360M config (explicit params, bypass preset) ===
-# ssm_lr_base: 0.0002 (1-node) * 25 = 0.0005 (linear scaling)
-# Original preset: --model_preset=360M
+cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5
+
+# === Use MODEL_PRESET (default: 55M for 24tok) ===
 python -u -B run_train.py \
     --USE_WANDB=True \
-    --d_model=2048 \
-    --n_layers=24 \
-    --blocks=32 \
-    --ssm_size_base=2048 \
-    --ssm_lr_base=0.0005 \
-    --lr_factor=1 \
-    --wandb_project=lobs5-360M-25node \
+    --model_preset='"$MODEL_PRESET"' \
+    --wandb_project=lobs5-55M-d1024-tbptt \
     --wandb_entity=kang-oxford \
     --C_init=trunc_standard_normal \
     --prenorm=True \
@@ -261,7 +339,7 @@ python -u -B run_train.py \
     --p_dropout=0.0 \
     --warmup_end=1 \
     --weight_decay=0.05 \
-    --msg_seq_len=500 \
+    --msg_seq_len=10000 \
     --use_book_data=True \
     --use_simple_book=False \
     --book_transform=True \
@@ -279,8 +357,18 @@ python -u -B run_train.py \
     --debug_overfit=False \
     --lr_patience=2 \
     --use_bf16=True \
-    --token_mode=24 \
+    --token_mode=${TOKEN_MODE:-24} \
+    --use_tbptt='"$USE_TBPTT"' \
+    --tbptt_mode='"$TBPTT_MODE"' \
+    --tbptt_window_size='"$TBPTT_WINDOW_SIZE"' \
+    --tbptt_reset_every_epoch='"$TBPTT_RESET_EVERY_EPOCH"' \
+    --n_tbptt_chunks='"$N_TBPTT_CHUNKS"' \
+    '"${USE_SWR:+--use_swr=$USE_SWR}"' \
+    '"${SWR_WINDOW_SIZE:+--swr_window_size=$SWR_WINDOW_SIZE}"' \
+    ${GLOBAL_BSZ:+--global_bsz=$GLOBAL_BSZ} \
     ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS} \
+    ${RESTORE_PATH:+--restore=$RESTORE_PATH} \
+    ${RESTORE_STEP:+--restore_step=$RESTORE_STEP} \
 '
     # NOTE: The following parameters are now controlled by --model_preset:
     #   --blocks (preset controls)
@@ -291,7 +379,7 @@ python -u -B run_train.py \
     #   --ssm_lr_base (preset controls)
     #   --lr_factor (preset controls)
     #   --wandb_project (preset controls)
-    # --restore=/lus/lfs1aip2/home/s5e/kangli.s5e/AlphaTrade/LOBS5/checkpoints/likely-aardvark-15_p4k79dtn \
+    # --restore=/lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5/checkpoints/likely-aardvark-15_p4k79dtn \
     # --restore_step=6
 
 

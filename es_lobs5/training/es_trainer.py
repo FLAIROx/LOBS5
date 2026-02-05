@@ -96,6 +96,7 @@ from jax.experimental.multihost_utils import process_allgather
 from functools import partial
 import argparse
 from tqdm import tqdm
+import optax
 import time
 from typing import Tuple, Optional, NamedTuple, Dict, Any
 
@@ -445,6 +446,10 @@ def create_es_config():
     parser.add_argument('--sigma_min', type=float, default=0.01,
                         help='Minimum sigma (floor). Default: 0.01')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--lr_decay', type=float, default=0.9997,
+                        help='LR decay rate per epoch. Default: 0.9997')
+    parser.add_argument('--lr_min', type=float, default=0.001,
+                        help='Minimum LR (floor). Default: 0.001')
     parser.add_argument('--lora_rank', type=int, default=4, help='LORA rank')
 
     # Training mode (replaces use_lora, freeze_nonlora, lora_v2, freeze_ssm)
@@ -700,6 +705,43 @@ def get_sim_msg_es(
     return sim_msg, msg_decoded
 
 
+def decode_policy_order_for_viz(
+    policy_msg_tokens: jnp.ndarray,
+    encoder: dict,
+    mid_price: float,
+    tick_size: int,
+    token_mode: int = 24
+) -> dict:
+    """Decode policy order tokens for visualization.
+
+    Args:
+        policy_msg_tokens: Raw policy message tokens (shape: msg_len)
+        encoder: Encoding dictionary for decode_msg
+        mid_price: Mid price at the time of order submission
+        tick_size: Tick size in cents
+        token_mode: Token mode (22 or 24)
+
+    Returns:
+        dict with keys: event_type, side, price, quantity, rel_price
+    """
+    from lob import encoding
+
+    msg_decoded = encoding.decode_msg(policy_msg_tokens, encoder, token_mode=token_mode)
+    event_type = int(msg_decoded[1])  # 1=Limit, 2=Cancel, 3=Delete, 4=Execute
+    side = int(msg_decoded[2])        # 0=Buy, 1=Sell
+    rel_price = int(msg_decoded[4])   # Relative price offset in ticks
+    quantity = int(msg_decoded[5])    # Order quantity
+    abs_price = mid_price + rel_price * tick_size
+
+    return {
+        'event_type': event_type,
+        'side': side,
+        'price': abs_price,
+        'quantity': quantity,
+        'rel_price': rel_price,
+    }
+
+
 def transform_L2_state_wrapper(
     cfg: 'Configuration',
     sim_state: 'LobState',
@@ -774,7 +816,7 @@ def get_mid_price(cfg: 'Configuration', sim_state: 'LobState', tick_size: int = 
     mid = (best_bid + best_ask) // 2
     mid = jnp.where((mid > 0) & jnp.isfinite(mid), mid, DEFAULT_MID)
 
-    return (mid // tick_size) * tick_size
+    return mid
 
 
 class ESTrainer:
@@ -848,7 +890,7 @@ class ESTrainer:
         # Load LOBS5 checkpoint
         print(f"[INIT] Loading checkpoint from {config.lobs5_checkpoint}")
         load_checkpoint_for_es = _get_checkpoint_loader()
-        self.lobs5_init, self.es_tree_key = load_checkpoint_for_es(config.lobs5_checkpoint)
+        self.lobs5_init, self.es_tree_key = load_checkpoint_for_es(config.lobs5_checkpoint, seed=config.seed)
 
         # Auto-detect token_mode from checkpoint (like run_inference.py)
         # This overrides the command-line default to ensure correct encoding/decoding
@@ -1283,6 +1325,18 @@ class ESTrainer:
         sim_state = self.sim.reset(self.init_book_l2)
         print(f"[INIT-STATE] Initialized JaxLOB with L2 book shape: {self.init_book_l2.shape}")
 
+        # DEBUG: Compare init_book_l2 with GT book data
+        if hasattr(self, 'replay_book_data') and self.replay_book_data is not None:
+            print("="*60)
+            print("[DEBUG-INIT] Comparing initial book state:")
+            print(f"  init_book_l2[0:2] (ask_p1, ask_s1): {self.init_book_l2[0:2]}")
+            print(f"  init_book_l2[2:4] (bid_p1, bid_s1): {self.init_book_l2[2:4]}")
+            print(f"  GT book[0] ask_p1 (col 3): {self.replay_book_data[0, 3]}")
+            print(f"  GT book[0] bid_p1 (col 5): {self.replay_book_data[0, 5]}")
+            print(f"  Diff ask: {float(self.init_book_l2[0]) - float(self.replay_book_data[0, 3])}")
+            print(f"  Diff bid: {float(self.init_book_l2[2]) - float(self.replay_book_data[0, 5])}")
+            print("="*60)
+
         # 2. Warmup: replay messages to initialize order book state
         n_warmup = getattr(config, 'n_warmup_msgs', 10)
         n_replay = min(n_warmup, len(self.replay_data_raw))
@@ -1292,6 +1346,20 @@ class ESTrainer:
             replay_jaxlob = msgs_to_jnp(replay_msgs_raw)
             sim_state = self.sim.process_orders_array(sim_state, replay_jaxlob)
             print(f"[INIT-STATE] Replayed {n_replay} warmup messages")
+
+            # DEBUG: Compare sim state after warmup with GT
+            if hasattr(self, 'replay_book_data') and self.replay_book_data is not None:
+                jaxlob_cfg = self.jaxlob_cfg  # Use stored config, not self.sim.config
+                sim_ask, sim_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
+                gt_ask = self.replay_book_data[n_replay, 3]  # after n_replay messages
+                gt_bid = self.replay_book_data[n_replay, 5]
+                print("="*60)
+                print(f"[DEBUG-WARMUP] After {n_replay} warmup messages:")
+                print(f"  Sim ask: {sim_ask}, Sim bid: {sim_bid}")
+                print(f"  GT  ask: {gt_ask}, GT  bid: {gt_bid}")
+                print(f"  Diff ask: {float(sim_ask) - float(gt_ask)}")
+                print(f"  Diff bid: {float(sim_bid) - float(gt_bid)}")
+                print("="*60)
 
         # 3. Build context tokens from replay_tokens (encoded by LOBSTER_Dataset)
         # CRITICAL: Do NOT pad with zeros - zeros are MASK tokens which corrupt RNN hidden states!
@@ -1585,12 +1653,8 @@ class ESTrainer:
         n_replay_msgs = replay_tokens.shape[0] if replay_tokens is not None else 0
 
         # ========================================================================
-        # FLAX MODEL: Extract Flax model for correct token generation
-        # This uses the same code path as run_inference.py (verified correct)
+        # Syntax validation helpers (still used for constrained decoding)
         # ========================================================================
-        flax_train_state = self.flax_train_state
-        flax_model = self.flax_model
-        flax_batchnorm = self.flax_batchnorm
         syntax_valid_mask = self.syntax_valid_mask
         import lob.validation_helpers as valh_module
         # ========================================================================
@@ -1642,19 +1706,17 @@ class ESTrainer:
         )
 
         # ========================================================================
-        # FLAX MODEL: Policy uses Flax model hidden states (same as inference)
-        # NOTE: Flax model expects hidden_size = ssm_size // 2 when conj_sym=True
-        # This matches inference_no_errcorr.py line 1179-1185
+        # ES MODEL: Policy uses ES hidden states (same as world model + warmup)
         # ========================================================================
-        hidden_size_policy = ssm_size // (2 if conj_sym else 1)
-        hiddens_policy = flax_model.initialize_carry(
-            1,  # batch_size
-            hidden_size=hidden_size_policy,
+        hiddens_policy = ES_PaddedLobPredModel.initialize_carry(
+            batch_size=1,
+            ssm_size=ssm_size,
             n_message_layers=fp.get('n_message_layers', 2),
             n_book_pre_layers=fp.get('n_book_pre_layers', 1),
             n_book_post_layers=fp.get('n_book_post_layers', 1),
             n_fused_layers=n_fused,
-            h_size_ema=ssm_size,  # Full size for EMA
+            d_model=d_model,
+            conj_sym=conj_sym,
         )
 
         # Message length based on token mode
@@ -1790,6 +1852,7 @@ class ESTrainer:
 
                 sim_st = process_order_array(sim_st, sim_msg)
                 book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
+                bg_ask, bg_bid = get_best_bid_and_ask(jaxlob_cfg, sim_st.asks, sim_st.bids)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], replayed_msg_tokens])
 
                 new_replay_ptr = replay_ptr + 1
@@ -1797,7 +1860,7 @@ class ESTrainer:
                 new_replay_ptr = jnp.where(new_replay_ptr >= n_replay_msgs, jnp.int32(500), new_replay_ptr)
                 oid_offset = oid_offset + 1
 
-                return (key, msg_hist, hidden, sim_st, book_f, oid_offset, new_replay_ptr), replayed_msg_tokens
+                return (key, msg_hist, hidden, sim_st, book_f, oid_offset, new_replay_ptr), (replayed_msg_tokens, bg_bid, bg_ask)
 
             def world_model_step(wcarry, world_msg_idx):
                 """Generate message autoregressively using world model."""
@@ -1844,10 +1907,11 @@ class ESTrainer:
 
                 sim_st = process_order_array(sim_st, sim_msg)
                 book_f = transform_L2_state_wrapper(jaxlob_cfg, sim_st, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
+                bg_ask, bg_bid = get_best_bid_and_ask(jaxlob_cfg, sim_st.asks, sim_st.bids)
                 msg_hist = jnp.concatenate([msg_hist[msg_len:], world_msg])
                 oid_offset = oid_offset + 1
 
-                return (key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr), world_msg
+                return (key, msg_hist, hidden, sim_st, book_f, oid_offset, replay_ptr), (world_msg, bg_bid, bg_ask)
 
             # Select background generation function
             n_warmup_cfg = getattr(config, 'n_warmup_msgs', 10)
@@ -1870,12 +1934,13 @@ class ESTrainer:
                 maybe_pvary(replay_ptr_init),
             )
             (key_world, msg_history, hiddens_world, sim_state, book_feat,
-             world_oid_offset, _), _ = jax.lax.scan(
+             world_oid_offset, _), (_, bg_bid_trace, bg_ask_trace) = jax.lax.scan(
                 step_fn_background,
                 background_scan_init,
                 jnp.arange(config.background_msgs_per_step),
                 length=config.background_msgs_per_step,
             )
+            # bg_bid_trace shape: (K,), bg_ask_trace shape: (K,)
 
             # Policy generates action with field-aware constrained decoding
             # field_masks is pre-computed OUTSIDE step_fn to avoid tracer leak
@@ -1884,12 +1949,12 @@ class ESTrainer:
             # Using T=1.0 (standard sampling) as default
             temperature = getattr(config, 'temperature', 1.0)
 
-            def sample_policy_token_flax(token_carry, token_pos):
-                """Sample next token using FLAX model (same as run_inference.py).
+            def sample_policy_token_es(token_carry, token_pos):
+                """Sample next token using ES model (perturbed params).
 
-                This replaces the ES model path with the verified-correct Flax path.
-                Uses valh.apply_model() and valh.fill_predicted_tok() for proper
-                token generation with syntax validation.
+                Uses ES_PaddedLobPredModel._forward_step with policy_common_params,
+                which contains iterinfo=(epoch, thread_id) to activate LoRA noise.
+                This matches the HyperscaleES reference implementation.
 
                 Args:
                     token_carry: (key, msg_history, hiddens)
@@ -1901,33 +1966,24 @@ class ESTrainer:
                 # Get syntax validation mask for current token position
                 valid_mask = valh_module.get_valid_mask(syntax_valid_mask, token_pos)
 
-                # Use Flax model (same as inference_no_errcorr._generate_token)
-                # CRITICAL: Pass only the LAST token, not the full sequence!
-                # The RNN hidden state carries all context information.
-                # Passing multiple tokens would produce logits for each token.
-                hidden_p, logits = valh_module.apply_model(
-                    hidden_p,
-                    msg_hist_p[-1:],  # Only LAST token (shape (1,)), not full message!
-                    book_feat[None, :],  # book features
-                    flax_train_state,
-                    flax_model,
-                    flax_batchnorm,
-                    False,  # shift_start
+                # ES model forward (single token)
+                # msg_hist_p[-1:] shape: (1,) — only last token
+                # book_feat[None, :] shape: (1, d_book)
+                hidden_p, log_probs = ES_PaddedLobPredModel._forward_step(
+                    policy_common_params, hidden_p, msg_hist_p[-1:], book_feat[None, :]
                 )
-                # logits shape: (1, 1, n_classes) -> (1, n_classes) after [0]
-                logits = logits[0]
+                # log_probs shape: (1, d_output) — single token, already log_softmax
+                # EMA state: single token → shape (batch, 1, d) → no fix_ema_shape needed
 
-                # Apply syntax validation mask (same as inference)
-                logits = valh_module.filter_valid_pred(logits, valid_mask)
+                # Apply syntax validation mask + renormalize
+                log_probs = valh_module.filter_valid_pred(log_probs, valid_mask)
 
-                # Sample next token (same as inference)
-                # sample_top_n=-1 means sample from full distribution
+                # Sample next token (top_n=-1 = sample from full distribution)
                 next_token_p = valh_module.fill_predicted_tok(
-                    logits, -1, jnp.array([sample_key_p])
+                    log_probs, -1, jnp.array([sample_key_p])
                 )
 
                 # Update message history
-                # next_token_p is shape (1,) from fill_predicted_tok, so use directly
                 msg_hist_p = jnp.concatenate([msg_hist_p[1:], next_token_p])
 
                 # Return scalar token for scan output (squeeze the (1,) array)
@@ -1941,9 +1997,9 @@ class ESTrainer:
                 maybe_pvary_tree(hiddens_policy),
             )
             # Pass token positions (0-23) as xs to enable field-aware masking
-            # NOTE: Using sample_policy_token_flax for correct token generation
+            # ES model path: matches HyperscaleES reference (warmup + token gen use same model)
             (key_policy, msg_history, hiddens_policy), policy_msg = jax.lax.scan(
-                sample_policy_token_flax,  # FLAX model path (verified correct)
+                sample_policy_token_es,  # ES model path
                 policy_token_init,
                 jnp.arange(msg_len, dtype=jnp.int32),
                 length=msg_len,
@@ -2029,10 +2085,13 @@ class ESTrainer:
             book_feat = transform_L2_state_wrapper(jaxlob_cfg, sim_state, price_levels=book_depth, tick_size=config.tick_size, in_shard_map=in_shard_map)
             msg_history = jnp.concatenate([msg_history[msg_len:], policy_msg])
 
-            # Get best bid/ask for plotting
+            # Get best bid/ask for plotting (post-policy order)
             best_ask, best_bid = get_best_bid_and_ask(jaxlob_cfg, sim_state.asks, sim_state.bids)
 
-            # Track trades (count)
+            # Concatenate bg + policy bid/ask into per-step trace (shape: step_width = K+1)
+            step_bid_trace = jnp.concatenate([bg_bid_trace, jnp.array([best_bid])])
+            step_ask_trace = jnp.concatenate([bg_ask_trace, jnp.array([best_ask])])
+
             # Track trades (count)
             step_trades = jnp.sum(is_policy_in_trade)
             accum_trades = accum_trades + step_trades
@@ -2047,10 +2106,12 @@ class ESTrainer:
             accum_submitted = accum_submitted + step_submitted
 
             # Return policy_msg for order analysis (shape: (msg_len,))
-            # Also return trade info for visualization: VWAP, qty, and bid/ask at trade time
+            # step_bid/ask_trace: per-message book state (shape: (step_width,) = (K+1,))
+            # bg_bid/ask_trace: pure background replay trace (shape: (K,)) - NO policy order
             return (key, msg_history, hiddens_world, hiddens_policy, sim_state,
                     book_feat, world_oid_offset, quant_executed, accum_revenue, accum_trades, accum_all_trades, accum_submitted), \
-                   (policy_msg, best_bid, best_ask, step_vwap, step_executed.astype(jnp.float32))
+                   (policy_msg, step_bid_trace, step_ask_trace, step_vwap, step_executed.astype(jnp.float32),
+                    bg_bid_trace, bg_ask_trace)
 
         # Run episode
         # H2: Apply pvary to initial carry values when inside shard_map
@@ -2071,8 +2132,10 @@ class ESTrainer:
         )
         # Capture policy_msgs_all for order analysis (shape: (n_steps, msg_len))
         # Also capture trade traces: vwap, qty, bid, ask at each step for visualization
+        # pure_replay_bid/ask_trace: background-only replay (no policy) for GT comparison
         (_, _, _, _, final_state, _, _, final_quant_executed, final_revenue, final_trades, final_all_trades, final_submitted), \
-            (policy_msgs_all, bid_trace, ask_trace, trade_vwap_trace, trade_qty_trace) = jax.lax.scan(
+            (policy_msgs_all, bid_trace, ask_trace, trade_vwap_trace, trade_qty_trace,
+             pure_replay_bid_trace, pure_replay_ask_trace) = jax.lax.scan(
             step_fn,
             main_scan_init,
             jnp.arange(config.n_steps),
@@ -2147,7 +2210,12 @@ class ESTrainer:
         
         liquidation_quantity_filled = jnp.sum(jnp.where(is_liquidation, jnp.abs(trades[:, 1]), 0))
         liquidation_revenue = jnp.sum(jnp.where(is_liquidation, trades[:, 0] * jnp.abs(trades[:, 1]), 0))
-        
+        liquidation_vwap = jnp.where(
+            liquidation_quantity_filled > 0,
+            liquidation_revenue / liquidation_quantity_filled.astype(jnp.float32),
+            0.0
+        )
+
         # Total metrics
         agent_quantity = final_quant_executed + liquidation_quantity_filled
         
@@ -2186,8 +2254,8 @@ class ESTrainer:
         # doom_quantity: not executed due to insufficient book depth (Doom Orders)
         # NOTE: agent_quantity should never exceed task_size due to truncation
         liquidation_quantity = agent_quantity - model_quantity
-        # Clamp doom_quantity to >= 0 (should not be negative if tracking is correct)
-        doom_quantity = jnp.maximum(0, task_size - agent_quantity)
+        # # Clamp doom_quantity to >= 0 (should not be negative if tracking is correct)
+        # doom_quantity = jnp.maximum(0, task_size - agent_quantity)
 
         # Sanitize pnl: replace non-finite values with 0.0
         # (fitness = rank_transform(pnl) is computed in train_epoch)
@@ -2199,7 +2267,7 @@ class ESTrainer:
             'agent_quantity': agent_quantity,          # total executed = model + liquidation (may be < task_size!)
             'model_quantity': model_quantity,          # executed by model orders (Normal)
             'liquidation_quantity': liquidation_quantity,  # executed by force_market_order (Market)
-            'doom_quantity': doom_quantity,    # NOT executed (Doom)
+            # 'doom_quantity': doom_quantity,    # NOT executed (Doom)
             'submitted_quantity': final_submitted, # Total quantity submitted by model (post-truncation)
             'agent_trades': agent_trades,
             'total_trades': total_trades,      # All trades (world + agent + liquidation)
@@ -2207,11 +2275,19 @@ class ESTrainer:
             'init_mid_price': init_mid_price,
             'init_mid_price': init_mid_price,
             'policy_msgs': policy_msgs_all,    # shape: (n_steps, msg_len) for order analysis
-            'bid_trace': bid_trace,
-            'ask_trace': ask_trace,
+            'sim_bid_trace': bid_trace.reshape(-1),  # (n_steps * step_width,) full per-msg trace
+            'sim_ask_trace': ask_trace.reshape(-1),
+            'bid_trace': bid_trace[:, -1],  # (n_steps,) backward compat: post-policy only
+            'ask_trace': ask_trace[:, -1],
             # Trade visualization traces (shape: (n_steps,))
             'trade_vwap_trace': trade_vwap_trace,   # VWAP of agent trades per step
             'trade_qty_trace': trade_qty_trace,     # Quantity executed per step
+            'liquidation_vwap': liquidation_vwap,   # VWAP of forced market order (0 if none)
+            # Pure replay traces: background messages only, NO policy orders
+            # Shape: (n_steps, n_bg) → flatten to (n_steps * n_bg,)
+            # Used to compare JaxLOB replay accuracy vs GT (LOBSTER orderbook snapshots)
+            'pure_replay_bid_trace': pure_replay_bid_trace.reshape(-1),
+            'pure_replay_ask_trace': pure_replay_ask_trace.reshape(-1),
         }
 
         # H4: Add Ground Truth Trace for "Whole Data Window" Plot
@@ -2461,24 +2537,34 @@ class ESTrainer:
             self.lobs5_init.params = updated_params
 
         # =========================================================================
-        # Select example perturbation for visualization
-        # Use best pnl perturbation instead of first (more likely to have trades)
+        # Select 3 example perturbations for visualization:
+        #   best (highest PnL), worst (lowest PnL), mode (most typical PnL)
         # =========================================================================
+        import numpy as _np_viz
         best_idx = jnp.argmax(pnls)
+        worst_idx = jnp.argmin(pnls)
+        # Mode: find the most populated histogram bin, pick nearest perturbation
+        _pnls_np = _np_viz.array(pnls)
+        _hist_counts, _hist_edges = _np_viz.histogram(_pnls_np, bins=50)
+        _mode_bin = _np_viz.argmax(_hist_counts)
+        _mode_center = (_hist_edges[_mode_bin] + _hist_edges[_mode_bin + 1]) / 2
+        mode_idx = jnp.argmin(jnp.abs(pnls - _mode_center))
 
-        # Extract one example trace for plotting (from best perturbation)
-        # We must pull this out BEFORE averaging, as averaging traces is meaningless/expensive
+        print(f"[PLOT] Visualization perturbations: "
+              f"best={int(best_idx)} (PnL={float(pnls[best_idx]):.1f}), "
+              f"worst={int(worst_idx)} (PnL={float(pnls[worst_idx]):.1f}), "
+              f"mode={int(mode_idx)} (PnL={float(pnls[mode_idx]):.1f}, "
+              f"bin_center={_mode_center:.1f}, bin_count={int(_hist_counts[_mode_bin])}), "
+              f"out of {len(pnls)} perturbations")
+
+        # Extract traces for each visualization perturbation
         # Note: infos['bid_trace'] shape is (n_perturbations, n_steps)
-        example_bid_trace = infos['bid_trace'][best_idx]
-        example_ask_trace = infos['ask_trace'][best_idx]
+        viz_labels = ['best', 'worst', 'mode']
+        viz_indices = [best_idx, worst_idx, mode_idx]
 
         # Ground Truth Traces (High Res) - same across perturbations, use [0]
         example_gt_bid_trace = infos['gt_bid_trace'][0]
         example_gt_ask_trace = infos['gt_ask_trace'][0]
-
-        # Trade traces for visualization (from best perturbation)
-        example_trade_vwap_trace = infos['trade_vwap_trace'][best_idx]
-        example_trade_qty_trace = infos['trade_qty_trace'][best_idx]
 
         # Historical trade traces (same across perturbations, use [0])
         example_gt_trade_price = infos['gt_trade_price'][0]
@@ -2494,17 +2580,39 @@ class ESTrainer:
         }
         aggregated_info = {k: jnp.mean(v) for k, v in infos_for_mean.items()}
 
-        # Add example traces back to aggregated info
-        aggregated_info['example_bid_trace'] = example_bid_trace
-        aggregated_info['example_ask_trace'] = example_ask_trace
+        # Add GT traces (shared across all perturbations)
         aggregated_info['example_gt_bid_trace'] = example_gt_bid_trace
         aggregated_info['example_gt_ask_trace'] = example_gt_ask_trace
-        aggregated_info['example_trade_vwap_trace'] = example_trade_vwap_trace
-        aggregated_info['example_trade_qty_trace'] = example_trade_qty_trace
-        # Historical trade traces
         aggregated_info['example_gt_trade_price'] = example_gt_trade_price
         aggregated_info['example_gt_trade_qty'] = example_gt_trade_qty
         aggregated_info['example_gt_trade_side'] = example_gt_trade_side
+
+        # Pure replay traces (same for all perturbations - no policy orders)
+        # Used to verify JaxLOB replay accuracy vs GT
+        aggregated_info['example_pure_replay_bid_trace'] = infos['pure_replay_bid_trace'][0]
+        aggregated_info['example_pure_replay_ask_trace'] = infos['pure_replay_ask_trace'][0]
+
+        # Add per-perturbation traces (best, worst, mode)
+        for label, idx in zip(viz_labels, viz_indices):
+            prefix = f'example_{label}'
+            aggregated_info[f'{prefix}_sim_bid_trace'] = infos['sim_bid_trace'][idx]
+            aggregated_info[f'{prefix}_sim_ask_trace'] = infos['sim_ask_trace'][idx]
+            aggregated_info[f'{prefix}_bid_trace'] = infos['bid_trace'][idx]
+            aggregated_info[f'{prefix}_ask_trace'] = infos['ask_trace'][idx]
+            aggregated_info[f'{prefix}_trade_vwap_trace'] = infos['trade_vwap_trace'][idx]
+            aggregated_info[f'{prefix}_trade_qty_trace'] = infos['trade_qty_trace'][idx]
+            aggregated_info[f'{prefix}_liquidation_vwap'] = infos['liquidation_vwap'][idx]
+            aggregated_info[f'{prefix}_liquidation_qty'] = infos['liquidation_quantity'][idx]
+            aggregated_info[f'{prefix}_pnl'] = pnls[idx]
+            aggregated_info[f'{prefix}_policy_msgs'] = infos['policy_msgs'][idx]  # Policy order tokens for visualization
+
+        # Backward-compatible keys pointing to best perturbation
+        aggregated_info['example_bid_trace'] = infos['bid_trace'][best_idx]
+        aggregated_info['example_ask_trace'] = infos['ask_trace'][best_idx]
+        aggregated_info['example_trade_vwap_trace'] = infos['trade_vwap_trace'][best_idx]
+        aggregated_info['example_trade_qty_trace'] = infos['trade_qty_trace'][best_idx]
+        aggregated_info['example_liquidation_vwap'] = infos['liquidation_vwap'][best_idx]
+        aggregated_info['example_liquidation_qty'] = infos['liquidation_quantity'][best_idx]
 
         return jnp.mean(pnls), pnls, aggregated_info
 
@@ -2537,20 +2645,48 @@ class ESTrainer:
             print("[CONFIG]    BUY:  1.25 * Final Best Ask (25% Premium)")
         print("="*60)
 
-        # Log Metric Definitions
-        print("="*60)
-        print("[CONFIG] Metric Definitions:")
-        print(" [Normal Orders] : model_quantity       (Executed by model orders during regular steps)")
-        print("                 : submitted_quantity   (Total Quantity Submitted by Model)")
-        print("                 : execution_prob       (Executed / Submitted)")
-        print(" [Market Orders] : liquidation_quantity (Executed by force_market_order at end)")
-        print(" [Doom Orders]   : doom_quantity        (Unfilled quantity, subject to penalty)")
-        print(" [Fill Rates]    : quantity / task_size")
-        print(" [Agent Trades]  : agent_trades         (Count of agent trade executions/fills)")
-        print(" [Total Trades]  : total_trades         (All trades in episode: world + agent + liquidation)")
-        print(" [Buffer Trades] : buffer_trades        (Diagnostic: trades in final step buffer only)")
-        print(" [Agent Qty]     : agent_quantity       (Total filled quantity = Normal + Market. Range: [0, task_size])")
-        print("="*60)
+        # Log WandB Metric Definitions (comprehensive table)
+        print("=" * 100)
+        print("[CONFIG] WandB Metric Definitions")
+        print("=" * 100)
+        print("Episode Flow: Normal Orders (10 steps) -> Market Order (liquidation) -> Doom (unfilled penalty)")
+        print("")
+        print("+-----------------+------------------------------+----------------------------------------------------+")
+        print("| Panel Group     | WandB Key                    | Formula / Description                              |")
+        print("+-----------------+------------------------------+----------------------------------------------------+")
+        print("| normal_order    | submitted_quantity            | Total shares submitted by model across all steps   |")
+        print("|                 | submission_ratio              | submitted_qty / task_size                          |")
+        print("|                 | quantity                      | model_quantity (shares filled by limit orders)     |")
+        print("|                 | fill_rate                     | model_qty / task_size                              |")
+        print("|                 | execution_prob                | model_qty / submitted_qty (fill probability)       |")
+        print("+-----------------+------------------------------+----------------------------------------------------+")
+        print("| market_order    | quantity                      | liquidation_qty = agent_qty - model_qty            |")
+        print("|                 | fill_rate                     | liquidation_qty / task_size                        |")
+        print("+-----------------+------------------------------+----------------------------------------------------+")
+        print("| doom_order      | quantity                      | task_size - agent_qty (unfilled shares)            |")
+        print("|                 | fill_rate                     | doom_qty / task_size (unfilled ratio)              |")
+        print("+-----------------+------------------------------+----------------------------------------------------+")
+        print("| execution       | agent_quantity                | model_qty + liquidation_qty [0, task_size]         |")
+        print("|                 | fill_rate                     | agent_qty / task_size (total fill rate)            |")
+        print("|                 | agent_trades                  | Count of agent trade fills (model + liquidation)   |")
+        print("|                 | total_trades                  | All trades (world model + agent + liquidation)     |")
+        print("|                 | buffer_trades                 | Trades in final step buffer only (diagnostic)      |")
+        print("+-----------------+------------------------------+----------------------------------------------------+")
+        print("| pnl             | mean / std / max / min        | Per-perturbation PnL statistics (cents)            |")
+        print("|                 | best_ever                     | Best PnL seen across all epochs                    |")
+        print("|                 | distribution                  | Per-epoch PnL histogram (Image, step slider)       |")
+        print("|                 | distribution_heatmap          | Cross-epoch PnL heatmap (Histogram)                |")
+        print("+-----------------+------------------------------+----------------------------------------------------+")
+        print("| fitness         | mean / std                    | rank_transform(pnl) -> [-0.5, 0.5], mean ~ 0      |")
+        print("|                 | distribution / _heatmap       | Same as pnl (Image + Histogram)                    |")
+        print("+-----------------+------------------------------+----------------------------------------------------+")
+        print("| es              | sigma                         | Current noise std (tracks sigma decay)             |")
+        print("+-----------------+------------------------------+----------------------------------------------------+")
+        print("| Images          | market_data_trace             | Pure GT bid/ask/mid price curves                   |")
+        print("|                 | market_data_trace_with_trades | GT + agent trade markers (best/worst/mode)         |")
+        print("|                 | _historical_trades            | GT + historical LOBSTER trade markers              |")
+        print("+-----------------+------------------------------+----------------------------------------------------+")
+        print("=" * 100)
 
         # Resume from checkpoint if specified
         start_epoch = 0
@@ -2583,11 +2719,12 @@ class ESTrainer:
                 import wandb
                 # Get SLURM job ID if available
                 job_id = os.environ.get("SLURM_JOB_ID", "local")
+                n_nodes = os.environ.get("SLURM_NNODES", "1")
                 n_procs = jax.process_count() if self._is_distributed else 1
                 wandb_run = wandb.init(
                     project=self.config.wandb_project,
                     entity=self.config.wandb_entity,
-                    name=f"es_n{self.config.n_perturbations}_s{self.config.seed}_j{job_id}",
+                    name=f"es_n{self.config.n_perturbations}_s{self.config.seed}_j{job_id}_nodes{n_nodes}",
                     config={
                         'n_perturbations': self.config.n_perturbations,
                         'n_steps': self.config.n_steps,
@@ -2596,6 +2733,8 @@ class ESTrainer:
                         'sigma_decay': getattr(self.config, 'sigma_decay', 1.0),
                         'sigma_min': getattr(self.config, 'sigma_min', 0.01),
                         'lr': self.config.lr,
+                        'lr_decay': getattr(self.config, 'lr_decay', 1.0),
+                        'lr_min': getattr(self.config, 'lr_min', 0.001),
                         'lora_rank': self.config.lora_rank,
                         'checkpoint': self.config.lobs5_checkpoint,
                         'background_mode': self.config.background_mode,
@@ -2615,6 +2754,10 @@ class ESTrainer:
         sigma_init = self.config.sigma
         sigma_decay = getattr(self.config, 'sigma_decay', 1.0)
         sigma_min = getattr(self.config, 'sigma_min', 0.01)
+        # LR decay setup (mirrors sigma decay)
+        lr_init = self.config.lr
+        lr_decay = getattr(self.config, 'lr_decay', 1.0)
+        lr_min = getattr(self.config, 'lr_min', 0.001)
 
         for epoch in tqdm(range(start_epoch, n_epochs), desc='ES Training', initial=start_epoch, total=n_epochs):
             key, epoch_key = jax.random.split(key)
@@ -2625,6 +2768,13 @@ class ESTrainer:
                 self.noiser_params["sigma"] = current_sigma
             else:
                 current_sigma = sigma_init
+
+            # Apply lr decay: lr_n = max(lr_0 × decay^n, lr_min)
+            if lr_decay < 1.0:
+                current_lr = max(lr_init * (lr_decay ** epoch), lr_min)
+                self.frozen_noiser_params["solver"] = optax.sgd(current_lr)
+            else:
+                current_lr = lr_init
 
             mean_pnl, pnls, epoch_info = self.train_epoch(
                 epoch_key, epoch, initial_sim_state, initial_msg_history
@@ -2669,13 +2819,13 @@ class ESTrainer:
                 agent_qty = float(epoch_info['agent_quantity'])
                 model_qty = float(epoch_info.get('model_quantity', 0))
                 liquidation_qty = float(epoch_info.get('liquidation_quantity', 0))
-                doom_qty = float(epoch_info.get('doom_quantity', 0))
+                # doom_qty = float(epoch_info.get('doom_quantity', 0))
                 submitted_qty = float(epoch_info.get('submitted_quantity', 0))
 
                 fill_rate = agent_qty / task_size                    # Total fill rate (may be < 1.0!)
                 model_fill_rate = model_qty / task_size              # Model orders fill rate
                 liquidation_fill_rate = liquidation_qty / task_size  # Force market order fill rate
-                unfill_rate = doom_qty / task_size               # Unfilled rate (book depth insufficient)
+                # unfill_rate = doom_qty / task_size               # Unfilled rate (book depth insufficient)
                 
                 # Execution Probability (Filled / Submitted)
                 # Avoid division by zero
@@ -2705,26 +2855,26 @@ class ESTrainer:
                         # X-axis from -n_warmup (warmup phase is negative)
                         gt_steps = list(range(-n_warmup, len(gt_bid) - n_warmup))
 
-                        # Create static plot
-                        fig, ax = plt.subplots(figsize=(12, 6))
+                        # Step boundary ticks at i * n_bg (pure background messages only)
+                        ticks = [0]
+                        for i in range(1, n_steps + 1):
+                            ticks.append(i * n_bg)
 
-                        # Plot GT
+                        # Create static plot (pure GT - no agent impact)
+                        fig, ax = plt.subplots(figsize=(12, 6), dpi=300)
+
                         ax.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
                         ax.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
                         ax.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
 
-                        # Add vertical separator lines
-                        ax.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
+                        # Shade warmup region and add step separators
+                        ax.axvspan(-n_warmup, 0, color='blue', alpha=0.08, label='Warmup')
                         for i in range(1, n_steps + 1):
                             ax.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
 
-                        # Set custom X-axis ticks at warmup start, 0, and each step boundary
-                        ticks = [-n_warmup, 0]
-                        for i in range(1, n_steps + 1):
-                            ticks.append(i * n_bg)
                         ax.set_xticks(ticks)
 
-                        ax.set_title(f"Market Trace (Data Window) - Epoch {epoch}")
+                        ax.set_title(f"Market Trace (Data Window #{self.replay_file_idx} {self.replay_data_date}) - Epoch {epoch}")
                         ax.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
                         ax.set_ylabel("Price")
                         ax.legend()
@@ -2734,72 +2884,207 @@ class ESTrainer:
                         wandb_run.log({"market_data_trace": wandb.Image(fig)}, commit=False)
                         plt.close(fig)
 
-                        # Second chart: Market Data with Trade Markers
-                        if 'example_trade_vwap_trace' in epoch_info:
-                            fig2, ax2 = plt.subplots(figsize=(12, 6))
+                        # =====================================================================
+                        # NEW: Pure Replay vs GT Verification Chart
+                        # Compares JaxLOB replay (no agent) with LOBSTER orderbook snapshots
+                        # If these differ, it indicates simulator accuracy issues
+                        # =====================================================================
+                        if 'example_pure_replay_bid_trace' in epoch_info:
+                            import numpy as _np  # Import here to avoid scope issues
+                            pure_bid = epoch_info['example_pure_replay_bid_trace']
+                            pure_ask = epoch_info['example_pure_replay_ask_trace']
 
-                            # Plot GT (same as first chart)
-                            ax2.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
-                            ax2.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
-                            ax2.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
+                            # pure_replay has shape (n_steps * n_bg,) - only trading phase
+                            # GT has shape (n_warmup + n_steps * n_bg,)
+                            # We need to compare trading phase only: gt[n_warmup:]
+                            gt_trading_bid = gt_bid[n_warmup:]
+                            gt_trading_ask = gt_ask[n_warmup:]
 
-                            # Add vertical separator lines
-                            ax2.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
+                            # Align lengths (they should match)
+                            min_len = min(len(pure_bid), len(gt_trading_bid))
+                            pure_bid = _np.array(pure_bid[:min_len])
+                            pure_ask = _np.array(pure_ask[:min_len])
+                            gt_trading_bid = _np.array(gt_trading_bid[:min_len])
+                            gt_trading_ask = _np.array(gt_trading_ask[:min_len])
+
+                            fig_pr, (ax_pr1, ax_pr2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+
+                            # Top: Overlay comparison
+                            x_vals = list(range(min_len))
+                            ax_pr1.plot(x_vals, gt_trading_ask, label='GT Ask', color='red', alpha=0.7, linewidth=1.0)
+                            ax_pr1.plot(x_vals, pure_ask, label='Pure Replay Ask', color='orange', alpha=0.7, linewidth=1.0, linestyle='--')
+                            ax_pr1.plot(x_vals, gt_trading_bid, label='GT Bid', color='green', alpha=0.7, linewidth=1.0)
+                            ax_pr1.plot(x_vals, pure_bid, label='Pure Replay Bid', color='lime', alpha=0.7, linewidth=1.0, linestyle='--')
+
+                            # Add step separators
                             for i in range(1, n_steps + 1):
-                                ax2.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+                                ax_pr1.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+
+                            ax_pr1.set_title(f"Pure Replay vs GT (#{self.replay_file_idx} {self.replay_data_date}) - Epoch {epoch}")
+                            ax_pr1.set_ylabel("Price")
+                            ax_pr1.legend(loc='upper right')
+                            ax_pr1.grid(True, alpha=0.3)
+
+                            # Bottom: Difference plot
+                            diff_bid = pure_bid - gt_trading_bid
+                            diff_ask = pure_ask - gt_trading_ask
+                            ax_pr2.plot(x_vals, diff_ask, label='Diff Ask (Sim-GT)', color='red', alpha=0.7)
+                            ax_pr2.plot(x_vals, diff_bid, label='Diff Bid (Sim-GT)', color='green', alpha=0.7)
+                            ax_pr2.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+
+                            # Add step separators
+                            for i in range(1, n_steps + 1):
+                                ax_pr2.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
+
+                            ax_pr2.set_xlabel("Message Index (Trading Phase)")
+                            ax_pr2.set_ylabel("Price Difference")
+                            ax_pr2.legend(loc='upper right')
+                            ax_pr2.grid(True, alpha=0.3)
+
+                            # Add summary stats as text
+                            max_diff = max(abs(diff_bid).max(), abs(diff_ask).max())
+                            mean_diff = (abs(diff_bid).mean() + abs(diff_ask).mean()) / 2
+                            ax_pr2.text(0.02, 0.95, f"Max |Diff|: {max_diff:.0f}, Mean |Diff|: {mean_diff:.1f}",
+                                       transform=ax_pr2.transAxes, fontsize=10, verticalalignment='top',
+                                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+                            plt.tight_layout()
+                            wandb_run.log({"pure_replay_vs_gt": wandb.Image(fig_pr)}, commit=False)
+                            plt.close(fig_pr)
+
+                        # Second chart(s): Market Data with Trade Markers
+                        # Generate one chart per visualization perturbation (best, worst, mode)
+                        is_sell_task = getattr(self.config, 'task', 'sell') == 'sell'
+                        from matplotlib.lines import Line2D
+
+                        # Map GT indices to real simulation positions (gaps at policy order slots)
+                        # Timeline: 50 bg + 1 policy × 10 steps = 510 messages
+                        step_width = n_bg + 1  # 51
+                        gt_sim_steps = []
+                        for i in range(len(gt_bid)):
+                            if i < n_warmup:
+                                gt_sim_steps.append(i - n_warmup)
+                            else:
+                                k = i - n_warmup
+                                s = k // n_bg
+                                w = k % n_bg
+                                gt_sim_steps.append(s * step_width + w)
+
+                        ticks2 = [0]
+                        for i in range(1, n_steps + 1):
+                            ticks2.append(i * step_width)  # 51, 102, ..., 510
+
+                        for _show_pt, viz_label in [(True, 'best'), (True, 'worst'), (True, 'mode'),
+                                                       (False, 'best'), (False, 'worst'), (False, 'mode')]:
+                            prefix = f'example_{viz_label}'
+                            trade_vwap_key = f'{prefix}_trade_vwap_trace'
+                            if trade_vwap_key not in epoch_info:
+                                continue
+
+                            viz_pnl = float(epoch_info.get(f'{prefix}_pnl', 0))
+                            fig2, ax2 = plt.subplots(figsize=(12, 6), dpi=300)
+
+                            # Build full bid/ask curves from matching engine state
+                            # Warmup: from GT (no agent during warmup, GT = sim)
+                            # Trading: from per-message simulation trace (510 points)
+                            import numpy as _np
+                            sim_bid_key = f'{prefix}_sim_bid_trace'
+                            if sim_bid_key in epoch_info:
+                                _sb = _np.array(epoch_info[sim_bid_key])  # (510,)
+                                _sa = _np.array(epoch_info[f'{prefix}_sim_ask_trace'])
+                                _sm = (_sb + _sa) / 2
+                                _wx = list(range(-n_warmup, 0))
+                                _sx = list(range(n_steps * step_width))  # 0..509
+                                _fx = _wx + _sx
+                                _fb = _np.concatenate([_np.array(gt_bid[:n_warmup]), _sb])
+                                _fa = _np.concatenate([_np.array(gt_ask[:n_warmup]), _sa])
+                                _fm = _np.concatenate([_np.array(gt_mid[:n_warmup]), _sm])
+                            else:
+                                # Fallback: GT data if sim traces unavailable
+                                _fx = gt_sim_steps
+                                _fa, _fm, _fb = gt_ask, gt_mid, gt_bid
+
+                            ax2.plot(_fx, _fa, label='Sim Ask', color='red', alpha=0.6, linewidth=1.0)
+                            ax2.plot(_fx, _fm, label='Sim Mid', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                            ax2.plot(_fx, _fb, label='Sim Bid', color='green', alpha=0.6, linewidth=1.0)
+
+                            # Shade warmup region and add step separators
+                            ax2.axvspan(-n_warmup, 0, color='blue', alpha=0.08, label='Warmup')
+                            for i in range(1, n_steps + 1):
+                                ax2.axvline(x=i * step_width, color='gray', linestyle=':', alpha=0.3)
+
+                            # Agent bid/ask overlay: post-trade book state at policy order slots
+                            _abd = epoch_info.get(f'{prefix}_bid_trace')
+                            _aad = epoch_info.get(f'{prefix}_ask_trace')
+                            if _show_pt and _abd is not None and _aad is not None:
+                                for s in range(n_steps):
+                                    x_agent = s * step_width + n_bg  # policy order slot: 50,101,...,509
+                                    ax2.scatter(x_agent, float(_aad[s]), c='red', s=25,
+                                               marker='s', alpha=0.9, zorder=4, edgecolors='darkred', linewidths=0.5)
+                                    ax2.scatter(x_agent, float(_abd[s]), c='green', s=25,
+                                               marker='s', alpha=0.9, zorder=4, edgecolors='darkgreen', linewidths=0.5)
 
                             # Get trade traces
-                            trade_vwap = epoch_info['example_trade_vwap_trace']
-                            trade_qty = epoch_info['example_trade_qty_trace']
-
-                            # Get bid/ask traces for execution quality comparison
-                            bid_trace_data = epoch_info['example_bid_trace']
-                            ask_trace_data = epoch_info['example_ask_trace']
+                            trade_vwap = epoch_info[trade_vwap_key]
+                            trade_qty = epoch_info[f'{prefix}_trade_qty_trace']
 
                             # Add trade markers
-                            # Determine task type for color logic
-                            is_sell_task = getattr(self.config, 'task', 'sell') == 'sell'
-
                             for step_idx in range(n_steps):
                                 qty = float(trade_qty[step_idx])
                                 if qty > 0:  # Trade occurred
-                                    # X position: at step boundary (end of step)
-                                    x_pos = (step_idx + 1) * n_bg
+                                    x_pos = step_idx * step_width + n_bg  # policy order slot
                                     price = float(trade_vwap[step_idx])
-                                    bid = float(bid_trace_data[step_idx])
-                                    ask = float(ask_trace_data[step_idx])
+                                    # Color comparison: use pre-trade sim book state
+                                    # (last bg msg before policy order in this step)
+                                    _pre_idx = step_idx * step_width + n_bg - 1
+                                    if sim_bid_key in epoch_info and _pre_idx < len(_sb):
+                                        bid = float(_sb[_pre_idx])
+                                        ask = float(_sa[_pre_idx])
+                                    else:
+                                        bid = float(_abd[step_idx]) if _abd is not None else 0
+                                        ask = float(_aad[step_idx]) if _aad is not None else 0
 
                                     # Determine execution quality color
                                     if is_sell_task:
-                                        # Sell: higher is better (green=at ask, red=at bid)
                                         if price >= ask:
-                                            color = 'limegreen'  # At Ask (best for sell)
-                                            marker = '^'         # Up triangle
+                                            color, mkr = 'limegreen', '^'
                                         elif price > bid:
-                                            color = 'gold'       # In spread
-                                            marker = 'o'         # Circle
+                                            color, mkr = 'gold', 'o'
                                         else:
-                                            color = 'orangered'  # At/Below Bid (worst for sell)
-                                            marker = 'v'         # Down triangle
+                                            color, mkr = 'orangered', 'v'
                                     else:
-                                        # Buy: lower is better (green=at bid, red=at ask)
                                         if price <= bid:
-                                            color = 'limegreen'  # At Bid (best for buy)
-                                            marker = 'v'         # Down triangle
+                                            color, mkr = 'limegreen', 'v'
                                         elif price < ask:
-                                            color = 'gold'       # In spread
-                                            marker = 'o'         # Circle
+                                            color, mkr = 'gold', 'o'
                                         else:
-                                            color = 'orangered'  # At/Above Ask (worst for buy)
-                                            marker = '^'         # Up triangle
+                                            color, mkr = 'orangered', '^'
 
-                                    # Marker size proportional to quantity
                                     size = 50 + qty * 3
-                                    ax2.scatter(x_pos, price, c=color, s=size, marker=marker,
+                                    ax2.scatter(x_pos, price, c=color, s=size, marker=mkr,
                                                edgecolors='black', linewidths=0.5, zorder=5)
+                                    ax2.annotate(f'{int(qty)}', (x_pos, price),
+                                                 textcoords="offset points", xytext=(0, 12),
+                                                 ha='center', fontsize=8, fontweight='bold',
+                                                 color='black',
+                                                 bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                                                           alpha=0.7, edgecolor='none'))
 
-                            # Add trade legend
-                            from matplotlib.lines import Line2D
+                            # Add forced market order marker (if liquidation occurred)
+                            liq_qty = float(epoch_info.get(f'{prefix}_liquidation_qty', 0))
+                            if liq_qty > 0:
+                                liq_vwap = float(epoch_info[f'{prefix}_liquidation_vwap'])
+                                liq_x = n_steps * step_width + 0.5  # slightly past timeline end
+                                ax2.scatter(liq_x, liq_vwap, c='magenta', s=120, marker='D',
+                                           edgecolors='black', linewidths=1.0, zorder=6)
+                                ax2.annotate(f'MO:{int(liq_qty)}', (liq_x, liq_vwap),
+                                             textcoords="offset points", xytext=(0, 12),
+                                             ha='center', fontsize=8, fontweight='bold',
+                                             color='darkmagenta',
+                                             bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                                                       alpha=0.7, edgecolor='none'))
+
+                            # Legend
                             if is_sell_task:
                                 legend_elements = [
                                     Line2D([0], [0], marker='^', color='w', markerfacecolor='limegreen',
@@ -2818,18 +3103,217 @@ class ESTrainer:
                                     Line2D([0], [0], marker='^', color='w', markerfacecolor='orangered',
                                            markersize=10, label='At/Above Ask'),
                                 ]
-                            # Combine with line legends
+                            legend_elements.append(
+                                Line2D([0], [0], marker='D', color='w', markerfacecolor='magenta',
+                                       markersize=10, label='Forced Market Order'))
+                            if _show_pt:
+                                legend_elements.append(
+                                    Line2D([0], [0], marker='s', color='w', markerfacecolor='green',
+                                           markeredgecolor='darkgreen', markersize=8, label='Post-Trade Bid'))
+                                legend_elements.append(
+                                    Line2D([0], [0], marker='s', color='w', markerfacecolor='red',
+                                           markeredgecolor='darkred', markersize=8, label='Post-Trade Ask'))
                             handles, labels = ax2.get_legend_handles_labels()
-                            ax2.legend(handles=legend_elements + handles, loc='upper left')
+                            ax2.legend(handles=legend_elements + handles, loc='lower right')
 
-                            ax2.set_title(f"Market Trace with Trades - Epoch {epoch}")
+                            ax2.set_title(f"Market Trace [{viz_label}] PnL={viz_pnl:.0f} (#{self.replay_file_idx} {self.replay_data_date}) - Epoch {epoch}")
                             ax2.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
                             ax2.set_ylabel("Price")
-                            ax2.set_xticks(ticks)
+                            ax2.set_xticks(ticks2)
                             ax2.grid(True, alpha=0.3)
 
-                            wandb_run.log({"market_data_trace_with_trades": wandb.Image(fig2)}, commit=False)
+                            _suffix = f"with_trades_{viz_label}" if _show_pt else f"clean_{viz_label}"
+                            wandb_key = f"market_trace_{_suffix}"
+                            wandb_run.log({wandb_key: wandb.Image(fig2)}, commit=False)
                             plt.close(fig2)
+
+                        # ==========================================================
+                        # NEW: Policy Orders Chart (shows ALL orders, not just filled)
+                        # Includes: unfilled limit orders, cancel orders, and trades
+                        # ==========================================================
+                        for viz_label in ['best', 'worst', 'mode']:
+                            prefix = f'example_{viz_label}'
+                            policy_msgs_key = f'{prefix}_policy_msgs'
+                            if policy_msgs_key not in epoch_info:
+                                continue
+
+                            viz_pnl = float(epoch_info.get(f'{prefix}_pnl', 0))
+                            fig_po, ax_po = plt.subplots(figsize=(12, 6), dpi=300)
+
+                            # Build bid/ask curves (same as market_trace_with_trades)
+                            import numpy as _np
+                            sim_bid_key = f'{prefix}_sim_bid_trace'
+                            if sim_bid_key in epoch_info:
+                                _sb_po = _np.array(epoch_info[sim_bid_key])
+                                _sa_po = _np.array(epoch_info[f'{prefix}_sim_ask_trace'])
+                                _sm_po = (_sb_po + _sa_po) / 2
+                                _wx_po = list(range(-n_warmup, 0))
+                                _sx_po = list(range(n_steps * step_width))
+                                _fx_po = _wx_po + _sx_po
+                                _fb_po = _np.concatenate([_np.array(gt_bid[:n_warmup]), _sb_po])
+                                _fa_po = _np.concatenate([_np.array(gt_ask[:n_warmup]), _sa_po])
+                                _fm_po = _np.concatenate([_np.array(gt_mid[:n_warmup]), _sm_po])
+                            else:
+                                _fx_po = gt_sim_steps
+                                _fa_po, _fm_po, _fb_po = gt_ask, gt_mid, gt_bid
+                                _sb_po, _sa_po = _np.array(gt_bid), _np.array(gt_ask)
+
+                            ax_po.plot(_fx_po, _fa_po, label='Sim Ask', color='red', alpha=0.6, linewidth=1.0)
+                            ax_po.plot(_fx_po, _fm_po, label='Sim Mid', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
+                            ax_po.plot(_fx_po, _fb_po, label='Sim Bid', color='green', alpha=0.6, linewidth=1.0)
+
+                            ax_po.axvspan(-n_warmup, 0, color='blue', alpha=0.08, label='Warmup')
+                            for i in range(1, n_steps + 1):
+                                ax_po.axvline(x=i * step_width, color='gray', linestyle=':', alpha=0.3)
+
+                            # Get traces
+                            trade_qty_po = epoch_info.get(f'{prefix}_trade_qty_trace')
+                            trade_vwap_po = epoch_info.get(f'{prefix}_trade_vwap_trace')
+                            policy_msgs_po = epoch_info[policy_msgs_key]
+
+                            # Get Y-axis limits after plotting price curves
+                            ax_po.autoscale()
+                            y_min, y_max = ax_po.get_ylim()
+                            y_range = y_max - y_min
+
+                            # Plot ALL policy orders
+                            for step_idx in range(n_steps):
+                                x_pos = step_idx * step_width + n_bg
+
+                                # Calculate mid price at order submission time
+                                pre_order_idx = step_idx * step_width + n_bg - 1
+                                if pre_order_idx < len(_sb_po):
+                                    step_mid = (float(_sb_po[pre_order_idx]) + float(_sa_po[pre_order_idx])) / 2
+                                    pre_bid = float(_sb_po[pre_order_idx])
+                                    pre_ask = float(_sa_po[pre_order_idx])
+                                else:
+                                    step_mid = float(gt_mid[n_warmup])
+                                    pre_bid = float(gt_bid[n_warmup])
+                                    pre_ask = float(gt_ask[n_warmup])
+
+                                # Decode policy order
+                                order = decode_policy_order_for_viz(
+                                    policy_msgs_po[step_idx],
+                                    self.encoder,
+                                    step_mid,
+                                    self.config.tick_size,
+                                    self.config.token_mode
+                                )
+
+                                price = order['price']
+                                qty_ord = order['quantity']
+                                traded_qty = float(trade_qty_po[step_idx]) if trade_qty_po is not None else 0
+
+                                # Handle out-of-range orders with edge arrows
+                                if price > y_max:
+                                    ax_po.annotate('', xy=(x_pos, y_max - y_range * 0.02),
+                                                  xytext=(x_pos, y_max - y_range * 0.08),
+                                                  arrowprops=dict(arrowstyle='->', color='purple', lw=1.5))
+                                    ax_po.annotate(f'{int(price)}', (x_pos, y_max - y_range * 0.01),
+                                                  ha='center', fontsize=6, color='purple')
+                                    continue
+                                elif price < y_min:
+                                    ax_po.annotate('', xy=(x_pos, y_min + y_range * 0.02),
+                                                  xytext=(x_pos, y_min + y_range * 0.08),
+                                                  arrowprops=dict(arrowstyle='->', color='purple', lw=1.5))
+                                    ax_po.annotate(f'{int(price)}', (x_pos, y_min + y_range * 0.01),
+                                                  ha='center', fontsize=6, color='purple')
+                                    continue
+
+                                side_str = 'S' if order['side'] == 1 else 'B'
+
+                                if order['event_type'] == 1:  # Limit Order
+                                    if traded_qty > 0:
+                                        # Filled order - use existing color scheme
+                                        if is_sell_task:
+                                            if price >= pre_ask:
+                                                color, mkr = 'limegreen', '^'
+                                            elif price > pre_bid:
+                                                color, mkr = 'gold', 'o'
+                                            else:
+                                                color, mkr = 'orangered', 'v'
+                                        else:
+                                            if price <= pre_bid:
+                                                color, mkr = 'limegreen', 'v'
+                                            elif price < pre_ask:
+                                                color, mkr = 'gold', 'o'
+                                            else:
+                                                color, mkr = 'orangered', '^'
+                                        size = 50 + traded_qty * 3
+                                        ax_po.scatter(x_pos, price, c=color, s=size, marker=mkr,
+                                                     edgecolors='black', linewidths=0.5, zorder=5)
+                                        ax_po.annotate(f'{int(traded_qty)}{side_str}', (x_pos, price),
+                                                      textcoords="offset points", xytext=(0, 12),
+                                                      ha='center', fontsize=7, fontweight='bold',
+                                                      bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                                                                alpha=0.7, edgecolor='none'))
+                                    else:
+                                        # Unfilled order - blue diamond
+                                        ax_po.scatter(x_pos, price, c='lightblue', s=60, marker='D',
+                                                     edgecolors='blue', linewidths=1, alpha=0.8, zorder=4)
+                                        ax_po.annotate(f'{qty_ord}{side_str}', (x_pos, price),
+                                                      textcoords="offset points", xytext=(0, -15),
+                                                      ha='center', fontsize=7, color='blue')
+                                elif order['event_type'] == 2:  # Cancel
+                                    ax_po.scatter(x_pos, price, c='gray', s=40, marker='x', alpha=0.6, zorder=4)
+                                    ax_po.annotate(f'C{qty_ord}', (x_pos, price),
+                                                  textcoords="offset points", xytext=(0, -12),
+                                                  ha='center', fontsize=6, color='gray')
+
+                            # Add liquidation marker if applicable
+                            liq_qty_po = float(epoch_info.get(f'{prefix}_liquidation_qty', 0))
+                            if liq_qty_po > 0:
+                                liq_vwap_po = float(epoch_info[f'{prefix}_liquidation_vwap'])
+                                liq_x_po = n_steps * step_width + 0.5
+                                ax_po.scatter(liq_x_po, liq_vwap_po, c='magenta', s=120, marker='D',
+                                             edgecolors='black', linewidths=1.0, zorder=6)
+                                ax_po.annotate(f'MO:{int(liq_qty_po)}', (liq_x_po, liq_vwap_po),
+                                              textcoords="offset points", xytext=(0, 12),
+                                              ha='center', fontsize=8, fontweight='bold', color='darkmagenta',
+                                              bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                                                        alpha=0.7, edgecolor='none'))
+
+                            # Legend for policy orders chart
+                            legend_po = [
+                                Line2D([0], [0], marker='D', color='w', markerfacecolor='lightblue',
+                                       markeredgecolor='blue', markersize=10, label='Unfilled Limit Order'),
+                                Line2D([0], [0], marker='x', color='gray', markersize=10, label='Cancel Order'),
+                            ]
+                            if is_sell_task:
+                                legend_po.extend([
+                                    Line2D([0], [0], marker='^', color='w', markerfacecolor='limegreen',
+                                           markersize=10, label='Filled @ Ask'),
+                                    Line2D([0], [0], marker='o', color='w', markerfacecolor='gold',
+                                           markersize=10, label='Filled In Spread'),
+                                    Line2D([0], [0], marker='v', color='w', markerfacecolor='orangered',
+                                           markersize=10, label='Filled @ Bid'),
+                                ])
+                            else:
+                                legend_po.extend([
+                                    Line2D([0], [0], marker='v', color='w', markerfacecolor='limegreen',
+                                           markersize=10, label='Filled @ Bid'),
+                                    Line2D([0], [0], marker='o', color='w', markerfacecolor='gold',
+                                           markersize=10, label='Filled In Spread'),
+                                    Line2D([0], [0], marker='^', color='w', markerfacecolor='orangered',
+                                           markersize=10, label='Filled @ Ask'),
+                                ])
+                            legend_po.append(
+                                Line2D([0], [0], marker='D', color='w', markerfacecolor='magenta',
+                                       markersize=10, label='Forced Market Order'))
+                            legend_po.append(
+                                Line2D([0], [0], marker='^', color='purple', markersize=8,
+                                       label='Out-of-Range Order'))
+                            handles_po, _ = ax_po.get_legend_handles_labels()
+                            ax_po.legend(handles=legend_po + handles_po, loc='lower right', fontsize=7)
+
+                            ax_po.set_title(f"Policy Orders [{viz_label}] PnL={viz_pnl:.0f} (#{self.replay_file_idx} {self.replay_data_date}) - Epoch {epoch}")
+                            ax_po.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
+                            ax_po.set_ylabel("Price")
+                            ax_po.set_xticks(ticks2)
+                            ax_po.grid(True, alpha=0.3)
+
+                            wandb_run.log({f"market_trace_policy_orders_{viz_label}": wandb.Image(fig_po)}, commit=False)
+                            plt.close(fig_po)
 
                         # ==========================================================
                         # Third chart: Market Data with Historical Trades Only
@@ -2844,15 +3328,15 @@ class ESTrainer:
                             has_trades = jnp.sum(gt_trade_qty > 0) > 0
 
                             if has_trades:
-                                fig3, ax3 = plt.subplots(figsize=(12, 6))
+                                fig3, ax3 = plt.subplots(figsize=(12, 6), dpi=300)
 
                                 # Plot GT (same as other charts)
                                 ax3.plot(gt_steps, gt_ask, label='Market Ask', color='red', alpha=0.6, linewidth=1.0)
                                 ax3.plot(gt_steps, gt_mid, label='Mid Price', color='black', alpha=0.8, linewidth=1.0, linestyle=':')
                                 ax3.plot(gt_steps, gt_bid, label='Market Bid', color='green', alpha=0.6, linewidth=1.0)
 
-                                # Add vertical separator lines
-                                ax3.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label='Warmup End')
+                                # Shade warmup region and add step separators
+                                ax3.axvspan(-n_warmup, 0, color='blue', alpha=0.08, label='Warmup')
                                 for i in range(1, n_steps + 1):
                                     ax3.axvline(x=i * n_bg, color='gray', linestyle=':', alpha=0.3)
 
@@ -2890,7 +3374,7 @@ class ESTrainer:
                                 handles, labels = ax3.get_legend_handles_labels()
                                 ax3.legend(handles=legend_elements + handles, loc='upper left')
 
-                                ax3.set_title(f"Market Trace with Historical Trades - Epoch {epoch}")
+                                ax3.set_title(f"Market Trace with Historical Trades (#{self.replay_file_idx} {self.replay_data_date}) - Epoch {epoch}")
                                 ax3.set_xlabel("Message Index (Warmup < 0 | Trading >= 0)")
                                 ax3.set_ylabel("Price")
                                 ax3.set_xticks(ticks)
@@ -2914,7 +3398,9 @@ class ESTrainer:
                     # Fitness metrics (rank_transform(pnl), range [-0.5, 0.5])
                     'fitness/mean': fitness_mean,
                     'fitness/std': fitness_std,
-
+                    # Per-perturbation distribution histograms (will be overridden by Image below)
+                    'pnl/distribution': wandb.Histogram(pnls.tolist()),
+                    'fitness/distribution': wandb.Histogram(fitnesses.tolist()),
                     # Section 1: Normal Orders (Model Steps)
                     'normal_order/quantity': model_qty,
                     'normal_order/fill_rate': model_fill_rate,
@@ -2926,9 +3412,9 @@ class ESTrainer:
                     'market_order/quantity': liquidation_qty,
                     'market_order/fill_rate': liquidation_fill_rate,
                     
-                    # Section 3: Doom Orders (Unfilled Penalty)
-                    'doom_order/quantity': doom_qty,
-                    'doom_order/fill_rate': unfill_rate,
+                    # # Section 3: Doom Orders (Unfilled Penalty)
+                    # 'doom_order/quantity': doom_qty,
+                    # 'doom_order/fill_rate': unfill_rate,
 
                     # Section 4: Execution Summary
                     'execution/agent_quantity': agent_qty,
@@ -2940,12 +3426,138 @@ class ESTrainer:
 
                 # Add current sigma (useful for tracking sigma decay)
                 metrics['es/sigma'] = current_sigma
+                metrics['es/lr'] = current_lr
+
+                # Add full distributions as matplotlib plots (wandb.Image gives per-epoch step slider)
+                import numpy as np
+                import matplotlib.pyplot as plt
+
+                pnls_np = np.array(pnls)
+                fitnesses_np = np.array(fitnesses)
+
+                # PnL distribution (histogram for heatmap view)
+                metrics['pnl/distribution_heatmap'] = wandb.Histogram(pnls_np)
+
+                # PnL distribution (matplotlib plot for per-epoch slider view)
+                # Two subplots: full range + zoomed-in mode detail
+                fig_pnl, (ax_pnl1, ax_pnl2) = plt.subplots(1, 2, figsize=(16, 5), dpi=300)
+                pnl_mean_val = float(np.mean(pnls_np))
+                pnl_median = float(np.median(pnls_np))
+                pnl_std = float(np.std(pnls_np))
+
+                # Left: full range with fine bins
+                ax_pnl1.hist(pnls_np, bins=200, color='steelblue', edgecolor='steelblue', alpha=0.7)
+                ax_pnl1.axvline(x=pnl_mean_val, color='red', linestyle='--',
+                                label=f'Mean={pnl_mean_val:.0f}')
+                ax_pnl1.axvline(x=pnl_median, color='orange', linestyle='-.',
+                                label=f'Median={pnl_median:.0f}')
+                ax_pnl1.axvline(x=0, color='black', linestyle=':', alpha=0.5, label='Breakeven')
+                ax_pnl1.set_title(f'PnL Distribution - Epoch {epoch} (N={len(pnls_np)})')
+                ax_pnl1.set_xlabel('PnL (cents)')
+                ax_pnl1.set_ylabel('Count')
+                ax_pnl1.legend()
+                ax_pnl1.grid(True, alpha=0.3)
+
+                # Right: zoomed-in around mode (robust multi-level fallback)
+                p10 = float(np.percentile(pnls_np, 10))
+                p90 = float(np.percentile(pnls_np, 90))
+                iqr = p90 - p10
+                half_w = max(iqr * 0.8, 2 * pnl_std, 200)
+                center = 0.5 * (p10 + p90)
+                zoom_lo = center - half_w
+                zoom_hi = center + half_w
+                mask_pnl = (pnls_np >= zoom_lo) & (pnls_np <= zoom_hi)
+                zoomed_pnl = pnls_np[mask_pnl]
+                ax_pnl2.hist(zoomed_pnl, bins=100, color='steelblue', edgecolor='black',
+                             alpha=0.7, linewidth=0.5)
+                ax_pnl2.axvline(x=pnl_mean_val, color='red', linestyle='--',
+                                label=f'Mean={pnl_mean_val:.0f}')
+                ax_pnl2.axvline(x=pnl_median, color='orange', linestyle='-.',
+                                label=f'Median={pnl_median:.0f}')
+                ax_pnl2.set_xlim(zoom_lo, zoom_hi)
+                # Fine x-axis ticks (~20 ticks across the range)
+                tick_step = max((zoom_hi - zoom_lo) / 20, 1)
+                ax_pnl2.set_xticks(np.arange(
+                    np.ceil(zoom_lo / tick_step) * tick_step,
+                    zoom_hi + tick_step * 0.1,
+                    tick_step))
+                ax_pnl2.tick_params(axis='x', rotation=45, labelsize=7)
+                ax_pnl2.set_title(f'Mode Detail [{zoom_lo:.0f}, {zoom_hi:.0f}] '
+                                  f'({len(zoomed_pnl)}/{len(pnls_np)} samples)')
+                ax_pnl2.set_xlabel('PnL (cents)')
+                ax_pnl2.set_ylabel('Count')
+                ax_pnl2.legend()
+                ax_pnl2.grid(True, alpha=0.3)
+
+                plt.tight_layout()
+                # Try 3 ways to log the same figure (debug: see which panel renders correctly)
+                metrics['pnl/distribution'] = wandb.Image(fig_pnl)       # Way 1: override Histogram
+                metrics['pnl/distribution_plot'] = wandb.Image(fig_pnl)  # Way 2: fresh key
+                wandb_run.log({"pnl/distribution_img": wandb.Image(fig_pnl)}, commit=False)  # Way 3: separate log
+                plt.close(fig_pnl)
+
+                # Fitness distribution (histogram for heatmap view)
+                metrics['fitness/distribution_heatmap'] = wandb.Histogram(fitnesses_np)
+
+                # Fitness distribution (matplotlib plot for per-epoch slider view)
+                # Two subplots: full range + zoomed-in mode detail
+                fig_fit, (ax_fit1, ax_fit2) = plt.subplots(1, 2, figsize=(16, 5), dpi=300)
+
+                # Left: full range with fine bins
+                fit_median = float(np.median(fitnesses_np))
+                fit_std = float(np.std(fitnesses_np))
+                ax_fit1.hist(fitnesses_np, bins=200, color='coral', edgecolor='coral', alpha=0.7)
+                ax_fit1.axvline(x=0, color='black', linestyle='--', linewidth=1.5, label='Mean=0')
+                ax_fit1.axvline(x=fit_median, color='orange', linestyle='-.',
+                                label=f'Median={fit_median:.3f}')
+                ax_fit1.set_xlim(-0.55, 0.55)
+                ax_fit1.set_title(f'Fitness Distribution - Epoch {epoch} (N={len(fitnesses_np)})')
+                ax_fit1.set_xlabel('Fitness (rank_transform)')
+                ax_fit1.set_ylabel('Count')
+                ax_fit1.legend()
+                ax_fit1.grid(True, alpha=0.3)
+
+                # Right: zoomed-in around mode (robust multi-level fallback)
+                fp10 = float(np.percentile(fitnesses_np, 10))
+                fp90 = float(np.percentile(fitnesses_np, 90))
+                fiqr = fp90 - fp10
+                fhalf_w = max(fiqr * 0.8, 2 * fit_std, 0.1)
+                fcenter = 0.5 * (fp10 + fp90)
+                fzoom_lo = fcenter - fhalf_w
+                fzoom_hi = fcenter + fhalf_w
+                mask = (fitnesses_np >= fzoom_lo) & (fitnesses_np <= fzoom_hi)
+                zoomed_data = fitnesses_np[mask]
+                ax_fit2.hist(zoomed_data, bins=100, color='coral', edgecolor='black',
+                             alpha=0.7, linewidth=0.5)
+                ax_fit2.axvline(x=0, color='black', linestyle='--', linewidth=1.5, label='Mean=0')
+                ax_fit2.axvline(x=fit_median, color='orange', linestyle='-.',
+                                label=f'Median={fit_median:.3f}')
+                ax_fit2.set_xlim(fzoom_lo, fzoom_hi)
+                # Fine x-axis ticks (~20 ticks across the range)
+                ftick_step = max((fzoom_hi - fzoom_lo) / 20, 0.001)
+                ax_fit2.set_xticks(np.arange(
+                    np.ceil(fzoom_lo / ftick_step) * ftick_step,
+                    fzoom_hi + ftick_step * 0.1,
+                    ftick_step))
+                ax_fit2.tick_params(axis='x', rotation=45, labelsize=7)
+                ax_fit2.set_title(f'Mode Detail [{fzoom_lo:.3f}, {fzoom_hi:.3f}] '
+                                  f'({len(zoomed_data)}/{len(fitnesses_np)} samples)')
+                ax_fit2.set_xlabel('Fitness (rank_transform)')
+                ax_fit2.set_ylabel('Count')
+                ax_fit2.legend()
+                ax_fit2.grid(True, alpha=0.3)
+
+                plt.tight_layout()
+                metrics['fitness/distribution'] = wandb.Image(fig_fit)       # Way 1: override Histogram
+                metrics['fitness/distribution_plot'] = wandb.Image(fig_fit)  # Way 2: fresh key
+                wandb_run.log({"fitness/distribution_img": wandb.Image(fig_fit)}, commit=False)  # Way 3: separate log
+                plt.close(fig_fit)
 
                 wandb_run.log(metrics)
 
-                # Print warning if doom_qty > 0
-                if doom_qty > 0:
-                    print(f"[WARNING] Epoch {epoch}: {doom_qty:.0f} shares unfilled (unfill_rate={unfill_rate:.1%})")
+                # # Print warning if doom_qty > 0
+                # if doom_qty > 0:
+                #     print(f"[WARNING] Epoch {epoch}: {doom_qty:.0f} shares unfilled (unfill_rate={unfill_rate:.1%})")
 
             if epoch % 10 == 0:
                 print(f"Epoch {epoch}: pnl_mean={mean_pnl:.4f}, pnl_best={best_pnl:.4f}, pnl_std={jnp.std(pnls):.4f}")

@@ -74,14 +74,19 @@ class StackedEncoderModel(nn.Module):
             for _ in range(self.n_layers)
         ]
 
-    def __call__(self, x, integration_timesteps):
+    def __call__(self, x, integration_timesteps, hidden_list=None, return_hidden=False):
         """
         Compute the LxH output of the stacked encoder given an Lxd_input
         input sequence.
         Args:
              x (float32): input sequence (L, d_input)
+             hidden_list (list): optional list of hidden states, one per layer
+             return_hidden (bool): whether to return final hidden states
         Returns:
-            output sequence (float32): (L, d_model)
+            If return_hidden=False:
+                output sequence (float32): (L, d_model)
+            If return_hidden=True:
+                (new_hidden_list, output): new_hidden_list is list of (1, P) complex64
         """
         #jax.debug.print("Before encoder in StackedEncoderModel {}",x.shape)
         #jax.debug.print("call x_m[0:5] before msg_enc.encoder : {}",x[0:5][0])
@@ -89,12 +94,20 @@ class StackedEncoderModel(nn.Module):
         #jax.debug.print("call x_m[0:5] after msg_enc.encoder : {}",x[0:5][0])
 
         #jax.debug.print("After encoder in StackedEncoderModel {}",x.shape)
-        for i,layer in enumerate(self.layers):
-            x = layer(x)
+        new_hiddens = [] if return_hidden else None
+        for i, layer in enumerate(self.layers):
+            h_in = hidden_list[i] if hidden_list is not None else None
+            if return_hidden:
+                h_out, x = layer(x, hidden_in=h_in, return_hidden=True)
+                new_hiddens.append(h_out)
+            else:
+                x = layer(x, hidden_in=h_in, return_hidden=False)
             #jax.debug.print("call x_m[0:2] after layer {} : {}",i,x[0:2][0][0:2])
 
         #jax.debug.print("call x_m[0:5] after msg_enc.layers : {}",x[0:5][0])
 
+        if return_hidden:
+            return new_hiddens, x
         return x
     
 

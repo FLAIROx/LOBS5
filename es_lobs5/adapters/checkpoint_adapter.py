@@ -747,6 +747,7 @@ def _build_frozen_params(config: Dict, es_params: Dict) -> Dict:
 
 def load_checkpoint_for_es(
     checkpoint_path: str,
+    seed: int = 0,
 ) -> Tuple['ESInitResult', Dict]:
     """
     Load and convert checkpoint for ES training with proper es_tree_key.
@@ -757,6 +758,7 @@ def load_checkpoint_for_es(
 
     Args:
         checkpoint_path: Path to Orbax checkpoint directory
+        seed: Random seed for ES noise generation base key
 
     Returns:
         Tuple of (ESInitResult, es_tree_key)
@@ -824,7 +826,7 @@ def load_checkpoint_for_es(
 
     # Create es_tree_key using random base key
     # The es_tree_key is used for parameter-specific randomness in ES noiser
-    base_key = jax.random.PRNGKey(0)  # Fixed seed for reproducibility
+    base_key = jax.random.PRNGKey(seed)
     es_tree_key = simple_es_tree_key(es_params, base_key, scan_map)
 
     # Build frozen params

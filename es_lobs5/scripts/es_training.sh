@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
-#SBATCH --time=24:00:00
+#SBATCH --time=01:00:00
 #SBATCH --output=logs/es_train_%j.out
 #SBATCH --error=logs/es_train_%j.err
 #SBATCH --partition=workq
@@ -174,7 +174,8 @@ DATA_DIR="${DATA_DIR:-${BASE_DIR}/JAN2023/GOOG_24tok_preproc}"
 
 # Training scale
 N_EPOCHS="${N_EPOCHS:-1000000}"
-PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-2048}"
+PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-4096}"
+# PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-2048}"
 # PERGPU_PERTURBATIONS="${PERGPU_PERTURBATIONS:-56}" # for FULL mode
 # N_PERTURBATIONS is deprecated but kept for backward compatibility if set explicitly
 N_PERTURBATIONS="${N_PERTURBATIONS:-}" 
@@ -186,7 +187,9 @@ BG_MSGS="${BG_MSGS:-50}"
 SIGMA="${SIGMA:-0.2}"             # Initial sigma (0.2 for exploration)
 SIGMA_DECAY="${SIGMA_DECAY:-0.9997}"  # Per-epoch decay (0.9997: 0.2->0.01 over 10k epochs)
 SIGMA_MIN="${SIGMA_MIN:-0.01}"     # Floor value (stop decaying at this value)
-LR="${LR:-0.001}"
+LR="${LR:-0.005}"
+LR_DECAY="${LR_DECAY:-0.9990}"
+LR_MIN="${LR_MIN:-0.001}"
 NOISER="${NOISER:-eggroll}"
 LORA_RANK="${LORA_RANK:-4}"
 
@@ -211,7 +214,8 @@ CHECKPOINT_DIR="${CHECKPOINT_DIR:-${BASE_DIR}/AlphaTrade/LOBS5/checkpoints/es_ru
 RESUME_FROM="${RESUME_FROM:-}"
 
 # Random seed
-SEED="${SEED:-2026}"
+# SEED="${SEED:-2026}"  # Fixed seed (original)
+SEED="${SEED:-$(date +%H%M%S)}"  # Time-based seed (HHMMSS)
 
 # Token mode
 TOKEN_MODE="${TOKEN_MODE:-24}"
@@ -265,6 +269,8 @@ printf "│            │ SIGMA                             │ %-14s │ %-59s
 printf "│            │ SIGMA_DECAY                       │ %-14s │ %-59s │\n" "${SIGMA_DECAY}" "Per-epoch decay (0.9997: 0.2->0.01 over 10k epochs)"
 printf "│            │ SIGMA_MIN                         │ %-14s │ %-59s │\n" "${SIGMA_MIN}" "Minimum sigma floor (stop decay at this value)"
 printf "│            │ LR                                │ %-14s │ %-59s │\n" "${LR}" "Learning rate"
+printf "│            │ LR_DECAY                          │ %-14s │ %-59s │\n" "${LR_DECAY}" "Per-epoch LR decay rate"
+printf "│            │ LR_MIN                            │ %-14s │ %-59s │\n" "${LR_MIN}" "Minimum LR floor"
 printf "│            │ NOISER                            │ %-14s │ %-59s │\n" "${NOISER}" "Type of noise strategy used"
 printf "│            │ LORA_RANK                         │ %-14s │ %-59s │\n" "${LORA_RANK}" "Rank for LoRA adapters"
 printf "│            │ MODE                              │ %-14s │ %-59s │\n" "${MODE}" "Training mode (V1.6=high capacity, V1.5=train norms)"
@@ -272,7 +278,7 @@ printf "│            │ RANK_TRANSFORM                    │ %-14s │ %-59s
 echo "├────────────┼───────────────────────────────────┼────────────────┼─────────────────────────────────────────────────────────────┤"
 printf "│ System     │ CHECKPOINT_EVERY                  │ %-14s │ %-59s │\n" "${CHECKPOINT_EVERY}" "Epoch frequency to save checkpoints"
 printf "│            │ TOKEN_MODE                        │ %-14s │ %-59s │\n" "${TOKEN_MODE}" "Token vocabulary mode (24 = base-100 encoding)"
-printf "│            │ SEED                              │ %-14s │ %-59s │\n" "${SEED}" "Random seed for reproducibility"
+printf "│            │ SEED                              │ %-14s │ %-59s │\n" "${SEED}" "Random seed (HHMMSS time-based, override via SEED=)"
 echo "├────────────┼───────────────────────────────────┼────────────────────────────────────────────────────────────────────────────┤"
 printf "│ Paths      │ CHECKPOINT                        │ %-78s │\n" "${CHECKPOINT}"
 printf "│            │ DATA_DIR                          │ %-78s │\n" "${DATA_DIR}"
@@ -322,6 +328,8 @@ PYTHON_ARGS="es_lobs5/scripts/es_training.py \
     --sigma_decay ${SIGMA_DECAY} \
     --sigma_min ${SIGMA_MIN} \
     --lr ${LR} \
+    --lr_decay ${LR_DECAY} \
+    --lr_min ${LR_MIN} \
     --lora_rank ${LORA_RANK} \
     --noiser ${NOISER} \
     --background_mode historical_replay \
@@ -425,6 +433,8 @@ else
         --sigma_decay ${SIGMA_DECAY} \
         --sigma_min ${SIGMA_MIN} \
         --lr ${LR} \
+        --lr_decay ${LR_DECAY} \
+        --lr_min ${LR_MIN} \
         --lora_rank ${LORA_RANK} \
         --noiser ${NOISER} \
         --background_mode historical_replay \
