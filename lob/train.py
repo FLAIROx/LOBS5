@@ -529,8 +529,10 @@ def train(args):
             tbptt_reset_every_epoch=tbptt_reset_every_epoch,
         )
 
-        if use_tbptt and tbptt_mode == "ar_hidden" and not tbptt_reset_every_epoch:
-            tbptt_hidden = tbptt_hidden_out
+        # Note: tbptt_hidden is NOT carried across epochs
+        # Each epoch starts with zero-initialized hidden state
+        # This ensures samples from different time periods don't share history
+        # (Removed cross-epoch hidden carry as it violates temporal independence)
 
         # Check if epoch was interrupted due to timeout
         if interrupted_at_step is not None:
