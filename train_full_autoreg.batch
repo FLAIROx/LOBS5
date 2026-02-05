@@ -118,6 +118,18 @@ fi
 export USE_TBPTT TBPTT_MODE TBPTT_WINDOW_SIZE TBPTT_RESET_EVERY_EPOCH N_TBPTT_CHUNKS
 export USE_SWR SWR_WINDOW_SIZE TRAIN_VERSION
 
+# ============================================
+# Checkpoint Restore Settings
+# ============================================
+# Usage: RESTORE_PATH=/path/to/checkpoint RESTORE_STEP=12345 sbatch train_full_autoreg.batch
+RESTORE_PATH=${RESTORE_PATH:-}
+RESTORE_STEP=${RESTORE_STEP:-}
+if [ -n "$RESTORE_PATH" ]; then
+    echo "[*] Restoring from: $RESTORE_PATH"
+    echo "[*] Restore step: $RESTORE_STEP"
+fi
+export RESTORE_PATH RESTORE_STEP
+
 # Create logs directory
 mkdir -p logs_lobs5
 
@@ -345,7 +357,7 @@ python -u -B run_train.py \
     --debug_overfit=False \
     --lr_patience=2 \
     --use_bf16=True \
-    --token_mode=22 \
+    --token_mode=${TOKEN_MODE:-24} \
     --use_tbptt='"$USE_TBPTT"' \
     --tbptt_mode='"$TBPTT_MODE"' \
     --tbptt_window_size='"$TBPTT_WINDOW_SIZE"' \
@@ -355,6 +367,8 @@ python -u -B run_train.py \
     '"${SWR_WINDOW_SIZE:+--swr_window_size=$SWR_WINDOW_SIZE}"' \
     ${GLOBAL_BSZ:+--global_bsz=$GLOBAL_BSZ} \
     ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS} \
+    ${RESTORE_PATH:+--restore=$RESTORE_PATH} \
+    ${RESTORE_STEP:+--restore_step=$RESTORE_STEP} \
 '
     # NOTE: The following parameters are now controlled by --model_preset:
     #   --blocks (preset controls)
