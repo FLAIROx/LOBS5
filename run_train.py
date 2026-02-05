@@ -153,6 +153,8 @@ if __name__ == "__main__":
 	parser.add_argument("--restore", type=str,
 		     			help="if given restore from given checkpoint dir")
 	parser.add_argument("--restore_step", type=int)
+	parser.add_argument("--partial_restore", type=bool, default=True,
+		     			help="allow partial checkpoint restore when model structure changed (default: True)")
 	parser.add_argument("--msg_seq_len", type=int, default=500,  # 500
 						help="How many past messages to include in each sample")
 	parser.add_argument("--n_data_workers", type=int, default=0,

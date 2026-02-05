@@ -281,11 +281,14 @@ def train(args):
 
         if args.restore is not None and args.restore != '':
             print(f"[*] Restoring weights from {args.restore}")
+            partial_restore = getattr(args, 'partial_restore', True)
+            print(f"[*] Partial restore: {partial_restore}")
             ckpt = load_checkpoint(
                 state,
                 args.restore,
                 # args.__dict__,
                 step=args.restore_step,
+                partial_restore=partial_restore,
             )
             state = ckpt['model']
         
