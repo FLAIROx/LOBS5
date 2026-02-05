@@ -1114,7 +1114,8 @@ def train_epoch(
                 tbptt_hidden = jax.lax.stop_gradient(tbptt_hidden)
                 # Reset hidden between batches (samples are independent)
                 # Each sample is 10k messages from different time periods
-                tbptt_hidden = None  # Force zero-init for next batch
+                # Use init_hiddens (not None) to maintain pytree structure for jax.lax.scan
+                tbptt_hidden = init_hiddens  # Reset to zero-init state
 
             # print("completes train step")
             # if (batch_idx==0) & (epoch%100==0):
