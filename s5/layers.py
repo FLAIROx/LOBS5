@@ -1,55 +1,6 @@
 from flax import linen as nn
 import jax
-import jax.numpy as jnp
 from typing import Any
-
-
-class RMSNorm(nn.Module):
-    """Root Mean Square Layer Normalization (RMSNorm)
-
-    Reference: "Root Mean Square Layer Normalization" (Zhang & Sennrich, 2019)
-    Used in: LLaMA, Mistral, Qwen, and other modern LLMs
-
-    Formula: y = x / sqrt(mean(x^2) + eps) * scale
-
-    Advantages over LayerNorm:
-    - No mean subtraction (faster computation)
-    - Better for mixed precision training (BF16)
-    - No bias parameter (simpler)
-    """
-    epsilon: float = 1e-6
-    dtype: Any = jnp.float32
-
-    @nn.compact
-    def __call__(self, x):
-        """Apply RMSNorm
-
-        Args:
-            x: Input tensor of shape (..., d_model)
-
-        Returns:
-            Normalized tensor of same shape as input
-        """
-        # Get feature dimension from input
-        d_model = x.shape[-1]
-
-        # Initialize scale parameter (like gamma in LayerNorm, but no beta/bias)
-        scale = self.param(
-            "scale",
-            nn.initializers.ones,
-            (d_model,)
-        )
-
-        # Cast scale to match input dtype for mixed precision
-        scale = jnp.asarray(scale, dtype=self.dtype)
-
-        # Compute RMS (root mean square) in float32 for numerical stability
-        x_float = jnp.asarray(x, dtype=jnp.float32)
-        rms = jnp.sqrt(jnp.mean(jnp.square(x_float), axis=-1, keepdims=True) + self.epsilon)
-
-        # Normalize and scale, cast back to input dtype
-        x_normed = x_float / rms
-        return jnp.asarray(x_normed, dtype=self.dtype) * scale
 
 
 class SequenceLayer(nn.Module):
@@ -89,16 +40,16 @@ class SequenceLayer(nn.Module):
         # gpt_init = nn.initializers.normal(stddev=0.02)
 
         if self.activation in ["full_glu"]:
-            self.out1 = nn.Dense(self.d_model, dtype=self.dtype, use_bias=False)
-            self.out2 = nn.Dense(self.d_model, dtype=self.dtype, use_bias=False)
+            self.out1 = nn.Dense(self.d_model, dtype=self.dtype)
+            self.out2 = nn.Dense(self.d_model, dtype=self.dtype)
         elif self.activation in ["half_glu1", "half_glu2"]:
-            self.out2 = nn.Dense(self.d_model, dtype=self.dtype, use_bias=False)
+            self.out2 = nn.Dense(self.d_model, dtype=self.dtype)
 
         if self.batchnorm:
             self.norm = nn.BatchNorm(use_running_average=not self.training,
                                      momentum=self.bn_momentum, axis_name='batch')
         else:
-            self.norm = RMSNorm(dtype=self.dtype)
+            self.norm = nn.LayerNorm(dtype=self.dtype)
 
         self.drop = nn.Dropout(
             self.dropout,
