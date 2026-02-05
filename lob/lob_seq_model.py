@@ -606,8 +606,18 @@ class PaddedLobPredModel(nn.Module):
 
         Uses O(log L) parallel scan, NOT sequential RNN.
         """
-        hiddens_m, hiddens_b, hiddens_fused, ema = hiddens_tuple
-        fo, override = ema
+        # Handle None hidden state (first batch or after reset)
+        if hiddens_tuple is None:
+            # Initialize with None for each encoder (they will zero-init internally)
+            hiddens_m = None
+            hiddens_b = None
+            hiddens_fused = None
+            # EMA state: (fo, override) - zero init
+            fo = jnp.zeros((x_m.shape[0], self.d_model))  # batch x d_model
+            override = jnp.ones((x_m.shape[0],))  # batch - start fresh
+        else:
+            hiddens_m, hiddens_b, hiddens_fused, ema = hiddens_tuple
+            fo, override = ema
 
         # Use parallel __call__ with hidden state support
         hiddens_m, x_m = self.message_encoder(
