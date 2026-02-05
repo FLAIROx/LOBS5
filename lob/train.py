@@ -256,7 +256,6 @@ def train(args):
         # ==================================================================
 
         # Log BF16 status
-        import os
         use_bf16 = os.environ.get('USE_BF16', '1') == '1'
         log_with_timestamp(f"Training precision: {'BF16 (mixed)' if use_bf16 else 'FP32'}")
         if use_bf16:
