@@ -143,7 +143,6 @@ export JAX_COMPILER_ENABLE_REMAT_PASS=true
 export XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true \
   --xla_gpu_all_reduce_combine_threshold_bytes=67108864 \
   --xla_gpu_triton_gemm_any=true \
-  --xla_gpu_graph_level=0 \
   --xla_gpu_autotune_level=0 \
   --xla_gpu_force_compilation_parallelism=1"
 
