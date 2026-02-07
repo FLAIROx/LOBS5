@@ -160,7 +160,7 @@ def train(args):
     for epoch in range(args.epochs):
         # Free residual memory from previous epoch's val/test before training
         gc.collect()
-        jax.clear_caches()
+        # jax.clear_caches()  # Removed: causes XLA recompilation every epoch, OOM at Epoch 2 with bsz=3
 
         print(f"[*] Starting Training Epoch {epoch + 1}...")
         # jax.profiler.start_trace("./jax-traces")
@@ -383,7 +383,7 @@ def train(args):
         # After each epoch
         gc.collect()
         # jax.clear_backends()
-        jax.clear_caches()
+        # jax.clear_caches()  # Removed: causes XLA recompilation every epoch, OOM at Epoch 2 with bsz=3
         # jax.profiler.stop_trace()
         if count > args.early_stop_patience:
             break
