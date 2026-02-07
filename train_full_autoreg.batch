@@ -8,6 +8,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
 #SBATCH --time=23:59:59
+#SBATCH --contiguous
 #SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
 
 # ============================================
@@ -138,13 +139,9 @@ export TF_GPU_ALLOCATOR=cuda_malloc_async
 export JAX_COMPILER_ENABLE_REMAT_PASS=true
 
 # XLA Performance Flags for GH200
-# autotune_level=0: disable GEMM autotuning to reduce compilation peak memory
-# force_compilation_parallelism=1: sequential compilation to flatten memory peaks
 export XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true \
   --xla_gpu_all_reduce_combine_threshold_bytes=67108864 \
-  --xla_gpu_triton_gemm_any=true \
-  --xla_gpu_autotune_level=0 \
-  --xla_gpu_force_compilation_parallelism=1"
+  --xla_gpu_triton_gemm_any=true"
 
 # Multi-node JAX config
 if [ -n "$JAX_COORDINATOR_ADDRESS" ]; then
