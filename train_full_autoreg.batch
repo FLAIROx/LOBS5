@@ -72,12 +72,14 @@ GPUS_PER_NODE=4
 NNODES=$SLURM_NNODES
 TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
 
-# Calculate global batch size
+# Calculate batch sizes
 GLOBAL_BSZ=$((PER_GPU_BSZ * TOTAL_GPUS))
+# Each process (node) loads its own share of the batch
+PER_PROCESS_BSZ=$((PER_GPU_BSZ * GPUS_PER_NODE))
 
 echo "[*] Per GPU batch size: $PER_GPU_BSZ"
 echo "[*] Total GPUs: $TOTAL_GPUS ($NNODES nodes × $GPUS_PER_NODE GPUs/node)"
-echo "[*] Global batch size: $GLOBAL_BSZ"
+echo "[*] Global batch size: $GLOBAL_BSZ (per-process: $PER_PROCESS_BSZ)"
 
 # Multi-Node Setup
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
@@ -204,7 +206,7 @@ python -u -B run_train.py \
     --ssm_size_base='"$SSM_SIZE_BASE"' \
     --ssm_lr_base='"$SSM_LR_BASE"' \
     --lr_factor='"$LR_FACTOR"' \
-    --bsz='"$GLOBAL_BSZ"' \
+    --bsz='"$PER_PROCESS_BSZ"' \
     ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS}
 '
 
