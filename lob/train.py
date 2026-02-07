@@ -158,6 +158,10 @@ def train(args):
     batchnorm=args.batchnorm
 
     for epoch in range(args.epochs):
+        # Free residual memory from previous epoch's val/test before training
+        gc.collect()
+        jax.clear_caches()
+
         print(f"[*] Starting Training Epoch {epoch + 1}...")
         # jax.profiler.start_trace("./jax-traces")
 

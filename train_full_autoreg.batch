@@ -121,13 +121,27 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nv
 
 # JAX environment
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
 export JAX_COORDINATOR_TIMEOUT_MS=600000
 export JAX_PLATFORMS="cuda"
+
+# Performance: Use TensorFloat-32 for matmul (7x speedup for Dense layers)
+export JAX_DEFAULT_MATMUL_PRECISION=tensorfloat32
+
+# Performance: Persistent compilation cache (skip recompilation on 2nd run)
+export JAX_COMPILATION_CACHE_DIR="/lus/lfs1aip2/projects/s5e/quant/jax_cache"
 
 # NCCL timeout
 export NCCL_TIMEOUT=3600
 export TF_GPU_ALLOCATOR=cuda_malloc_async
+# Enable XLA automatic rematerialization to reduce peak memory (trade compute for memory)
+export JAX_COMPILER_ENABLE_REMAT_PASS=true
+
+# XLA Performance Flags for GH200
+export XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true \
+  --xla_gpu_all_reduce_combine_threshold_bytes=67108864 \
+  --xla_gpu_triton_gemm_any=true \
+  --xla_gpu_graph_level=0"
 
 # Multi-node JAX config
 if [ -n "$JAX_COORDINATOR_ADDRESS" ]; then
