@@ -387,3 +387,8 @@ def train(args):
         # jax.profiler.stop_trace()
         if count > args.early_stop_patience:
             break
+
+    # Wait for async checkpoint writes to complete before exiting
+    if ckpt_mgr is not None:
+        ckpt_mgr.wait_until_finished()
+        ckpt_mgr.close()
