@@ -64,8 +64,10 @@ fi
 # Create logs directory
 mkdir -p logs_lobs5
 
-# Change to working directory
-cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5
+# Change to working directory (WORKDIR allows git worktree experiments)
+WORKDIR="${WORKDIR:-/lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5}"
+export WORKDIR
+cd "$WORKDIR"
 
 # Configuration
 GPUS_PER_NODE=4
@@ -165,11 +167,11 @@ echo "[Wrapper] Available GPUs:"
 nvidia-smi --list-gpus | head -4
 
 # Run training
-cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5
+cd "$WORKDIR"
 
 python -u -B run_train.py \
     --USE_WANDB=True \
-    --wandb_project=lobs5-360M-22tok \
+    --wandb_project="${WANDB_PROJECT:-lobs5-360M-22tok}" \
     --wandb_entity=kang-oxford \
     --C_init=trunc_standard_normal \
     --prenorm=True \
