@@ -13,6 +13,7 @@ import math
 
 #import torch
 #import torchvision
+import torch
 from torch.utils.data import Dataset, Subset, Sampler
 from glob import glob
 # Global flag to set a specific platform, must be used at startup.
@@ -382,11 +383,26 @@ class LOBSTER_Dataset(Dataset):
             raise NotImplementedError("Need to confirm syntax for other mask funcs to ensure backward compat.")
         self.rng = np.random.default_rng(seed)
         self.randomize_offset = randomize_offset
+        self._num_rows_per_file = np.array(
+            [self._get_num_rows(f) for f in self.message_files],
+            dtype=np.int64,
+        )
+        # Keep offsets in shared memory so persistent DataLoader workers can
+        # see per-epoch updates without recreating the DataLoader.
+        self.seq_offsets = torch.zeros(len(self.message_files), dtype=torch.int64)
+        self.seq_offsets.share_memory_()
         self._reset_offsets()
         self._set_book_dims()
-        self._seqs_per_file = np.array(
-            [min((self._get_num_rows(f) - self.seq_offsets[i]) // n_messages,limit_seq_per_file)
-             for i, f in enumerate(message_files)])
+        # Use a conservative fixed length so any runtime offset in
+        # [0, n_messages - 1] remains in-bounds without rebuilding dataset state.
+        max_offset = (self.n_messages - 1) if self.randomize_offset else 0
+        seqs_per_file = np.maximum(
+            (self._num_rows_per_file - max_offset) // self.n_messages,
+            0,
+        )
+        if not math.isinf(limit_seq_per_file):
+            seqs_per_file = np.minimum(seqs_per_file, int(limit_seq_per_file))
+        self._seqs_per_file = seqs_per_file.astype(np.int64)
         # store at which observations files start
         self._seqs_cumsum = np.concatenate(([0], np.cumsum(self._seqs_per_file)))
         # count total number of sequences only once
@@ -412,11 +428,13 @@ class LOBSTER_Dataset(Dataset):
             so that sequences don't always contain the same time periods
         """
         if self.randomize_offset:
-            self.seq_offsets = {
-                i: self.rng.integers(0, self.n_messages) 
-                for i in range(len(self.message_files))}
+            new_offsets = np.array(
+                [self.rng.integers(0, self.n_messages) for _ in range(len(self.message_files))],
+                dtype=np.int64,
+            )
         else:
-            self.seq_offsets = {i: 0 for i in range(len(self.message_files))}
+            new_offsets = np.zeros(len(self.message_files), dtype=np.int64)
+        self.seq_offsets.copy_(torch.from_numpy(new_offsets))
 
     @property
     def shape(self):
@@ -452,7 +470,7 @@ class LOBSTER_Dataset(Dataset):
                 # print('fetching book from cache')
                 book = self._book_cache[file_idx]
 
-        seq_start = self.seq_offsets[file_idx] + seq_idx * self.n_messages
+        seq_start = int(self.seq_offsets[file_idx].item()) + seq_idx * self.n_messages
         seq_end = seq_start + self.n_messages
         
         X_raw = np.array(X[seq_start: seq_end])
@@ -832,21 +850,9 @@ class LOBSTER(SequenceDataset):
             keeps the same validation set and removes validation
             indices from training set
         """
-        # use a new seed for the train dataset to
-        # get a different random offset for each sequence for each epoch
-        self.dataset_train = LOBSTER_Dataset(
-            self.train_files,
-            n_messages=self.n_messages,
-            mask_fn=self.mask_fn,
-            seed=self.rng.randint(0, sys.maxsize),
-            n_cache_files=self.n_cache_files,
-            randomize_offset=True,
-            book_files=self.train_book_files,
-            use_simple_book=self.use_simple_book,
-            book_transform=self.book_transform,
-            book_depth=self.book_depth,
-            return_raw_msgs=self.return_raw_msgs,
-        )
+        # Update train offsets in place so existing DataLoader workers keep
+        # running (persistent_workers=True) and pick up the new offsets.
+        self.dataset_train._reset_offsets()
 
     def __str__(self):
         return f"{'p' if self.permute else 's'}{self._name_}"

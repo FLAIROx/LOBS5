@@ -8,7 +8,7 @@ import wandb
 import gc
 
 from lob.init_train import init_train_state, load_checkpoint, save_checkpoint, deduplicate_trainstate
-from lob.dataloading import create_lobster_prediction_dataset, create_lobster_train_loader#, Datasets
+from lob.dataloading import create_lobster_prediction_dataset#, Datasets
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import reduce_lr_on_plateau, linear_warmup, \
     cosine_annealing, constant_lr, train_epoch, validate
@@ -207,16 +207,9 @@ def train(args):
                                               args.log_ce_tables)
 
         if args.random_offsets_train:
-            # reinit training loader, so that sequences are initialised with
-            del trainloader
-            # # different offsets
-            trainloader = create_lobster_train_loader(
-                lobster_dataset,
-                int(random.randint(skey, (1,), 0, 100000)[0]),
-                args.bsz,
-                num_workers=args.n_data_workers,
-                reset_train_offsets=args.random_offsets_train,
-                shuffle=args.shuffle_train)
+            # Refresh random offsets in-place without rebuilding DataLoader.
+            # This keeps persistent workers alive across epochs.
+            lobster_dataset.reset_train_offsets()
         print(f"val model hash: {val_model.__hash__()}")
         print(f"val model apply hash: {val_model.__hash__()}")
 
