@@ -82,12 +82,10 @@ def create_lobster_prediction_dataset(
 	val_loader = make_data_loader(
 		dataset_obj.dataset_val, dataset_obj, seed=seed, batch_size=bsz,
 		drop_last=True, shuffle=False, num_workers=n_data_workers,
-		worker_init_fn=force_cpu,
 		pin_memory=pin_memory, prefetch_factor=prefetch_factor, persistent_workers=persistent_workers)
 	tst_loader = make_data_loader(
 		dataset_obj.dataset_test, dataset_obj, seed=seed, batch_size=bsz,
 		drop_last=True, shuffle=False, num_workers=n_data_workers,
-		worker_init_fn=force_cpu,
 		pin_memory=pin_memory, prefetch_factor=prefetch_factor, persistent_workers=persistent_workers)
 
 	N_CLASSES = dataset_obj.d_output
@@ -128,12 +126,6 @@ Datasets = {
 
 def force_cpu(index:int):
 	import os
-	os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 	os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-	import jax
-	jax.config.update('jax_platform_name', 'cpu')
-	# print("turning off cuda")
-	# time.sleep(3)
-	# os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-	# print("done")
-	# time.sleep(3)
+	os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+	os.environ["JAX_PLATFORMS"] = "cpu"
