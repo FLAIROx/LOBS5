@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=lobs5_360m_22tok
+#SBATCH --job-name=lobs5_75m_B1
 #SBATCH --output=logs_lobs5/lobs5_%j.out
 #SBATCH --error=logs_lobs5/lobs5_%j.err
 # === 8-node config (production training) ===
-#SBATCH --nodes=16
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
@@ -12,9 +12,10 @@
 #SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
 
 # ============================================
-# 360M Model Training Script (22 token mode)
+# 75M Model Training Script (22 token mode)
 # ============================================
-# Branch: kang_full_autoreg
+# Branch: exp/B1-ignore-times (based on baseline_full_autoreg)
+# Experiment: B1 — ignore_times=True baseline
 # Data: GOOG 2018-2022 + JAN2023 (combined)
 #
 # Usage:
@@ -40,18 +41,17 @@ echo "Total GPUs: $((SLURM_NNODES * 4))"
 echo "============================================"
 
 # ============================================
-# 360M Model Configuration (22tok)
+# 75M Model Configuration (22tok, padded_large)
 # ============================================
-# Note: 22tok has larger vocab (~12012) vs 24tok (~2212)
-# Expected params: ~380M (slightly larger than 24tok's 360M)
-D_MODEL=2048
-N_LAYERS=24
-BLOCKS=32
-SSM_SIZE_BASE=2048
-SSM_LR_BASE=0.0002
+# Based on run_lobster_padded_large.sh from baseline_full_autoreg
+D_MODEL=1024
+N_LAYERS=12
+BLOCKS=16
+SSM_SIZE_BASE=1024
+SSM_LR_BASE=0.0005
 LR_FACTOR=1
 
-echo "[*] Model config: 360M (22tok)"
+echo "[*] Model config: 75M (22tok, padded_large)"
 echo "    d_model=$D_MODEL, n_layers=$N_LAYERS, blocks=$BLOCKS"
 echo "    ssm_size_base=$SSM_SIZE_BASE, ssm_lr_base=$SSM_LR_BASE"
 
@@ -171,7 +171,7 @@ cd "$WORKDIR"
 
 python -u -B run_train.py \
     --USE_WANDB=True \
-    --wandb_project="${WANDB_PROJECT:-lobs5-360M-22tok}" \
+    --wandb_project="${WANDB_PROJECT:-lobs5-75M-B1}" \
     --wandb_entity=kang-oxford \
     --C_init=trunc_standard_normal \
     --prenorm=True \
@@ -183,7 +183,7 @@ python -u -B run_train.py \
     --clip_eigs=True \
     --activation_fn=half_glu1 \
     --dt_global=False \
-    --epochs=20 \
+    --epochs=400 \
     --jax_seed=42 \
     --opt_config=standard \
     --p_dropout=0.0 \
@@ -201,6 +201,7 @@ python -u -B run_train.py \
     --random_offsets_train=True \
     --shuffle_train=True \
     --debug_overfit=False \
+    --ignore_times=True \
     --lr_patience=2 \
     --d_model='"$D_MODEL"' \
     --n_layers='"$N_LAYERS"' \
