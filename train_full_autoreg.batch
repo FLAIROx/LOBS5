@@ -1,0 +1,198 @@
+#!/bin/bash
+#SBATCH --job-name=lobs5_360m_22tok
+#SBATCH --output=logs_lobs5/lobs5_%j.out
+#SBATCH --error=logs_lobs5/lobs5_%j.err
+# === 1-node config (for batch size sweep) ===
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --mem=0
+#SBATCH --time=00:30:00
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
+
+# ============================================
+# 360M Model Training Script (22 token mode)
+# ============================================
+# Branch: kang_full_autoreg
+# Data: GOOG 2018-2022 + JAN2023 (combined)
+#
+# Usage:
+#   # Batch size sweep (single node)
+#   for bsz in 1 2 4 8 12 16; do
+#       PER_GPU_BSZ=$bsz CURTAIL_EPOCHS=10 sbatch train_full_autoreg.batch
+#   done
+#
+#   # Full training (8 nodes) - update --nodes=8 first
+#   PER_GPU_BSZ=<optimal> sbatch train_full_autoreg.batch
+# ============================================
+
+# Default per-GPU batch size (can be overridden via environment variable)
+export PER_GPU_BSZ=${PER_GPU_BSZ:-4}
+
+echo "============================================"
+echo "Job started at: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Running on nodes: $SLURM_JOB_NODELIST"
+echo "Number of nodes: $SLURM_NNODES"
+echo "GPUs per node: 4"
+echo "Total GPUs: $((SLURM_NNODES * 4))"
+echo "============================================"
+
+# ============================================
+# 360M Model Configuration (22tok)
+# ============================================
+# Note: 22tok has larger vocab (~12012) vs 24tok (~2212)
+# Expected params: ~380M (slightly larger than 24tok's 360M)
+D_MODEL=2048
+N_LAYERS=24
+BLOCKS=32
+SSM_SIZE_BASE=2048
+SSM_LR_BASE=0.0002
+LR_FACTOR=1
+
+echo "[*] Model config: 360M (22tok)"
+echo "    d_model=$D_MODEL, n_layers=$N_LAYERS, blocks=$BLOCKS"
+echo "    ssm_size_base=$SSM_SIZE_BASE, ssm_lr_base=$SSM_LR_BASE"
+
+# CURTAIL_EPOCHS: Optional - end each epoch early after N steps (for quick testing)
+if [ -n "$CURTAIL_EPOCHS" ]; then
+    echo "[*] Curtail epochs: $CURTAIL_EPOCHS steps (quick test mode)"
+    export CURTAIL_EPOCHS
+fi
+
+# Create logs directory
+mkdir -p logs_lobs5
+
+# Change to working directory
+cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5
+
+# Configuration
+GPUS_PER_NODE=4
+NNODES=$SLURM_NNODES
+TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
+
+# Calculate global batch size
+GLOBAL_BSZ=$((PER_GPU_BSZ * TOTAL_GPUS))
+
+echo "[*] Per GPU batch size: $PER_GPU_BSZ"
+echo "[*] Total GPUs: $TOTAL_GPUS ($NNODES nodes × $GPUS_PER_NODE GPUs/node)"
+echo "[*] Global batch size: $GLOBAL_BSZ"
+
+# Multi-Node Setup
+MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
+MASTER_PORT=29500
+export JAX_COORDINATOR_ADDRESS="$MASTER_ADDR:$MASTER_PORT"
+export MASTER_ADDR
+export MASTER_PORT
+
+echo "[*] Multi-node mode: $NNODES nodes"
+echo "[*] Coordinator: $JAX_COORDINATOR_ADDRESS"
+
+# Data path: combined 2018-2022 + JAN2023 preproc data
+export DATA_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_2018_2022_combined"
+echo "[*] Data directory: $DATA_DIR"
+
+# Launch with srun
+srun --nodes=$NNODES \
+     --ntasks=$NNODES \
+     --ntasks-per-node=1 \
+     --gres=gpu:$GPUS_PER_NODE \
+     --gpu-bind=map_gpu:0,1,2,3 \
+     --output=logs_lobs5/training_${SLURM_JOB_ID}_node%n.log \
+     --export=ALL \
+     bash -c '
+# ========== Inline Wrapper ==========
+echo "========================================"
+echo "[Wrapper] Running on node: $(hostname)"
+echo "[Wrapper] SLURM_NODEID: ${SLURM_NODEID:-N/A}"
+echo "[Wrapper] SLURM_PROCID: ${SLURM_PROCID:-N/A}"
+echo "[Wrapper] CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-all}"
+echo "========================================"
+
+# Source conda
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate lob
+
+# Load CUDA module
+module load cuda/12.6
+
+# Set LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+
+# JAX environment
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+export JAX_COORDINATOR_TIMEOUT_MS=600000
+export JAX_PLATFORMS="cuda"
+
+# NCCL timeout
+export NCCL_TIMEOUT=3600
+export TF_GPU_ALLOCATOR=cuda_malloc_async
+
+# Multi-node JAX config
+if [ -n "$JAX_COORDINATOR_ADDRESS" ]; then
+    echo "[Wrapper] Multi-node coordinator: $JAX_COORDINATOR_ADDRESS"
+    export JAX_PROCESS_COUNT=${SLURM_NNODES:-1}
+    export JAX_PROCESS_INDEX=${SLURM_PROCID:-0}
+    export JAX_LOCAL_PROCESS_COUNT=1
+    export JAX_LOCAL_PROCESS_INDEX=0
+    echo "[Wrapper] JAX_PROCESS_COUNT=${JAX_PROCESS_COUNT}"
+    echo "[Wrapper] JAX_PROCESS_INDEX=${JAX_PROCESS_INDEX}"
+fi
+
+# CUDA config
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+mkdir -p "$HOME/.nv/ComputeCache" || true
+
+echo "[Wrapper] Available GPUs:"
+nvidia-smi --list-gpus | head -4
+
+# Run training
+cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5
+
+python -u -B run_train.py \
+    --USE_WANDB=True \
+    --wandb_project=lobs5-360M-22tok \
+    --wandb_entity=kang-oxford \
+    --C_init=trunc_standard_normal \
+    --prenorm=True \
+    --batchnorm=False \
+    --bidirectional=False \
+    --dataset=lobster-prediction \
+    --merging=padded \
+    --dir_name="'"$DATA_DIR"'" \
+    --clip_eigs=True \
+    --activation_fn=half_glu1 \
+    --dt_global=False \
+    --epochs=20 \
+    --jax_seed=42 \
+    --opt_config=standard \
+    --p_dropout=0.0 \
+    --warmup_end=1 \
+    --weight_decay=0.05 \
+    --msg_seq_len=500 \
+    --use_book_data=True \
+    --use_simple_book=False \
+    --book_transform=True \
+    --masking=none \
+    --num_devices='"$GPUS_PER_NODE"' \
+    --n_data_workers=12 \
+    --debug_loading=False \
+    --enable_profiler=False \
+    --random_offsets_train=True \
+    --shuffle_train=True \
+    --debug_overfit=False \
+    --lr_patience=2 \
+    --d_model='"$D_MODEL"' \
+    --n_layers='"$N_LAYERS"' \
+    --blocks='"$BLOCKS"' \
+    --ssm_size_base='"$SSM_SIZE_BASE"' \
+    --ssm_lr_base='"$SSM_LR_BASE"' \
+    --lr_factor='"$LR_FACTOR"' \
+    --bsz='"$GLOBAL_BSZ"' \
+    ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS}
+'
+
+echo "============================================"
+echo "Training completed at: $(date)"
+echo "============================================"

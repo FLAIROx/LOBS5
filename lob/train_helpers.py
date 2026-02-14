@@ -214,7 +214,7 @@ def create_train_state(model_cls,
     model = model_cls(training=True)
     init_rng, dropout_rng = jax.random.split(rng, num=2)
     
-    jax.debug.print("Dummy input shapes (msg,book) ({}, \n {})",dummy_input[0].shape,dummy_input[1].shape)
+    # jax.debug.print("Dummy input shapes (msg,book) ({}, \n {})",dummy_input[0].shape,dummy_input[1].shape)
     #RNN mode and initialisation needs to go in here if we need it. 
 
     variables = model.init({"params": init_rng,
@@ -486,7 +486,7 @@ def _prep_batch_par(
     # CAVE: squeeze very important for training!
     return full_inputs, np.squeeze(targets.astype(np.int32)), integration_timesteps
 
-@partial(jax.jit, static_argnums=(0,), backend='gpu')# backend='cpu')
+# Note: removed jit decorator - let pmap handle device placement
 def device_reshape(
         num_devices: int,
         inputs: jax.Array,
