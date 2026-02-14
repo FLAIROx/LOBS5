@@ -183,7 +183,7 @@ python -u -B run_train.py \
     --clip_eigs=True \
     --activation_fn=half_glu1 \
     --dt_global=False \
-    --epochs=400 \
+    --epochs=40 \
     --jax_seed=42 \
     --opt_config=standard \
     --p_dropout=0.0 \
@@ -202,7 +202,7 @@ python -u -B run_train.py \
     --shuffle_train=True \
     --debug_overfit=False \
     --ignore_times=True \
-    --lr_patience=2 \
+    --lr_patience=4 \
     --d_model='"$D_MODEL"' \
     --n_layers='"$N_LAYERS"' \
     --blocks='"$BLOCKS"' \
