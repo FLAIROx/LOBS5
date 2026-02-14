@@ -180,42 +180,14 @@ if __name__ == "__main__":
 	
 	args = parser.parse_args()
 
-	# === Multi-node distributed initialization ===
-	import jax
-	from jax.experimental import multihost_utils
+	# === Multi-node data sharding (no JAX distributed — pmap stays local) ===
+	process_index = int(os.environ.get('SLURM_PROCID', '0'))
+	process_count = int(os.environ.get('SLURM_NNODES', '1'))
+	is_distributed = process_count > 1
 
-	if os.environ.get('JAX_COORDINATOR_ADDRESS'):
-		coord = os.environ['JAX_COORDINATOR_ADDRESS']
-		pid = int(os.environ.get('JAX_PROCESS_INDEX', os.environ.get('SLURM_PROCID', '0')))
-		pcnt = int(os.environ.get('JAX_PROCESS_COUNT', os.environ.get('SLURM_NNODES', '1')))
-
-		cvd = os.environ.get('CUDA_VISIBLE_DEVICES', '')
-		if cvd and cvd != '-1':
-			n_local = len([d for d in cvd.split(',') if d.strip()])
-		else:
-			n_local = 4
-		local_device_ids = list(range(n_local))
-
-		print(f"[*] Initializing JAX distributed: coord={coord}, pid={pid}/{pcnt}")
-		jax.distributed.initialize(
-			coordinator_address=coord,
-			num_processes=pcnt,
-			process_id=pid,
-			local_device_ids=local_device_ids
-		)
-
-		is_distributed = True
-		process_index = jax.process_index()
-		process_count = jax.process_count()
-		args.num_devices = jax.local_device_count()
-
-		print(f"[*] JAX distributed: rank {process_index}/{process_count}, "
-			  f"{args.num_devices} local GPUs, {len(jax.devices())} total GPUs")
-		multihost_utils.sync_global_devices("distributed_init")
-	else:
-		is_distributed = False
-		process_index = 0
-		process_count = 1
+	if is_distributed:
+		print(f"[*] Multi-node data sharding: rank {process_index}/{process_count}")
+		print(f"[*] Each node processes 1/{process_count} of the dataset (local pmap on {args.num_devices} GPUs)")
 
 	args.is_distributed = is_distributed
 	args.process_index = process_index
