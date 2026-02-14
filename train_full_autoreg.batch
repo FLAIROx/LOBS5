@@ -29,7 +29,7 @@
 # ============================================
 
 # Default per-GPU batch size (can be overridden via environment variable)
-export PER_GPU_BSZ=${PER_GPU_BSZ:-3}
+export PER_GPU_BSZ=${PER_GPU_BSZ:-8}
 
 echo "============================================"
 echo "Job started at: $(date)"
