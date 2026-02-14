@@ -86,6 +86,7 @@ def train(args):
             shuffle_train=args.shuffle_train,
             rand_offset=args.random_offsets_train,
             debug_overfit=args.debug_overfit,
+            test_dir_name=getattr(args, 'test_dir_name', None),
             use_distributed_sampler=is_distributed,
             process_rank=process_rank,
             process_count=process_count,

@@ -37,6 +37,7 @@ def create_lobster_prediction_dataset(
 		pin_memory: bool = True,
 		prefetch_factor: int = 2,
 		persistent_workers: bool = True,
+		test_dir_name: Union[str, Path, None] = None,
 		use_distributed_sampler: bool = False,
 		process_rank: int = 0,
 		process_count: int = 1,
@@ -67,6 +68,7 @@ def create_lobster_prediction_dataset(
 		debug_overfit=debug_overfit,
 		val_split=val_split,
 		test_split=test_split,
+		test_data_dir=test_dir_name,
 	)
 	dataset_obj.setup()
  

@@ -88,9 +88,11 @@ echo "[*] Global batch size: $GLOBAL_BSZ (per-process: $PER_PROCESS_BSZ)"
 echo "[*] Multi-node data sharding: $NNODES nodes"
 echo "[*] Each node trains on 1/$NNODES of the dataset with local pmap on $GPUS_PER_NODE GPUs"
 
-# Data path: combined 2018-2022 + JAN2023 preproc data
-export DATA_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_2018_2022_combined"
-echo "[*] Data directory: $DATA_DIR"
+# Data paths: train on GOOG 2022, test on GOOG January 2023
+export DATA_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022"
+export TEST_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG2023/data/test_set/GOOG"
+echo "[*] Train data: $DATA_DIR"
+echo "[*] Test data: $TEST_DIR"
 
 # Launch with srun
 srun --nodes=$NNODES \
@@ -167,6 +169,7 @@ python -u -B run_train.py \
     --dataset=lobster-prediction \
     --merging=padded \
     --dir_name="'"$DATA_DIR"'" \
+    --test_dir_name="'"$TEST_DIR"'" \
     --clip_eigs=True \
     --activation_fn=half_glu1 \
     --dt_global=False \
