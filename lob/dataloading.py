@@ -37,6 +37,9 @@ def create_lobster_prediction_dataset(
 		pin_memory: bool = True,
 		prefetch_factor: int = 2,
 		persistent_workers: bool = True,
+		use_distributed_sampler: bool = False,
+		process_rank: int = 0,
+		process_count: int = 1,
 	) -> ReturnType:
 	""" 
 	"""
@@ -77,7 +80,8 @@ def create_lobster_prediction_dataset(
 	
 	trn_loader = create_lobster_train_loader(
 		dataset_obj, seed, bsz, n_data_workers, reset_train_offsets=rand_offset, shuffle=shuffle_train,
-		pin_memory=pin_memory, prefetch_factor=prefetch_factor, persistent_workers=persistent_workers)
+		pin_memory=pin_memory, prefetch_factor=prefetch_factor, persistent_workers=persistent_workers,
+		use_distributed_sampler=use_distributed_sampler, process_rank=process_rank, process_count=process_count)
 	# NOTE: drop_last=True recompiles the model for a smaller batch size
 	val_loader = make_data_loader(
 		dataset_obj.dataset_val, dataset_obj, seed=seed, batch_size=bsz,
@@ -101,16 +105,33 @@ def create_lobster_prediction_dataset(
 	 		N_CLASSES, SEQ_LENGTH, IN_DIM, BOOK_SEQ_LEN, BOOK_DIM, TRAIN_SIZE)
 
 def create_lobster_train_loader(dataset_obj, seed, bsz, num_workers, reset_train_offsets=False, shuffle=True,
-								pin_memory=True, prefetch_factor=2, persistent_workers=True):
+								pin_memory=True, prefetch_factor=2, persistent_workers=True,
+								use_distributed_sampler=False, process_rank=0, process_count=1):
 	if reset_train_offsets:
 		dataset_obj.reset_train_offsets()
-	# use sampler to only get individual samples and automatic batching from dataloader
+
+	train_sampler = None
+	if use_distributed_sampler and process_count > 1:
+		from torch.utils.data import DistributedSampler
+		train_sampler = DistributedSampler(
+			dataset_obj.dataset_train,
+			num_replicas=process_count,
+			rank=process_rank,
+			shuffle=shuffle,
+			seed=seed,
+			drop_last=True,
+		)
+		print(f"[*] DistributedSampler: rank={process_rank}/{process_count}, "
+			  f"samples_per_node={len(train_sampler)}")
+		shuffle = False  # sampler handles shuffling
+
 	trn_loader = make_data_loader(
 		dataset_obj.dataset_train,
 		dataset_obj,
 		seed=seed,
 		batch_size=bsz,
-		shuffle=shuffle,  # TODO: remove later
+		shuffle=shuffle,
+		sampler=train_sampler,
 		num_workers=num_workers,
 		worker_init_fn=force_cpu,
 		pin_memory=pin_memory,

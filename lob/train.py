@@ -67,7 +67,11 @@ def train(args):
     else:
         ValueError('Issue with mask function: logic for '+args.masking+' not implemented.')
 
-    (lobster_dataset, trainloader, valloader, testloader, aux_dataloaders, 
+    is_distributed = getattr(args, 'is_distributed', False)
+    process_rank = getattr(args, 'process_index', 0)
+    process_count = getattr(args, 'process_count', 1)
+
+    (lobster_dataset, trainloader, valloader, testloader, aux_dataloaders,
         n_classes, seq_len, in_dim, book_seq_len, book_dim, train_size) = \
         create_lobster_prediction_dataset(
             args.dir_name,
@@ -81,7 +85,10 @@ def train(args):
             n_data_workers=args.n_data_workers,
             shuffle_train=args.shuffle_train,
             rand_offset=args.random_offsets_train,
-            debug_overfit=args.debug_overfit
+            debug_overfit=args.debug_overfit,
+            use_distributed_sampler=is_distributed,
+            process_rank=process_rank,
+            process_count=process_count,
         )
 
     
@@ -125,7 +132,7 @@ def train(args):
     count, best_val_loss = 0, 100000000  # This line is for early stopping purposes
     lr_count, opt_acc = 0, -100000000.0  # This line is for learning rate decay
     step = 0  # for per step learning rate decay
-    steps_per_epoch = int(train_size/args.bsz) if args.curtail_epochs is None else args.curtail_epochs+1
+    steps_per_epoch = int(train_size / (args.bsz * process_count)) if args.curtail_epochs is None else args.curtail_epochs+1
 
     # print("USING VERY INFREQUENT CHECKPOINTING FOR TINY EPOCH SIZE ")
 
@@ -160,7 +167,10 @@ def train(args):
     for epoch in range(args.epochs):
         # Free residual memory from previous epoch's val/test before training
         gc.collect()
-        # jax.clear_caches()  # Removed: causes XLA recompilation every epoch, OOM at Epoch 2 with bsz=3
+
+        # Update DistributedSampler epoch for proper cross-epoch shuffling
+        if hasattr(trainloader, 'sampler') and hasattr(trainloader.sampler, 'set_epoch'):
+            trainloader.sampler.set_epoch(epoch)
 
         print(f"[*] Starting Training Epoch {epoch + 1}...")
         # jax.profiler.start_trace("./jax-traces")
