@@ -61,7 +61,6 @@ def make_data_loader(dset,
 
 	if sampler is not None:
 		shuffle = False
-		drop_last = False
 
 	# Build loader kwargs - some options only valid when num_workers > 0
 	loader_kwargs = {

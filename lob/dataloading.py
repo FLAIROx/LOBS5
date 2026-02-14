@@ -131,6 +131,7 @@ def create_lobster_train_loader(dataset_obj, seed, bsz, num_workers, reset_train
 		seed=seed,
 		batch_size=bsz,
 		shuffle=shuffle,
+		drop_last=True,
 		sampler=train_sampler,
 		num_workers=num_workers,
 		worker_init_fn=force_cpu,
