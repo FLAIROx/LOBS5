@@ -1,4 +1,5 @@
 import os
+import sys
 import jax
 from jax import random
 import jax.numpy as jnp
@@ -304,7 +305,17 @@ def train(args):
                 'acc_test_rnn': float(test_acc),
             }
         }
-        save_checkpoint(ckpt_mgr, ckpt, epoch)
+        try:
+            save_checkpoint(ckpt_mgr, ckpt, epoch)
+        except OSError as e:
+            print(f"\n[FATAL] Checkpoint save failed at epoch {epoch}: {e}")
+            print("[FATAL] Likely disk quota exceeded. Exiting to avoid wasting compute.")
+            if ckpt_mgr is not None:
+                try:
+                    ckpt_mgr.close()
+                except Exception:
+                    pass
+            sys.exit(1)
 
         # For early stopping purposes
         if val_loss < best_val_loss:
