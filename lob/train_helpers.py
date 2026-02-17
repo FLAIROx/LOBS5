@@ -1010,7 +1010,7 @@ def eval_step(
 
 
 
-    losses = cross_entropy_loss(logits, batch_labels)  
+    losses = cross_entropy_loss(logits, batch_labels)
     if ignore_times:
         ce=losses
         ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
@@ -1028,6 +1028,10 @@ def eval_step(
         ce=np.concatenate([ce_1,ce_2],axis=2)
         ce=ce.reshape(ce.shape[0],-1)
         accs=ce
+
+    # Average losses/accs across all devices (cross-node via NCCL when distributed)
+    losses = jax.lax.pmean(losses, axis_name="batch_devices")
+    accs = jax.lax.pmean(accs, axis_name="batch_devices")
 
     return losses, accs, logits
 

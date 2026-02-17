@@ -27,7 +27,9 @@ from lob.dataloading import Datasets
 if __name__ == "__main__":
 	import argparse
 	from s5.utils.util import str2bool
-	os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
+	# Set visible GPUs from SLURM config (GPUS_PER_NODE set in batch script)
+	_n_gpus = int(os.environ.get('GPUS_PER_NODE', '4'))
+	os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(_n_gpus))
 	os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"]="0.9"
 	os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
 	os.environ["NCCL_TIMEOUT"] = "600"  # 10 minutes
@@ -182,14 +184,38 @@ if __name__ == "__main__":
 	
 	args = parser.parse_args()
 
-	# === Multi-node data sharding (no JAX distributed — pmap stays local) ===
-	process_index = int(os.environ.get('SLURM_PROCID', '0'))
+	# === Multi-node distributed training (JAX distributed + pmap) ===
+	import jax
+
 	process_count = int(os.environ.get('SLURM_NNODES', '1'))
 	is_distributed = process_count > 1
 
 	if is_distributed:
-		print(f"[*] Multi-node data sharding: rank {process_index}/{process_count}")
-		print(f"[*] Each node processes 1/{process_count} of the dataset (local pmap on {args.num_devices} GPUs)")
+		coordinator_address = os.environ.get('JAX_COORDINATOR_ADDRESS')
+		if coordinator_address:
+			num_processes = int(os.environ.get('SLURM_NTASKS', process_count))
+			process_id = int(os.environ.get('SLURM_PROCID', '0'))
+			n_local_gpus = int(os.environ.get('GPUS_PER_NODE', '4'))
+			print(f"[*] Initializing JAX distributed: coord={coordinator_address}, "
+				  f"pid={process_id}/{num_processes}, local_gpus={n_local_gpus}")
+			jax.distributed.initialize(
+				coordinator_address=coordinator_address,
+				num_processes=num_processes,
+				process_id=process_id,
+				local_device_ids=list(range(n_local_gpus)),
+			)
+		else:
+			print("[*] Initializing JAX distributed via SLURM auto-detection")
+			jax.distributed.initialize()
+
+		process_index = jax.process_index()
+		process_count = jax.process_count()
+		args.num_devices = jax.local_device_count()
+		print(f"[*] JAX distributed: rank {process_index}/{process_count}, "
+			  f"{args.num_devices} local GPUs, {jax.device_count()} total GPUs")
+	else:
+		process_index = 0
+		process_count = 1
 
 	args.is_distributed = is_distributed
 	args.process_index = process_index

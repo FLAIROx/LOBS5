@@ -85,13 +85,27 @@ def create_lobster_prediction_dataset(
 		pin_memory=pin_memory, prefetch_factor=prefetch_factor, persistent_workers=persistent_workers,
 		use_distributed_sampler=use_distributed_sampler, process_rank=process_rank, process_count=process_count)
 	# NOTE: drop_last=True recompiles the model for a smaller batch size
+	val_sampler = None
+	tst_sampler = None
+	if use_distributed_sampler and process_count > 1:
+		from torch.utils.data import DistributedSampler
+		val_sampler = DistributedSampler(
+			dataset_obj.dataset_val, num_replicas=process_count,
+			rank=process_rank, shuffle=False, drop_last=True)
+		tst_sampler = DistributedSampler(
+			dataset_obj.dataset_test, num_replicas=process_count,
+			rank=process_rank, shuffle=False, drop_last=True)
+		print(f"[*] Val DistributedSampler: rank={process_rank}/{process_count}, "
+			  f"samples_per_node={len(val_sampler)}")
+		print(f"[*] Test DistributedSampler: rank={process_rank}/{process_count}, "
+			  f"samples_per_node={len(tst_sampler)}")
 	val_loader = make_data_loader(
 		dataset_obj.dataset_val, dataset_obj, seed=seed, batch_size=bsz,
-		drop_last=True, shuffle=False, num_workers=n_data_workers,
+		drop_last=True, shuffle=False, sampler=val_sampler, num_workers=n_data_workers,
 		pin_memory=pin_memory, prefetch_factor=prefetch_factor, persistent_workers=persistent_workers)
 	tst_loader = make_data_loader(
 		dataset_obj.dataset_test, dataset_obj, seed=seed, batch_size=bsz,
-		drop_last=True, shuffle=False, num_workers=n_data_workers,
+		drop_last=True, shuffle=False, sampler=tst_sampler, num_workers=n_data_workers,
 		pin_memory=pin_memory, prefetch_factor=prefetch_factor, persistent_workers=persistent_workers)
 
 	N_CLASSES = dataset_obj.d_output

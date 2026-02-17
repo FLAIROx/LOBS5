@@ -26,12 +26,16 @@ def train(args):
     best_test_acc = -10000.0
 
     #for parameter sweep: get args from wandb server
+    is_main_process = getattr(args, 'process_index', 0) == 0
     if args is None:
         args = wandb.config
     else:
-        if args.USE_WANDB:
-            # Make wandb config dictionary
+        if args.USE_WANDB and is_main_process:
+            # Rank 0: online sync to wandb cloud
             run = wandb.init(project=args.wandb_project, job_type='model_training', config=vars(args), entity=args.wandb_entity)
+        elif args.USE_WANDB:
+            # Non-rank-0: local logging only, no duplicate cloud runs
+            run = wandb.init(mode='offline')
         else:
             run = wandb.init(mode='offline')
 
@@ -138,22 +142,24 @@ def train(args):
 
     # print("USING VERY INFREQUENT CHECKPOINTING FOR TINY EPOCH SIZE ")
 
-    mgr_options = ocp.CheckpointManagerOptions(
-        save_interval_steps=1,
-        create=True,
-        max_to_keep=10,
-        keep_period=5,
-        # step_prefix=f'{run.name}_{run.id}',
-        # enable_async_checkpointing=False,
-    )
-    ckpt_mgr = ocp.CheckpointManager(
-        os.path.abspath(f'checkpoints/{run.name}_{run.id}/'),
-        # ocp.Checkpointer(ocp.PyTreeCheckpointHandler()),
-        # ocp.Checkpointer(ocp.StandardCheckpointHandler()),
-        item_names=('state', 'metadata'),
-        options=mgr_options,
-        metadata=vars(args)
-    )
+    ckpt_mgr = None
+    if is_main_process:
+        mgr_options = ocp.CheckpointManagerOptions(
+            save_interval_steps=1,
+            create=True,
+            max_to_keep=10,
+            keep_period=5,
+            # step_prefix=f'{run.name}_{run.id}',
+            # enable_async_checkpointing=False,
+        )
+        ckpt_mgr = ocp.CheckpointManager(
+            os.path.abspath(f'checkpoints/{run.name}_{run.id}/'),
+            # ocp.Checkpointer(ocp.PyTreeCheckpointHandler()),
+            # ocp.Checkpointer(ocp.StandardCheckpointHandler()),
+            item_names=('state', 'metadata'),
+            options=mgr_options,
+            metadata=vars(args)
+        )
 
 
     if args.ignore_times:
@@ -305,17 +311,18 @@ def train(args):
                 'acc_test_rnn': float(test_acc),
             }
         }
-        try:
-            save_checkpoint(ckpt_mgr, ckpt, epoch)
-        except OSError as e:
-            print(f"\n[FATAL] Checkpoint save failed at epoch {epoch}: {e}")
-            print("[FATAL] Likely disk quota exceeded. Exiting to avoid wasting compute.")
-            if ckpt_mgr is not None:
-                try:
-                    ckpt_mgr.close()
-                except Exception:
-                    pass
-            sys.exit(1)
+        if is_main_process:
+            try:
+                save_checkpoint(ckpt_mgr, ckpt, epoch)
+            except OSError as e:
+                print(f"\n[FATAL] Checkpoint save failed at epoch {epoch}: {e}")
+                print("[FATAL] Likely disk quota exceeded. Exiting to avoid wasting compute.")
+                if ckpt_mgr is not None:
+                    try:
+                        ckpt_mgr.close()
+                    except Exception:
+                        pass
+                sys.exit(1)
 
         # For early stopping purposes
         if val_loss < best_val_loss:
