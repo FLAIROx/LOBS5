@@ -134,9 +134,8 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nv
 # NCCL OFI plugin for cross-node communication via Slingshot/libfabric
 export LD_LIBRARY_PATH=/tools/brics/apps/linux-sles15-neoverse_v2/gcc-12.3.0/aws-ofi-nccl-1.8.1-c47cd5ivrugm3jzlyqyis4igyflnydmo/lib:/opt/cray/libfabric/1.22.0/lib64:$LD_LIBRARY_PATH
 
-# JAX environment (aligned with ssm_stable)
-export XLA_PYTHON_CLIENT_PREALLOCATE=true
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
+# JAX environment — dynamic allocation for NCCL compat with process-per-GPU
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export JAX_PLATFORMS="cuda"
 
 # Eager CUDA module loading prevents kernel loading hang (NVIDIA known issue)
