@@ -107,10 +107,11 @@ srun --nodes=$NNODES \
      --export=ALL \
      bash -c '
 # ========== Inline Wrapper ==========
-# Process-per-GPU: bind this task to its assigned local GPU
+# Process-per-GPU: each task uses 1 GPU but all GPUs stay visible for NCCL P2P
 LOCAL_RANK=${SLURM_LOCALID:-0}
-export CUDA_VISIBLE_DEVICES=$LOCAL_RANK
-# Override for Python: each process manages exactly 1 GPU
+export LOCAL_GPU_ID=$LOCAL_RANK
+# Keep all GPUs visible (NCCL needs P2P access to peer GPUs)
+# JAX selects the specific GPU via local_device_ids=[LOCAL_GPU_ID]
 export GPUS_PER_NODE=1
 
 echo "========================================"
@@ -118,7 +119,7 @@ echo "[Wrapper] Running on node: $(hostname)"
 echo "[Wrapper] SLURM_NODEID: ${SLURM_NODEID:-N/A}"
 echo "[Wrapper] SLURM_PROCID: ${SLURM_PROCID:-N/A}"
 echo "[Wrapper] SLURM_LOCALID: ${SLURM_LOCALID:-N/A}"
-echo "[Wrapper] CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+echo "[Wrapper] LOCAL_GPU_ID: $LOCAL_GPU_ID (all GPUs visible for NCCL P2P)"
 echo "========================================"
 
 # Source conda
