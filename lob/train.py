@@ -336,9 +336,13 @@ def train(args):
 
         # Save checkpoint — ALL ranks must call save() for Orbax barrier sync.
         # Orbax primary_host=0 ensures only rank 0 writes to disk.
-        # Multi-host: pass state directly (NamedSharding); orbax handles distributed save.
+        # Multi-host: re-shard state to global NamedSharding (LR scheduler creates
+        # host-local scalars that orbax cannot serialize in multi-host).
         # Single-host: deduplicate to single device first.
-        ckpt_state = state if is_distributed else deduplicate_trainstate(state)
+        if is_distributed:
+            ckpt_state = jax.jit(lambda s: s, out_shardings=state_shardings)(state)
+        else:
+            ckpt_state = deduplicate_trainstate(state)
         ckpt = {
             'model': ckpt_state,
             'config': vars(args) if is_main_process else {},
