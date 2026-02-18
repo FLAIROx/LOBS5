@@ -123,28 +123,13 @@ module load cuda/12.6
 # Set LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
-# JAX environment
+# JAX environment (aligned with ssm_stable — minimal flags for multi-node compat)
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 export JAX_PLATFORMS="cuda"
-
-# Performance: Use TensorFloat-32 for matmul (7x speedup for Dense layers)
-export JAX_DEFAULT_MATMUL_PRECISION=tensorfloat32
-
-# Performance: Persistent compilation cache (skip recompilation on 2nd run)
-export JAX_COMPILATION_CACHE_DIR="/lus/lfs1aip2/projects/s5e/quant/jax_cache"
 
 # NCCL timeout
 export NCCL_TIMEOUT=3600
-export TF_GPU_ALLOCATOR=cuda_malloc_async
-# Enable XLA automatic rematerialization to reduce peak memory (trade compute for memory)
-export JAX_COMPILER_ENABLE_REMAT_PASS=true
-
-# XLA Performance Flags for GH200
-export XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true \
-  --xla_gpu_all_reduce_combine_threshold_bytes=67108864 \
-  --xla_gpu_triton_gemm_any=true \
-  --xla_gpu_enable_command_buffer="
 
 # Multi-node JAX distributed info
 echo "[Wrapper] SLURM_PROCID=${SLURM_PROCID:-0} (process rank)"
