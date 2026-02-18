@@ -4,7 +4,7 @@
 #SBATCH --error=logs_lobs5/lobs5_%j.err
 # === 8-node config (production training) ===
 #SBATCH --nodes=8
-#SBATCH --ntasks-per-node=4
+#SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
 #SBATCH --time=23:59:59
@@ -77,8 +77,8 @@ TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
 
 # Calculate batch sizes
 GLOBAL_BSZ=$((PER_GPU_BSZ * TOTAL_GPUS))
-# Process-per-GPU: each srun task handles 1 GPU
-PER_PROCESS_BSZ=$PER_GPU_BSZ
+# Each node-process loads data for all its GPUs
+PER_PROCESS_BSZ=$((PER_GPU_BSZ * GPUS_PER_NODE))
 
 echo "[*] Per GPU batch size: $PER_GPU_BSZ"
 echo "[*] Total GPUs: $TOTAL_GPUS ($NNODES nodes × $GPUS_PER_NODE GPUs/node)"
@@ -97,20 +97,17 @@ export TEST_DIR="/projects/s5e/quant/JAN2023/GOOG_24tok_preproc"
 echo "[*] Train data: $DATA_DIR"
 echo "[*] Test data: $TEST_DIR"
 
-# Launch with srun (process-per-GPU: 1 task per GPU)
+# Launch with srun (1 process per node, each managing GPUS_PER_NODE GPUs)
 srun --nodes=$NNODES \
-     --ntasks=$TOTAL_GPUS \
-     --ntasks-per-node=$GPUS_PER_NODE \
+     --ntasks=$NNODES \
+     --ntasks-per-node=1 \
      --gres=gpu:$GPUS_PER_NODE \
      --gpu-bind=none \
-     --output=logs_lobs5/training_${SLURM_JOB_ID}_rank%t.log \
+     --output=logs_lobs5/training_${SLURM_JOB_ID}_node%n.log \
      --export=ALL \
      bash -c '
 # ========== Inline Wrapper ==========
-# Process-per-GPU: manually bind each task to its GPU
-LOCAL_RANK=${SLURM_LOCALID:-0}
-export CUDA_VISIBLE_DEVICES=$LOCAL_RANK
-export GPUS_PER_NODE=1
+# 1 process per node, all GPUs visible
 
 echo "========================================"
 echo "[Wrapper] Running on node: $(hostname)"
@@ -133,8 +130,9 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nv
 # NCCL OFI plugin for cross-node communication via Slingshot/libfabric
 export LD_LIBRARY_PATH=/tools/brics/apps/linux-sles15-neoverse_v2/gcc-12.3.0/aws-ofi-nccl-1.8.1-c47cd5ivrugm3jzlyqyis4igyflnydmo/lib:/opt/cray/libfabric/1.22.0/lib64:$LD_LIBRARY_PATH
 
-# JAX environment — dynamic allocation for NCCL compat with process-per-GPU
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
+# JAX environment
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 export JAX_PLATFORMS="cuda"
 
 # Eager CUDA module loading prevents kernel loading hang (NVIDIA known issue)
@@ -147,7 +145,7 @@ export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false --xla_gpu_auto
 
 # NCCL config
 export NCCL_TIMEOUT=3600
-# Disable P2P: SLURM cgroups restrict each task to 1 GPU, P2P registration fails
+# Disable P2P: GH200 4-GPU nodes lack direct NVLink between GPUs
 export NCCL_P2P_DISABLE=1
 
 # Multi-node JAX distributed info

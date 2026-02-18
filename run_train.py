@@ -30,11 +30,12 @@ if __name__ == "__main__":
 	# Set visible GPUs from SLURM config (GPUS_PER_NODE set in batch script)
 	_n_gpus = int(os.environ.get('GPUS_PER_NODE', '4'))
 	os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(_n_gpus))
-	os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"]="0.9"
-	os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
-	os.environ["NCCL_TIMEOUT"] = "600"  # 10 minutes
-	os.environ["NCCL_IB_DISABLE"] = "0"  # Disable InfiniBand if not used
-	os.environ["NCCL_P2P_DISABLE"] = "0"  # Disable peer-to-peer if causing issues
+	os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.9")
+	os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "true")
+	# Use setdefault so batch script env vars take precedence
+	os.environ.setdefault("NCCL_TIMEOUT", "600")
+	os.environ.setdefault("NCCL_IB_DISABLE", "0")
+	os.environ.setdefault("NCCL_P2P_DISABLE", "0")
 
 	#physical_devices = tf.config.list_physical_devices('GPU')
 	#tf.config.experimental.set_memory_growth(physical_devices[0], True)
