@@ -570,6 +570,11 @@ def train_epoch(
                 batchnorm,
                 ignore_times,
             )
+            # Multi-host: block after each step to prevent async dispatch +
+            # Python LR mutation from creating inconsistent state shardings
+            # that deadlock NCCL. GPU-bound so no throughput loss.
+            if mesh is not None:
+                loss.block_until_ready()
             if debug_profiler:
                 loss.block_until_ready()
             # print("completes train step")
