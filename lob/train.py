@@ -186,6 +186,8 @@ def train(args):
         create=True,
         max_to_keep=10,
         keep_period=5,
+        # Disable async: forked subprocesses corrupt NCCL after cuInit in child
+        enable_async_checkpointing=False,
     )
     ckpt_mgr = ocp.CheckpointManager(
         ckpt_dir,
