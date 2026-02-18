@@ -533,11 +533,6 @@ def train_epoch(
         if not debug_loading:
             if (step>1) & (step<3) & debug_profiler:
                 jax.profiler.start_trace("/tmp/tensorboard")
-            # Debug: trace where Epoch 2+ hangs
-            if epoch >= 1 and batch_idx < 3:
-                import time as _time
-                print(f"[DBG] E{epoch} B{batch_idx} prep_batch...", flush=True)
-                _t0 = _time.time()
             inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
 
             # jit+sharding: place data on devices with correct sharding
@@ -546,8 +541,6 @@ def train_epoch(
             if mesh is not None:
                 from lob.sharding_utils import get_data_shardings_for_batch
                 inputs_sh, labels_sh, times_sh = get_data_shardings_for_batch(mesh, has_book_data=(len(inputs) > 1))
-                if epoch >= 1 and batch_idx < 3:
-                    print(f"[DBG] E{epoch} B{batch_idx} sharding data...", flush=True)
                 inputs = tuple(jax.make_array_from_process_local_data(sh, inp) for inp, sh in zip(inputs, inputs_sh))
                 labels = jax.make_array_from_process_local_data(labels_sh, labels)
                 integration_times = tuple(jax.make_array_from_process_local_data(sh, ts) for ts, sh in zip(integration_times, times_sh))
@@ -557,8 +550,6 @@ def train_epoch(
                 print(f"\n=== Epoch {epoch}, Batch {batch_idx} ===")
                 print_memory_usage()
 
-            if epoch >= 1 and batch_idx < 3:
-                print(f"[DBG] E{epoch} B{batch_idx} train_fn start...", flush=True)
             train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
             state, loss, ce, logits = train_fn(
                 state,
@@ -569,9 +560,10 @@ def train_epoch(
                 batchnorm,
                 ignore_times,
             )
-            if epoch >= 1 and batch_idx < 3:
+            # Multi-host: block at first step of each epoch to prevent NCCL
+            # deadlock from async dispatch + Python LR state mutation race.
+            if mesh is not None and batch_idx == 0:
                 loss.block_until_ready()
-                print(f"[DBG] E{epoch} B{batch_idx} train_fn done ({_time.time()-_t0:.1f}s) loss={float(loss):.4f}", flush=True)
             if debug_profiler:
                 loss.block_until_ready()
             # print("completes train step")
@@ -591,10 +583,6 @@ def train_epoch(
                 cross_entropies.append(ce)
             lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
             state, step = update_learning_rate_per_step(lr_params, state)
-            if epoch >= 1 and batch_idx < 3:
-                # Show LR sharding after update (check for SingleDeviceSharding pollution)
-                lr_leaf = state.opt_state.inner_states['regular'].inner_state.hyperparams['learning_rate']
-                print(f"[DBG] E{epoch} B{batch_idx} lr_update done, step={step}, lr_sharding={lr_leaf.sharding if hasattr(lr_leaf, 'sharding') else type(lr_leaf).__name__}", flush=True)
             if (step>20) & (step<=21) & debug_profiler:
                 jax.profiler.stop_trace()
                 break
