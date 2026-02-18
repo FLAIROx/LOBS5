@@ -34,19 +34,11 @@ def deduplicate_trainstate(
         state: TrainState,
     ) -> TrainState:
     """Extract a single copy of state for checkpointing.
-    pmap: state has device dim, need x[0] to extract one copy.
-    jit+sharding: state already has natural shape, just move to device 0.
+    Moves state to host first (safe for any sharding topology),
+    then places on local GPU 0.
     """
-    first_leaf = jax.tree_util.tree_leaves(state)[0]
-    if hasattr(first_leaf, 'sharding') and hasattr(first_leaf.sharding, 'mesh'):
-        # jit+sharding mode: no device dimension, just move to single device
-        return jax.device_put(state, device=jax.devices('gpu')[0])
-    else:
-        # pmap mode: strip device dimension
-        return jax.device_put(
-            jax.tree.map(lambda x: x[0], state),
-            device=jax.devices('gpu')[0]
-        )
+    host_state = jax.device_get(state)
+    return jax.device_put(host_state, device=jax.local_devices()[0])
 
 def load_args_from_checkpoint(
         checkpoint_path: str,

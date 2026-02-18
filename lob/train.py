@@ -312,19 +312,19 @@ def train(args):
                 f" Test Accuracy: {val_acc:.4f}"
             )
 
-        #save checkpoint
-        ckpt = {
-            'model': deduplicate_trainstate(state),
-            'config': vars(args),
-            'metrics': {
-                'loss_train': float(train_loss),
-                'loss_val_ar': float(val_loss),
-                'loss_test_rnn': float(test_loss),
-                'acc_val_ar': float(val_acc),
-                'acc_test_rnn': float(test_acc),
-            }
-        }
+        #save checkpoint (only main process builds and saves)
         if is_main_process:
+            ckpt = {
+                'model': deduplicate_trainstate(state),
+                'config': vars(args),
+                'metrics': {
+                    'loss_train': float(train_loss),
+                    'loss_val_ar': float(val_loss),
+                    'loss_test_rnn': float(test_loss),
+                    'acc_val_ar': float(val_acc),
+                    'acc_test_rnn': float(test_acc),
+                }
+            }
             try:
                 save_checkpoint(ckpt_mgr, ckpt, epoch)
             except OSError as e:
