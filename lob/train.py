@@ -387,8 +387,8 @@ def train(args):
                     "count": count,
                     "Learning rate count": lr_count,
                     "Opt acc": opt_acc,
-                    "lr": float(state.opt_state.inner_states['regular'].inner_state.hyperparams['learning_rate'][0]),
-                    "ssm_lr": float(state.opt_state.inner_states['ssm'].inner_state.hyperparams['learning_rate'][0]),
+                    "lr": float(state.opt_state.inner_states['regular'].inner_state.hyperparams['learning_rate']),
+                    "ssm_lr": float(state.opt_state.inner_states['ssm'].inner_state.hyperparams['learning_rate']),
                     # "Training CE by token":ce_table
                 }
             )
@@ -401,8 +401,8 @@ def train(args):
                     "count": count,
                     "Learning rate count": lr_count,
                     "Opt acc": opt_acc,
-                    "lr": float(state.opt_state.inner_states['regular'].inner_state.hyperparams['learning_rate'][0]),
-                    "ssm_lr": float(state.opt_state.inner_states['ssm'].inner_state.hyperparams['learning_rate'][0]),
+                    "lr": float(state.opt_state.inner_states['regular'].inner_state.hyperparams['learning_rate']),
+                    "ssm_lr": float(state.opt_state.inner_states['ssm'].inner_state.hyperparams['learning_rate']),
                     # "Training CE by token":ce_table
                 }
             )
