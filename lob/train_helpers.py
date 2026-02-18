@@ -536,12 +536,14 @@ def train_epoch(
             inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
 
             # jit+sharding: place data on devices with correct sharding
+            # Use make_array_from_process_local_data for multi-host: each process
+            # provides its local shard, JAX assembles the global array.
             if mesh is not None:
                 from lob.sharding_utils import get_data_shardings_for_batch
                 inputs_sh, labels_sh, times_sh = get_data_shardings_for_batch(mesh, has_book_data=(len(inputs) > 1))
-                inputs = tuple(jax.device_put(inp, sh) for inp, sh in zip(inputs, inputs_sh))
-                labels = jax.device_put(labels, labels_sh)
-                integration_times = tuple(jax.device_put(ts, sh) for ts, sh in zip(integration_times, times_sh))
+                inputs = tuple(jax.make_array_from_process_local_data(sh, inp) for inp, sh in zip(inputs, inputs_sh))
+                labels = jax.make_array_from_process_local_data(labels_sh, labels)
+                integration_times = tuple(jax.make_array_from_process_local_data(sh, ts) for ts, sh in zip(integration_times, times_sh))
 
             rng, drop_rng = jax.random.split(rng)
             if batch_idx % 1000 == 0:
@@ -822,13 +824,13 @@ def validate(state,
     for batch_idx, batch in enumerate(tqdm(testloader)):
         inputs, labels, integration_timesteps = prep_batch(batch, seq_len, num_devices)
 
-        # jit+sharding: place data on devices
+        # jit+sharding: place data on devices (multi-host compatible)
         if mesh is not None:
             from lob.sharding_utils import get_data_shardings_for_batch
             inputs_sh, labels_sh, times_sh = get_data_shardings_for_batch(mesh, has_book_data=(len(inputs) > 1))
-            inputs = tuple(jax.device_put(inp, sh) for inp, sh in zip(inputs, inputs_sh))
-            labels = jax.device_put(labels, labels_sh)
-            integration_timesteps = tuple(jax.device_put(ts, sh) for ts, sh in zip(integration_timesteps, times_sh))
+            inputs = tuple(jax.make_array_from_process_local_data(sh, inp) for inp, sh in zip(inputs, inputs_sh))
+            labels = jax.make_array_from_process_local_data(labels_sh, labels)
+            integration_timesteps = tuple(jax.make_array_from_process_local_data(sh, ts) for ts, sh in zip(integration_timesteps, times_sh))
 
         eval_fn = jit_eval_step_fn if jit_eval_step_fn is not None else eval_step
         loss, acc, pred = eval_fn(
