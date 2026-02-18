@@ -136,8 +136,7 @@ export LD_LIBRARY_PATH=/tools/brics/apps/linux-sles15-neoverse_v2/gcc-12.3.0/aws
 
 # JAX environment (aligned with ssm_stable)
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
-export TF_GPU_ALLOCATOR=cuda_malloc_async
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 export JAX_PLATFORMS="cuda"
 
 # Eager CUDA module loading prevents kernel loading hang (NVIDIA known issue)
