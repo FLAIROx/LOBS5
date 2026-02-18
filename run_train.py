@@ -184,8 +184,9 @@ if __name__ == "__main__":
 	
 	args = parser.parse_args()
 
-	# === Multi-node distributed training (JAX distributed + pmap) ===
+	# === Multi-node distributed training ===
 	import jax
+	from jax.experimental import multihost_utils
 
 	process_count = int(os.environ.get('SLURM_NNODES', '1'))
 	is_distributed = process_count > 1
@@ -213,6 +214,13 @@ if __name__ == "__main__":
 		args.num_devices = jax.local_device_count()
 		print(f"[*] JAX distributed: rank {process_index}/{process_count}, "
 			  f"{args.num_devices} local GPUs, {jax.device_count()} total GPUs")
+
+		# Sync barrier: wait for all nodes before proceeding
+		print(f"[*] Sync barrier: waiting for all {process_count} nodes...")
+		import time
+		sync_start = time.time()
+		multihost_utils.sync_global_devices("jax_distributed_init")
+		print(f"[*] All {process_count} nodes synchronized (took {time.time() - sync_start:.2f}s)")
 	else:
 		process_index = 0
 		process_count = 1
@@ -226,3 +234,11 @@ if __name__ == "__main__":
 
 	from lob.train import train
 	train(args)
+
+	# Clean shutdown for multi-node
+	if is_distributed:
+		print(f"[*] Process {process_index}: final sync...")
+		multihost_utils.sync_global_devices("end-of-train")
+		print(f"[*] Process {process_index}: shutting down JAX distributed...")
+		jax.distributed.shutdown()
+		print(f"[*] Process {process_index}: shutdown complete")
