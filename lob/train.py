@@ -416,18 +416,10 @@ def train(args):
         wandb.run.summary["Best Test Loss"] = best_test_loss
         wandb.run.summary["Best Test Accuracy"] = best_test_acc
         # print("IGNORING EARLY STOPPING FOR TINY EPOCH SIZE ")
-        # After each epoch: fully release old compiled executables to defragment GPU memory.
-        # clear_caches() alone isn't enough — jit_train_step and jit_eval_step Python objects
-        # hold references to compiled XLA executables (and their GPU buffers). These must be
-        # explicitly deleted so Python GC can free the underlying GPU memory, leaving space
-        # for the next epoch's recompilation.
-        if mesh is not None:
-            del jit_train_step, jit_eval_step
+        # After each epoch (aligned with ssm_stable):
+        # TF_GPU_ALLOCATOR=cuda_malloc_async in batch script handles defragmentation.
         gc.collect()
         jax.clear_caches()
-        if mesh is not None:
-            jit_train_step = create_jit_train_step(mesh, state, has_book_data=args.use_book_data)
-            jit_eval_step = create_jit_eval_step(mesh, state, has_book_data=args.use_book_data)
         # jax.profiler.stop_trace()
         if count > args.early_stop_patience:
             break

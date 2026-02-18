@@ -123,9 +123,10 @@ module load cuda/12.6
 # Set LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
-# JAX environment (aligned with ssm_stable — minimal flags for multi-node compat)
+# JAX environment (aligned with ssm_stable)
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.80  # Reduced from 0.90: gives XLA headroom for jax.clear_caches() recompilation
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+export TF_GPU_ALLOCATOR=cuda_malloc_async  # Prevents BFC fragmentation across train/eval epochs
 export JAX_PLATFORMS="cuda"
 
 # NCCL timeout
