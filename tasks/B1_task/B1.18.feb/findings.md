@@ -76,6 +76,48 @@ jit+sharding 模式下 `train_step` 需要在单个 GPU 的 BFC pool 中分配 *
 | XLA_PYTHON_CLIENT_PREALLOCATE=false | Epoch 2 | CUDA 地址空间更碎片，更差 |
 | **BSZ=4，无 clear_caches** | **无 OOM** | workspace 71→35 GiB，碎片池仍可满足 |
 
+### Epoch 3 OOM 的精确时间序列证据
+
+从 job 2358257 (CURTAIL_EPOCHS=10, clear_caches) 的 log 中观察到：
+
+```
+Epoch 1 train step 0:   0%| | 1/1097 [00:43<..., 43.80s/it]  ← JIT 编译（193s 总计）
+Epoch 1 train step 1:   0%| | 2/1097 [00:43<..., 18.11s/it]  ← 后续步骤 <0.5s
+...
+Epoch 1 val step 0:     0%| | 1/679  [00:08<...,  8.26s/it]  ← eval JIT 编译
+Epoch 1 val step 1:     0%| | 2/679  [00:08<...,  3.48s/it]  ← 后续步骤快
+Epoch 2 train step 0:   0%| | 1/1097 [00:32<..., 32.62s/it]  ← 再次 JIT 编译（clear_caches 生效）
+...
+Epoch 2 val step 0:     0%| | 1/679  [00:00<...,  2.36it/s]  ← 极快，复用 eval 编译
+Epoch 3 train step 0:   E0218 ... RESOURCE_EXHAUSTED ...      ← 立刻 OOM，无编译 warmup
+```
+
+**关键推断**：Epoch 3 的 `train_step` 没有 193s warmup 就直接 OOM，说明：
+- jax.clear_caches() 清除了 Python 层 trace 缓存
+- 但 XLA C++ 层的 compiled executable 仍然存活（没有被真正释放）
+- Epoch 3 复用了 XLA C++ 缓存的 executable（所以无需重新编译）
+- 但 **执行时**找不到 71.62 GiB 的连续内存 → OOM
+
+### CURTAIL_EPOCHS=10 的时间分布（BSZ=8 + clear_caches）
+
+| 阶段 | 耗时 |
+|------|------|
+| train step 0（JIT 编译） | ~193s |
+| train steps 1-9（实际计算） | ~5s |
+| eval step 0（JIT 编译） | ~43s |
+| eval steps 1-9（实际计算） | ~2s |
+| test steps 1-10（复用 eval）| ~1s |
+| checkpoint + gc.collect | ~20s |
+| **合计（per epoch）** | **~265s ≈ 4.4 分钟** |
+
+20 epochs × 4.4 分钟 = **88 分钟**，远超 30 分钟 job 时限。
+这也是为什么 CURTAIL_EPOCHS=10 无法完成 20 epoch 的根本原因（与 OOM 问题叠加）。
+
+去掉 jax.clear_caches() 后（BSZ=4）：
+- JIT 只在 Epoch 1 编译一次（193s）
+- 后续 epoch：train ~5s + eval ~2s + ckpt ~20s ≈ **27s/epoch**
+- 20 epochs 总计：193 + 19×27 ≈ **706s ≈ 12 分钟** ✅（job 2358280 实测 13 分 23 秒）
+
 ### 当前状态（Caveat）
 - BSZ=4 是**临时绕过**，不是真正的修复
 - 减半 BSZ 影响训练效率和全局 batch size 语义

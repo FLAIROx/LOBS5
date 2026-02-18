@@ -2,6 +2,67 @@
 
 ## Branch: `exp/B1-ignore-times-v2`
 
+---
+
+## 背景：2026-02-14 长训练（单节点）
+
+**Job 2316200** — `exp/B1-ignore-times` 单节点完整训练
+- **Branch**: `exp/B1-ignore-times`，commit `ed88579`
+- **配置**: 1 node, 4 GPU, epochs=40, BSZ=32
+- **耗时**: 18 小时 20 分钟，后被取消
+- **wandb**: kang-oxford/lobs5-75M-B1/u3e28srp (State: Crashed)
+- **问题**: Test Loss 持续上涨，Test Accuracy 不稳定
+  - 怀疑原因: scale up 时 Global Batch Size 变大但 LR 未调整
+  - 另一怀疑: test data path 处理逻辑有问题（后来验证是 test_dir_name 路径错误）
+- **结论**: 触发对 B1 多节点训练的全面调查
+
+---
+
+## 2026-02-17：初次多节点尝试（`exp/B1-ignore-times`，pmap 路径）
+
+这批 job 在 B1 原始分支（pmap 实现）上尝试 2-node 训练，逐步发现并修复了多个 bug。
+
+### Job 2355636 — 2-node 测试 #0（未启动）
+- **状态**: CANCELLED before starting（排队时取消）
+- **无日志**
+
+### Job 2355647 — 2-node 测试 #1 ❌ NCCL hang（17 分钟）
+- **配置**: 2 nodes (nid010025-010026), 8 GPU
+- **症状**: 两节点 NCCL 通信 hang，17 分钟后手动 scancel
+- **根因**: `jax.distributed.initialize()` 后缺少全局 barrier，node 0 和 node 1 步调不一致
+- **修复**: commit `e12e10f` — 添加 `sync_global_devices("jax_distributed_init")`
+- **log**: `logs_lobs5/training_2355647_node*.log`
+
+### Job 2355695 — 2-node 测试 #2 ❌ 重复测试（2 分 47 秒）
+- **配置**: 2 nodes (nid010064-010065), 8 GPU
+- **状态**: CANCELLED after 2:47
+- **说明**: 调试中的短暂测试，确认问题重现
+
+### Job 2355708 — 2-node 测试 #3 ❌ NCCL hang 重试（2 分 45 秒）
+- **配置**: 2 nodes (nid010025-010026), 8 GPU
+- **状态**: CANCELLED after 2:45，同 2355647 问题
+
+### Job 2356386 — 2-node 测试 #4 ❌ Orbax barrier mismatch（3 分 36 秒）
+- **配置**: 2 nodes (nid010087-010088), 8 GPU
+- **症状**: Orbax CheckpointManager 内部调用了 distributed barrier，但只有 rank 0 创建了 CheckpointManager，rank 1 没有参与，导致 barrier 不匹配 hang/crash
+- **修复**: commit `37a7ae4` — 所有 rank 都创建 CheckpointManager，满足 Orbax 的 barrier 要求
+- **log**: `logs_lobs5/training_2356386_node*.log`
+
+### Jobs 2356395, 2356410, 2356445, 2356470 — 2-node 测试 #5-8 ❌ XLA autotuner crash（各约 3 分钟）
+- **配置**: 2 nodes, 8 GPU，每个 job 约 3 分钟
+- **错误**: `Sharding autotuning failed: device_type:"DEVICE_TYPE_INVALID"` in `autotuner.cc:260`
+- **即使移除了所有 XLA flags**（triton_gemm、command_buffer 等）仍然 crash
+- **结论**: pmap 的 multi-host 路径有 XLA bug，**无法通过调参绕过，必须换 jit+sharding**
+- **log**: `logs_lobs5/training_235639*/training_235644*/training_235647*_node*.log`
+
+### Job 2356422 — 单节点对照测试 ✅（6 分 48 秒）
+- **配置**: 1 node (nid010001), 4 GPU
+- **结果**: 单节点完全正常，Epoch 1 训练通过，JIT 编译正常，无 autotuner 错误
+- **结论**: XLA autotuner bug 只在 multi-host pmap 路径触发，单节点 pmap 不受影响
+- **注意**: log 里有 `CUDA_ERROR_NO_DEVICE` 噪音，这是 force_cpu 数据加载 worker 尝试检测 GPU 时的预期错误，不影响训练
+
+---
+
 ## Session: 2026-02-18
 
 ### 00:00 — 恢复上下文
@@ -162,8 +223,12 @@
 - wandb: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/w7dourqk
 
 #### Job 2358255 — 2-node smoke test #6 (caf58db: del jit + recreate) — 错误方向
-- ssm_stable 根本没有 del/recreate jit 函数
-- **废弃**
+- **代码**: HEAD caf58db
+- **配置**: 2 nodes, 8 GPU, 30 min, CURTAIL_EPOCHS=10, EPOCHS=20, MEM_FRACTION=0.90
+- **假设**: 每 epoch 末 `del jit_train_step, jit_eval_step` → `gc.collect()` → `jax.clear_caches()` → 重建 JIT，以释放旧 XLA executable 占用的 GPU 内存
+- **实际**: Epoch 1 ✅，Epoch 2 ✅，Epoch 3 step 0 ❌ 同样 OOM 71.62 GiB
+- **ssm_stable 从未这样做**，是错误方向
+- **log**: `logs_lobs5/training_2358255_node1.log`
 
 ### 最终根因（2026-02-18 真正结论）
 
@@ -174,11 +239,38 @@
 1. **去掉 jax.clear_caches()** — 它每 epoch 触发重编译（193s税）和新 NCCL clique 积累
 2. **降低 PER_GPU_BSZ 8→4** — workspace 从 71.62 GiB 降到 ~35.81 GiB，BFC 碎片化后仍能满足
 
-#### Job 2358257 — ❌ Epoch 3 OOM (TF_GPU_ALLOCATOR 对 JAX 无效)
+#### Job 2358257 — 2-node smoke test #7 (84c52ba: TF_GPU_ALLOCATOR=cuda_malloc_async) ❌
+- **代码**: HEAD 84c52ba
+- **配置**: 2 nodes, 8 GPU, 30 min, CURTAIL_EPOCHS=10, EPOCHS=20, MEM_FRACTION=0.90
+- **假设**: `TF_GPU_ALLOCATOR=cuda_malloc_async` 使用 CUDA 异步分配器代替 BFC，从根本上避免碎片化
+- **实际**: Epoch 1 ✅，Epoch 2 ✅，Epoch 3 step 0 ❌ 同样 OOM 71.62 GiB
+- **根因**: `TF_GPU_ALLOCATOR` 是 TensorFlow 的环境变量，JAX/XLA 的 BFC allocator 完全不读取它
+- **Train Loss 一致性**: 所有失败 job 的 Epoch 1 Train Loss 均为 7.59739，Epoch 2 为 3.28439，说明训练结果可复现，只是内存问题
+- **log**: `logs_lobs5/training_2358257_node1.log`
 
-#### Job 2358266 — ❌ 脚本语法错误（注释里的 "can't" 单引号破坏 bash -c 块）
+#### Job 2358266 — ❌ 立刻失败（bash -c 单引号语法错误，8秒）
+- **代码**: HEAD 3c5a55c (PREALLOCATE=false 版本)
+- **配置**: 同 2358268，2 nodes, 30 min，CURTAIL_EPOCHS=10, EPOCHS=20
+- **错误**: `run_train.py: error: argument --epochs: invalid int value: '"${EPOCHS:-40}"'`
+  + `syntax error: unexpected end of file` at line 203
+- **根因**: 注释 `# ...BFC can't guarantee after fragmentation...` 里的 `can't` 含单引号 `'`
+  这个 `'` 提前关闭了 `srun bash -c '...'` 的外层单引号字符串，导致：
+  1. `${EPOCHS:-40}` 未被展开，以字面字符串传给 Python
+  2. srun 块的 closing `'` 在文件 EOF 找不到，语法报错
+- **耗时**: 8 秒即失败（脚本解析阶段）
+- **修复**: b49e469 — 将 `can't` 改为不含撇号的写法
+- **log**: `logs_lobs5/lobs5_2358266.err`
 
-#### Job 2358268 — ❌ Epoch 2 OOM (PREALLOCATE=false 更差：CUDA 地址空间更碎片)
+#### Job 2358268 — 2-node smoke test #8 (3c5a55c 修复语法后: PREALLOCATE=false) ❌
+- **代码**: HEAD b49e469 (修复注释单引号后)
+- **配置**: 2 nodes, 8 GPU, 30 min, CURTAIL_EPOCHS=10, EPOCHS=20, **XLA_PYTHON_CLIENT_PREALLOCATE=false**
+- **假设**: 禁用 BFC 预分配大池，改用 CUDA 原生 malloc，让 CUDA driver 处理碎片化
+- **实际**: Epoch 1 ✅，Epoch 2 step 0 ❌ OOM 71.62 GiB（比之前更差，退步到 Epoch 2）
+- **根因**: 没有 BFC 大池时，CUDA 虚拟地址空间更加碎片化，大块连续请求更难满足
+  - OOM 错误含 `[tf-allocator-allocation-error='']`，这是 XLA 对分配失败的通用提示格式
+- **结论**: PREALLOCATE=false 是反直觉的更差选择；BFC 预分配大池虽然会碎片化，但总体上比无池时更好管理大块分配
+- **耗时**: 12 分钟 19 秒（Epoch 1 完整跑完，Epoch 2 第 0 步失败）
+- **log**: `logs_lobs5/training_2358268_node1.log`
 
 #### Job 2358280 — ⚠️ Caveat: BSZ=4 workaround (fda0372: BSZ=4, no clear_caches)
 - **代码**: HEAD fda0372
