@@ -61,7 +61,7 @@ def constant_lr(step, base_lr, end_step,  lr_min=None):
     return base_lr
 
 
-def update_learning_rate_per_step(lr_params, state):
+def update_learning_rate_per_step(lr_params, state, mesh=None):
     decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min = lr_params
 
     # Get decayed value
@@ -72,7 +72,7 @@ def update_learning_rate_per_step(lr_params, state):
     # # Update state
     # state.opt_state.inner_states['regular'].inner_state.hyperparams['learning_rate'] = \
     #     jax_utils.replicate(np.array(lr_val, dtype=np.float32))
-        
+
     # state.opt_state.inner_states['ssm'].inner_state.hyperparams['learning_rate']= \
     #     jax_utils.replicate(np.array(ssm_lr_val, dtype=np.float32))
 
@@ -81,9 +81,19 @@ def update_learning_rate_per_step(lr_params, state):
     #     # we are also using weight decay on B
     #     state.opt_state.inner_states['none'].inner_state.hyperparams['learning_rate'] = \
     #         jax_utils.replicate(np.array(ssm_lr_val, dtype=np.float32))
-    # BETTER WAY - reuse existing structure:
-    lr_array = np.array(lr_val, dtype=np.float32)
-    ssm_lr_array = np.array(ssm_lr_val, dtype=np.float32)
+    # Multi-host: use globally-replicated JAX arrays to match train_step's
+    # in_shardings. numpy arrays become SingleDeviceSharding which causes
+    # NCCL deadlock when train_step tries to re-shard across hosts.
+    if mesh is not None:
+        from jax.sharding import NamedSharding, PartitionSpec as P
+        replicated = NamedSharding(mesh, P())
+        lr_array = jax.make_array_from_process_local_data(
+            replicated, np.array(lr_val, dtype=np.float32))
+        ssm_lr_array = jax.make_array_from_process_local_data(
+            replicated, np.array(ssm_lr_val, dtype=np.float32))
+    else:
+        lr_array = np.array(lr_val, dtype=np.float32)
+        ssm_lr_array = np.array(ssm_lr_val, dtype=np.float32)
     
     # Update in place by creating new state with updated hyperparams
     # This avoids accumulating replicated tensors while preserving other hyperparameters
@@ -578,7 +588,7 @@ def train_epoch(
             if log_ce_tables:
                 cross_entropies.append(ce)
             lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
-            state, step = update_learning_rate_per_step(lr_params, state)
+            state, step = update_learning_rate_per_step(lr_params, state, mesh=mesh)
             if (step>20) & (step<=21) & debug_profiler:
                 jax.profiler.stop_trace()
                 break
