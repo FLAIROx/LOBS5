@@ -211,6 +211,14 @@ def train(args):
         # Free residual memory from previous epoch's val/test before training
         gc.collect()
 
+        # Multi-host: re-shard state to global NamedSharding before each epoch.
+        # update_learning_rate_per_step creates host-local SingleDeviceSharding
+        # scalars for LR. In multi-host, each host has a DIFFERENT
+        # SingleDeviceSharding (device 0 vs device 4), causing NCCL deadlock
+        # when train_step tries to re-shard at execution time.
+        if is_distributed and epoch > 0:
+            state = jax.jit(lambda s: s, out_shardings=state_shardings)(state)
+
         # Update DistributedSampler epoch for proper cross-epoch shuffling
         if hasattr(trainloader, 'sampler') and hasattr(trainloader.sampler, 'set_epoch'):
             trainloader.sampler.set_epoch(epoch)

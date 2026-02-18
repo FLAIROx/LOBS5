@@ -560,10 +560,6 @@ def train_epoch(
                 batchnorm,
                 ignore_times,
             )
-            # Multi-host: block at first step of each epoch to prevent NCCL
-            # deadlock from async dispatch + Python LR state mutation race.
-            if mesh is not None and batch_idx == 0:
-                loss.block_until_ready()
             if debug_profiler:
                 loss.block_until_ready()
             # print("completes train step")
