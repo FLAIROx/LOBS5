@@ -336,8 +336,11 @@ def train(args):
 
         # Save checkpoint — ALL ranks must call save() for Orbax barrier sync.
         # Orbax primary_host=0 ensures only rank 0 writes to disk.
+        # Multi-host: pass state directly (NamedSharding); orbax handles distributed save.
+        # Single-host: deduplicate to single device first.
+        ckpt_state = state if is_distributed else deduplicate_trainstate(state)
         ckpt = {
-            'model': deduplicate_trainstate(state),
+            'model': ckpt_state,
             'config': vars(args) if is_main_process else {},
             'metrics': {
                 'loss_train': float(train_loss),
@@ -349,16 +352,16 @@ def train(args):
         }
         try:
             save_checkpoint(ckpt_mgr, ckpt, epoch)
-        except OSError as e:
+        except (OSError, ValueError) as e:
             print(f"\n[FATAL] Checkpoint save failed at epoch {epoch}: {e}")
-            print("[FATAL] Likely disk quota exceeded. Exiting to avoid wasting compute.")
+            print("[FATAL] Likely disk quota or serialization issue. Exiting.")
             if ckpt_mgr is not None:
                 try:
                     ckpt_mgr.close()
                 except Exception:
                     pass
             sys.exit(1)
-            del ckpt  # Free GPU memory held by deduplicated state copy
+        del ckpt  # Free GPU memory held by state copy
 
         # For early stopping purposes
         if val_loss < best_val_loss:
