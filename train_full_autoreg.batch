@@ -133,9 +133,11 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 export TF_GPU_ALLOCATOR=cuda_malloc_async
 export JAX_PLATFORMS="cuda"
 
-# XLA flags: disable Triton GEMM to avoid autotuner crash in multi-host compilation
-# (autotuner.cc Check failed: DEVICE_TYPE_INVALID with global mesh)
-export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false}"
+# XLA flags for multi-host: disable Triton GEMM and autotuning
+# 1. triton_gemm causes autotuner.cc DEVICE_TYPE_INVALID crash
+# 2. autotune_level=0 prevents multi-host autotuner deadlock
+#    (hosts may autotune ops in different order, causing allreduce deadlock)
+export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false --xla_gpu_autotune_level=0}"
 
 # NCCL timeout
 export NCCL_TIMEOUT=3600
