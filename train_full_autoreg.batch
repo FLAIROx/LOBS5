@@ -48,8 +48,9 @@ D_MODEL=1024
 N_LAYERS=12
 BLOCKS=16
 SSM_SIZE_BASE=1024
-SSM_LR_BASE=0.0005
-LR_FACTOR=1
+SSM_LR_BASE=${SSM_LR_BASE:-0.0005}
+LR_FACTOR=${LR_FACTOR:-1}
+WARMUP_END=${WARMUP_END:-1}
 
 echo "[*] Model config: 75M (22tok, padded_large)"
 echo "    d_model=$D_MODEL, n_layers=$N_LAYERS, blocks=$BLOCKS"
@@ -168,7 +169,7 @@ python -u -B run_train.py \
     --jax_seed=42 \
     --opt_config=standard \
     --p_dropout=0.0 \
-    --warmup_end=1 \
+    --warmup_end='"$WARMUP_END"' \
     --weight_decay=0.05 \
     --msg_seq_len=500 \
     --use_book_data=True \

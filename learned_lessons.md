@@ -161,4 +161,18 @@ warning `Allowed device set contains 8 devices, but platform only sees 4`。
 - **Orbax 在 distributed mode 下内部使用 barrier，要求所有 rank 同步**
 - ssm_stable 用 `jax.local_devices()` 创建 Mesh（每节点独立），Orbax 视为单机，不触发跨节点 barrier
 - 如果改为 `jax.devices()`（全局 Mesh），Orbax 会尝试跨节点 barrier，只有 rank 0 创建 CheckpointManager 就会 hang
-- **结论**：local mesh + rank 0 创建 ckpt_mgr = 安全；global mesh + rank 0 创建 ckpt_mgr = 死锁
+- **结论**：local mesh + rank 0 创建 ckpt_mgr = 安全；global mesh + rank 0 创建 ckpt_mgr = 可能死锁
+- **2026-02-18 更新**: B1 已修复为 global mesh（commit 9c64e1c）。`deduplicate_trainstate` 先转为本地数组再存，可能不触发 Orbax 分布式路径。需实测确认。如果 checkpoint 时 hang，修复方案：所有 rank 创建 ckpt_mgr + 所有 rank 调用 save。
+
+### 跨节点梯度同步 bug（2026-02-18 修复）
+- **Bug**: `sharding_utils.py:33` 用 `jax.local_devices()` 创建 mesh，多节点时每个 node 独立训练，无梯度同步
+- **代码注释**: "Gradient sync across nodes would require psum across processes (not yet implemented)"
+- **误导日志**: print 声称 "gradient sync via psum" 但 psum 根本没实现
+- **影响**: 之前所有多节点训练（包括 ssm_stable）实际上都是 N 个独立模型
+- **修复**: 改为 `jax.devices()` 创建全局 mesh，JAX 自动 allreduce（commit 9c64e1c）
+- **受影响的下游代码**（确认安全）:
+  - `prep_batch()`: 不使用 num_devices（line 411 注释已说明）
+  - `create_train_state()`: 用 local num_devices 做 dummy init（不影响）
+  - `deduplicate_trainstate()`: `jax.device_get()` 对 replicated 全局数组仍有效
+  - Orbax checkpoint: 可能风险（见上条），需实测
+- **ssm_stable 同样存在此 bug**: 需要同步修复（见 `tasks/B1_task/B1.18.feb/ssm_stable_global_mesh_fix.md`）
