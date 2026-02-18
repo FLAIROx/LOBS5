@@ -113,13 +113,17 @@ warning `Allowed device set contains 8 devices, but platform only sees 4`。
 - B1 之前: ckpt 构建在 if 外面 → 所有 rank 都调 deduplicate_trainstate → rank 1 crash
 - **ckpt dict 构建和保存必须都在 `if is_main_process` 内**
 
-### Epoch 间 OOM 的真实根因 + 正确解法
-- OOM 是 `PjRtLoadedExecutable::Execute()` 执行期申请 71.62 GiB 连续块失败（BFC allocator 碎片化）
-- **正确解法（来自 ssm_stable）**: `TF_GPU_ALLOCATOR=cuda_malloc_async`
-  - 使用 CUDA 异步分配器代替默认 BFC，从根本上避免碎片化
-  - ssm_stable 在 2026-01-04 加入了这个 flag
-  - 配合 `gc.collect() + jax.clear_caches()` 即可，**不需要** del/recreate jit 函数
-- **错误做法** (del+recreate jit): ssm_stable 从未这样做，是错误方向
-- **错误做法** (降低 MEM_FRACTION 0.80): 不必要，有了 cuda_malloc_async 用 0.90 即可
-- `del ckpt` 仍然保留（释放 checkpoint state 副本，与 OOM 无关但是好实践）
-- 参考: `subagent_ssm_stable_memory_management_20260218.md`
+### Epoch 间 OOM 的真实根因 + 正确解法（jit+sharding 专属问题）
+- OOM 是 `PjRtLoadedExecutable::Execute()` 执行期申请 71.62 GiB 连续块失败
+- **根因**: jit+sharding 模式下，train_step 需要单 GPU BFC pool 里的大连续块
+  - pmap 没有这个问题（每个设备独立分配，不需要 71.62 GiB 连续块）
+  - eval_step 碎片化 BFC pool → 下一次 train_step 找不到连续空间
+- **jax.clear_caches() 不是解法**: 每 epoch 重编译（193s/epoch 税）+ 新 NCCL clique 积累
+  - 导致 epoch 2 变快但 epoch 3 又 OOM（NCCL clique 内存积累）
+  - `TF_GPU_ALLOCATOR=cuda_malloc_async` 是 TensorFlow 变量，对 JAX/XLA **无效**
+  - `XLA_PYTHON_CLIENT_PREALLOCATE=false` 反而更差（CUDA 地址空间更碎片化）
+- **正确解法**: **不调 jax.clear_caches()** + **降低 PER_GPU_BSZ 8→4**
+  - workspace 从 71.62 GiB → ~35.81 GiB，BFC 碎片化后仍能分配
+  - JIT 只在第一 epoch 编译，后续所有 epoch 复用（快！）
+- **bash -c 陷阱**: 注释里的英文缩略词（如 can't）含单引号，会提前关闭 bash -c '...' 块
+- `del ckpt` + `gc.collect()` 保留（释放 checkpoint state 副本，好实践）
