@@ -107,8 +107,9 @@ srun --nodes=$NNODES \
      --export=ALL \
      bash -c '
 # ========== Inline Wrapper ==========
-# Process-per-GPU: SLURM gres auto-assigns 1 GPU per task via CUDA_VISIBLE_DEVICES
-# Each process sees its GPU as device 0
+# Process-per-GPU: manually bind each task to its GPU
+LOCAL_RANK=${SLURM_LOCALID:-0}
+export CUDA_VISIBLE_DEVICES=$LOCAL_RANK
 export GPUS_PER_NODE=1
 
 echo "========================================"
@@ -116,7 +117,7 @@ echo "[Wrapper] Running on node: $(hostname)"
 echo "[Wrapper] SLURM_NODEID: ${SLURM_NODEID:-N/A}"
 echo "[Wrapper] SLURM_PROCID: ${SLURM_PROCID:-N/A}"
 echo "[Wrapper] SLURM_LOCALID: ${SLURM_LOCALID:-N/A}"
-echo "[Wrapper] CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-all}"
+echo "[Wrapper] CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 echo "========================================"
 
 # Source conda
