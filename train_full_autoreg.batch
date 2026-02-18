@@ -71,7 +71,7 @@ export WORKDIR
 cd "$WORKDIR"
 
 # Configuration
-GPUS_PER_NODE=4
+GPUS_PER_NODE=${GPUS_PER_NODE:-4}
 NNODES=$SLURM_NNODES
 TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
 
@@ -102,7 +102,7 @@ srun --nodes=$NNODES \
      --ntasks=$NNODES \
      --ntasks-per-node=1 \
      --gres=gpu:$GPUS_PER_NODE \
-     --gpu-bind=map_gpu:0,1,2,3 \
+     --gpu-bind=none \
      --output=logs_lobs5/training_${SLURM_JOB_ID}_node%n.log \
      --export=ALL \
      bash -c '
