@@ -107,11 +107,8 @@ srun --nodes=$NNODES \
      --export=ALL \
      bash -c '
 # ========== Inline Wrapper ==========
-# Process-per-GPU: each task uses 1 GPU but all GPUs stay visible for NCCL P2P
-LOCAL_RANK=${SLURM_LOCALID:-0}
-export LOCAL_GPU_ID=$LOCAL_RANK
-# Keep all GPUs visible (NCCL needs P2P access to peer GPUs)
-# JAX selects the specific GPU via local_device_ids=[LOCAL_GPU_ID]
+# Process-per-GPU: SLURM gres auto-assigns 1 GPU per task via CUDA_VISIBLE_DEVICES
+# Each process sees its GPU as device 0
 export GPUS_PER_NODE=1
 
 echo "========================================"
@@ -119,7 +116,7 @@ echo "[Wrapper] Running on node: $(hostname)"
 echo "[Wrapper] SLURM_NODEID: ${SLURM_NODEID:-N/A}"
 echo "[Wrapper] SLURM_PROCID: ${SLURM_PROCID:-N/A}"
 echo "[Wrapper] SLURM_LOCALID: ${SLURM_LOCALID:-N/A}"
-echo "[Wrapper] LOCAL_GPU_ID: $LOCAL_GPU_ID (all GPUs visible for NCCL P2P)"
+echo "[Wrapper] CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-all}"
 echo "========================================"
 
 # Source conda
@@ -147,8 +144,10 @@ export CUDA_MODULE_LOADING=EAGER
 # 2. autotune_level=0 prevents multi-host autotuner deadlock
 export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false --xla_gpu_autotune_level=0}"
 
-# NCCL timeout
+# NCCL config
 export NCCL_TIMEOUT=3600
+# Disable P2P: SLURM cgroups restrict each task to 1 GPU, P2P registration fails
+export NCCL_P2P_DISABLE=1
 
 # Multi-node JAX distributed info
 echo "[Wrapper] SLURM_PROCID=${SLURM_PROCID:-0} (process rank)"

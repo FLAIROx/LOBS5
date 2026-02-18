@@ -197,20 +197,13 @@ if __name__ == "__main__":
 			num_processes = int(os.environ.get('SLURM_NTASKS', process_count))
 			process_id = int(os.environ.get('SLURM_PROCID', '0'))
 			n_local_gpus = int(os.environ.get('GPUS_PER_NODE', '4'))
-			# Process-per-GPU: LOCAL_GPU_ID selects which GPU this process uses
-			# All GPUs stay visible for NCCL P2P communication
-			local_gpu_id = os.environ.get('LOCAL_GPU_ID')
-			if local_gpu_id is not None:
-				local_device_ids = [int(local_gpu_id)]
-			else:
-				local_device_ids = list(range(n_local_gpus))
 			print(f"[*] Initializing JAX distributed: coord={coordinator_address}, "
-				  f"pid={process_id}/{num_processes}, local_device_ids={local_device_ids}")
+				  f"pid={process_id}/{num_processes}, local_gpus={n_local_gpus}")
 			jax.distributed.initialize(
 				coordinator_address=coordinator_address,
 				num_processes=num_processes,
 				process_id=process_id,
-				local_device_ids=local_device_ids,
+				local_device_ids=list(range(n_local_gpus)),
 			)
 		else:
 			print("[*] Initializing JAX distributed via SLURM auto-detection")
