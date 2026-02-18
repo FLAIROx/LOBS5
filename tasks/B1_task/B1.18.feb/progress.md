@@ -180,15 +180,22 @@
 
 #### Job 2358268 — ❌ Epoch 2 OOM (PREALLOCATE=false 更差：CUDA 地址空间更碎片)
 
-#### Job 2358280 — ✅ 2-node smoke test #最终 (fda0372: BSZ=4, no clear_caches)
+#### Job 2358280 — ⚠️ Caveat: BSZ=4 workaround (fda0372: BSZ=4, no clear_caches)
 - **代码**: HEAD fda0372
 - **配置**: 2 nodes, 8 GPU, 30 min, CURTAIL_EPOCHS=10, EPOCHS=20, **PER_GPU_BSZ=4**
 - **关键**: 去掉 jax.clear_caches()，降低 BSZ
 - **结果**: 全部 20 epoch 通过，无 OOM ✅
 - **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/juv0tktc
 - **Loss 趋势**: Train 7.64→2.24, Val 3.72→2.14, Acc 0.507→0.602
+- ⚠️ **Caveat**: BSZ 从 8 减到 4 是临时绕过方案，实际减半了 Batch Size，影响训练效率和超参配置
+
+## 关键观察（用户澄清）
+- BSZ=8 时，**Epoch 2 能通过**，只有 Epoch 3 开始出现 OOM（不是从 Epoch 2 就失败）
+- 所以原来 clear_caches 方案 + BSZ=8 能到 Epoch 3，说明问题是在第 3 个 epoch 的内存累积到临界点
+- **真实目标：让 BSZ=8 能正常多 epoch 训练**，BSZ=4 只是验证 pipeline 能通过的 workaround
 
 ## 下一步
-- [x] 修复跨 epoch OOM ✅ (PER_GPU_BSZ=4, no clear_caches)
-- [ ] 用 BSZ=8 验证是否还 OOM（确认是否 BSZ 问题）
-- [ ] 生产训练：大 epoch 数量
+- [x] 验证 pipeline 可以多 epoch 训练 ✅ (BSZ=4 workaround)
+- [ ] **真正目标**: 让 BSZ=8 能稳定多 epoch（研究 Epoch 3 的临界点）
+  - 候选方向：remat/gradient checkpointing 减少 workspace、jit+sharding 的 scan_axis 优化、分析 BFC pool Epoch 3 时的碎片结构
+- [ ] 生产训练：大 epoch 数量（BSZ=4 或 BSZ=8 取决于上面的结果）
