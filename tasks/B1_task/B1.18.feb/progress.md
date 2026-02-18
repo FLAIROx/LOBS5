@@ -195,7 +195,28 @@
 - **真实目标：让 BSZ=8 能正常多 epoch 训练**，BSZ=4 只是验证 pipeline 能通过的 workaround
 
 ## 下一步
-- [x] 验证 pipeline 可以多 epoch 训练 ✅ (BSZ=4 workaround)
+- [x] 验证 pipeline 可以多 epoch 训练 ✅ (BSZ=4 workaround, job 2358280)
 - [ ] **真正目标**: 让 BSZ=8 能稳定多 epoch（研究 Epoch 3 的临界点）
-  - 候选方向：remat/gradient checkpointing 减少 workspace、jit+sharding 的 scan_axis 优化、分析 BFC pool Epoch 3 时的碎片结构
-- [ ] 生产训练：大 epoch 数量（BSZ=4 或 BSZ=8 取决于上面的结果）
+  - **A** remat/gradient checkpointing：workspace 71→40 GiB，保持 BSZ=8（优先推荐）
+  - **B** Epoch 边界 BFC 整理：`jax.block_until_ready(state)` 在 checkpoint 后确保异步释放
+  - **C** XLA dump 分析：`--xla_dump_to` 在 Epoch 3 OOM 前获取 BFC 碎片结构
+  - **D** SSM scan 内存优化：探索分块 associative scan 降低峰值
+- [ ] 生产训练：大 epoch 数量（BSZ=4 workaround 或等 BSZ=8 修复）
+
+## 当前 Commit 链（HEAD = 83b2d05）
+```
+41d336b  ← v2 分支点（干净 B1）
+  18f832d  refactor: pmap → jit+sharding
+  491f092  fix: deduplicate_trainstate
+  49c265d  fix: lr[0] scalar
+  070facd  fix: restore jax.clear_caches（后来移除）
+  caf58db  fix: del+recreate jit（错误方向）
+  84c52ba  fix: TF_GPU_ALLOCATOR（无效）
+  8147fd6  docs: OOM 分析
+  3c5a55c  fix: PREALLOCATE=false（更差）
+  b49e469  fix: 修复注释里的单引号 bash 语法 bug
+  fda0372  fix: 去掉 clear_caches + BSZ=4 workaround
+  5db3599  docs: 记录 OOM 最终修复
+  f4e69cf  docs: job 2358280 成功记录
+  83b2d05  docs: BSZ=4 标记为 caveat（当前 HEAD）
+```
