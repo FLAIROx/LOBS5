@@ -113,10 +113,13 @@ warning `Allowed device set contains 8 devices, but platform only sees 4`。
 - B1 之前: ckpt 构建在 if 外面 → 所有 rank 都调 deduplicate_trainstate → rank 1 crash
 - **ckpt dict 构建和保存必须都在 `if is_main_process` 内**
 
-### Epoch 间 OOM 的真实根因（XLA BFC Allocator 碎片化）
-- OOM 是 `PjRtLoadedExecutable::Execute()` 执行期申请 71.62 GiB 单一连续块失败
-- train_step 需要大连续块；eval_step 把内存切成小碎片；下一 epoch train_step 找不到连续空间
-- `jax.clear_caches()` 只清 Python trace 缓存，但 `jit_*_step` 对象仍持有 XLA executable 的 GPU buffer
-- **真正修复: 每 epoch 末 `del jit_train_step, jit_eval_step` + `gc.collect()` + `clear_caches()` + 重建 JIT**
-- 同时降低 MEM_FRACTION 0.90→0.80 给重编译留空间
-- `del ckpt` + `gc.collect()` 也需要保留（释放 checkpoint state 副本）
+### Epoch 间 OOM 的真实根因 + 正确解法
+- OOM 是 `PjRtLoadedExecutable::Execute()` 执行期申请 71.62 GiB 连续块失败（BFC allocator 碎片化）
+- **正确解法（来自 ssm_stable）**: `TF_GPU_ALLOCATOR=cuda_malloc_async`
+  - 使用 CUDA 异步分配器代替默认 BFC，从根本上避免碎片化
+  - ssm_stable 在 2026-01-04 加入了这个 flag
+  - 配合 `gc.collect() + jax.clear_caches()` 即可，**不需要** del/recreate jit 函数
+- **错误做法** (del+recreate jit): ssm_stable 从未这样做，是错误方向
+- **错误做法** (降低 MEM_FRACTION 0.80): 不必要，有了 cuda_malloc_async 用 0.90 即可
+- `del ckpt` 仍然保留（释放 checkpoint state 副本，与 OOM 无关但是好实践）
+- 参考: `subagent_ssm_stable_memory_management_20260218.md`
