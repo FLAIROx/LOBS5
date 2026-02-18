@@ -5,10 +5,10 @@ import jax.numpy as np
 # from jax.nn import one_hot
 from tqdm import tqdm
 from flax.training import train_state
-from flax import jax_utils
 import optax
 from typing import Any, Dict, Optional, Tuple, Union
 from lob.encoding import Message_Tokenizer
+from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 import sys
 
 import psutil
@@ -95,7 +95,7 @@ def update_learning_rate_per_step(lr_params, state):
                     inner_state=state.opt_state.inner_states['regular'].inner_state._replace(
                         hyperparams={
                             **state.opt_state.inner_states['regular'].inner_state.hyperparams,
-                            'learning_rate': jax_utils.replicate(lr_array)
+                            'learning_rate': lr_array
                         }
                     )
                 ),
@@ -103,7 +103,7 @@ def update_learning_rate_per_step(lr_params, state):
                     inner_state=state.opt_state.inner_states['ssm'].inner_state._replace(
                         hyperparams={
                             **state.opt_state.inner_states['ssm'].inner_state.hyperparams,
-                            'learning_rate': jax_utils.replicate(ssm_lr_array)
+                            'learning_rate': ssm_lr_array
                         }
                     )
                 ),
@@ -120,7 +120,7 @@ def update_learning_rate_per_step(lr_params, state):
                         inner_state=state.opt_state.inner_states['none'].inner_state._replace(
                             hyperparams={
                                 **state.opt_state.inner_states['none'].inner_state.hyperparams,
-                                'learning_rate': jax_utils.replicate(ssm_lr_array)
+                                'learning_rate': ssm_lr_array
                             }
                         )
                     ),
@@ -356,10 +356,8 @@ def create_train_state(model_cls,
     else:
         state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
     
-    # keep copy of state on each device
-    print(state.params['message_encoder']['encoder']['embedding'].shape)
-    state = jax_utils.replicate(state)#, devices=global_devices)
-    print(state.params['message_encoder']['encoder']['embedding'].shape)
+    # jit+sharding: state replication handled in train.py via create_state_shardings
+    print(f"[*] State params embedding shape: {state.params['message_encoder']['encoder']['embedding'].shape}")
 
     return state
 
@@ -410,38 +408,21 @@ def prep_batch(
     else:
         raise RuntimeError("Err... not sure what I should do... Unhandled data type. ")
 
-    # reshape from large batch to multiple device batches
-    inputs, targets, book_data, timestep_msg, timestep_book = device_reshape(
-        num_devices,
-        inputs,
-        targets,
-        book_data,
-        timestep_msg,
-        timestep_book,
-    )
-    # print('inputs shape (device_reshape):', inputs.shape)
-
-    # split large batch into smaller device batches on the GPUs
+    # jit+sharding: no device_reshape needed — sharding handles data distribution
     inputs, labels, integration_times = _prep_batch_par(
         inputs,
         targets,
         seq_len,
-        # in_dim,
         book_data,
         timestep_msg,
         timestep_book,
     )
-    # print('inputs (targets) shape (_prep_batch_par):', inputs[1].shape)
 
     return inputs, labels, integration_times
 
 @partial(
-#    jax.vmap,
-    jax.pmap,
-    axis_name="batch_devices",
-    static_broadcasted_argnums=(2,),
-    # in_axes=(0, 0, None, None, 0, 0, 0),
-    in_axes=(0, 0, None, 0, 0, 0),
+    jax.jit,
+    static_argnums=(2,),
     # out_axes=(0, 0, 0),
     # devices=global_devices
 )
@@ -485,28 +466,6 @@ def _prep_batch_par(
 
     # CAVE: squeeze very important for training!
     return full_inputs, np.squeeze(targets.astype(np.int32)), integration_timesteps
-
-# Note: removed jit decorator - let pmap handle device placement
-def device_reshape(
-        num_devices: int,
-        inputs: jax.Array,
-        targets: jax.Array,
-        book_data: Optional[jax.Array] = None,
-        timestep_msg: Optional[jax.Array] = None,
-        timestep_book: Optional[jax.Array] = None,
-    ) -> Tuple:
-    """ 
-    """
-    inputs = np.reshape(inputs, (num_devices, -1, *inputs.shape[1:]))
-    targets = np.reshape(targets, (num_devices, -1, *targets.shape[1:]))
-    if book_data is not None:
-        book_data = np.reshape(book_data, (num_devices, -1, *book_data.shape[1:]))
-    if timestep_msg is not None:
-        timestep_msg = np.reshape(timestep_msg, (num_devices, -1, *timestep_msg.shape[1:]))
-    if timestep_book is not None:
-        timestep_book = np.reshape(timestep_book, (num_devices, -1, *timestep_book.shape[1:]))
-    return inputs, targets, book_data, timestep_msg, timestep_book
-
 
 def print_memory_usage():
     """Print GPU and system memory usage"""
@@ -555,6 +514,8 @@ def train_epoch(
         epoch,
         ignore_times,
         log_ce_tables,
+        mesh=None,
+        jit_train_step_fn=None,
     ):
 
     """
@@ -573,26 +534,22 @@ def train_epoch(
             if (step>1) & (step<3) & debug_profiler:
                 jax.profiler.start_trace("/tmp/tensorboard")
             inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
-            # print("train_epoch: Prepared batch inputs shape:", inputs[0].shape)
-            # print("train_epoch: Prepared batch labels shape:", labels.shape)
-            # print("train_epoch: Inputs 0:5:", inputs[0][0,0:5,:])
+
+            # jit+sharding: place data on devices with correct sharding
+            if mesh is not None:
+                from lob.sharding_utils import get_data_shardings_for_batch
+                inputs_sh, labels_sh, times_sh = get_data_shardings_for_batch(mesh, has_book_data=(len(inputs) > 1))
+                inputs = tuple(jax.device_put(inp, sh) for inp, sh in zip(inputs, inputs_sh))
+                labels = jax.device_put(labels, labels_sh)
+                integration_times = tuple(jax.device_put(ts, sh) for ts, sh in zip(integration_times, times_sh))
+
             rng, drop_rng = jax.random.split(rng)
-            # Print memory every 1000 steps
             if batch_idx % 1000 == 0:
                 print(f"\n=== Epoch {epoch}, Batch {batch_idx} ===")
                 print_memory_usage()
-            
-            # state,loss=train_step_rnn(                
-            #     state,
-            #     drop_rng,
-            #     inputs,
-            #     labels,
-            #     integration_times,
-            #     batchnorm,
-            #     init_hiddens)
 
-            # print("Gets to train")
-            state, loss, ce, logits = train_step(
+            train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
+            state, loss, ce, logits = train_fn(
                 state,
                 drop_rng,
                 inputs,
@@ -614,8 +571,8 @@ def train_epoch(
             #     np.set_printoptions()
             #     print('Done Printing')
 
-            # losses are already averaged across devices (--> should be all the same here)
-            batch_losses.append(loss[0])
+            # jit+sharding: loss is already a scalar (no device dimension)
+            batch_losses.append(loss)
             if log_ce_tables:
                 cross_entropies.append(ce)
             lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
@@ -655,14 +612,6 @@ def repeat_book(msg,book,shift_start):
     #     book=np.concatenate([pad,book[:-1]])
     return (msg,book)
 
-@partial(
-    jax.pmap,
-    axis_name="batch_devices",
-    static_broadcasted_argnums=(5,6),  # TODO: revert to 5 for batchnorm in pmap
-    in_axes=(0, None, 0, 0, 0, None, None),
-    # out_axes=(0, 0),
-    # devices=global_devices
-)
 def train_step(
         state: train_state.TrainState,
         rng: jax.dtypes.prng_key,  # 1
@@ -724,28 +673,17 @@ def train_step(
 
 
 
-    # UPDATE
-    # calculate means over device dimension (first)
-    loss = jax.lax.pmean(loss, axis_name="batch_devices")
-    grads = jax.lax.pmean(grads, axis_name="batch_devices")
-    ce=jax.lax.pmean(ce,axis_name="batch_devices")
-
+    # jit+sharding: no pmean needed — sharding handles cross-device aggregation
     if batchnorm:
-        mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
         state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
     else:
         state = state.apply_gradients(grads=grads)
 
-    #return loss, mod_vars, grads, state
     return state, loss, ce, logits
 
 @partial(
-    jax.pmap,
-    axis_name="batch_devices",
-    static_broadcasted_argnums=(5,),  # TODO: revert to 5 for batchnorm in pmap
-    in_axes=(0, None, 0, 0, 0, None, None),
-    # out_axes=(0, 0),
-    # devices=global_devices
+    jax.jit,
+    static_argnums=(5,),
 )
 def train_step_rnn(
         state: train_state.TrainState,
@@ -814,28 +752,13 @@ def train_step_rnn(
 
     (loss, mod_vars), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
-    # UPDATE
-    # calculate means over device dimension (first)
-    loss = jax.lax.pmean(loss, axis_name="batch_devices")
-    grads = jax.lax.pmean(grads, axis_name="batch_devices")
-
     if batchnorm:
-        mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
         state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
     else:
         state = state.apply_gradients(grads=grads)
 
-    #return loss, mod_vars, grads, state
     return state, loss
 
-@partial(
-    jax.pmap,
-    axis_name="batch_devices",
-    static_broadcasted_argnums=(5,),  # TODO: revert to 5 for batchnorm in pmap
-    in_axes=(0, None, 0, 0, 0, None),
-    # out_axes=(0, 0),
-    # devices=global_devices
-)
 def train_step_old(
         state: train_state.TrainState,
         rng: jax.dtypes.prng_key,  # 3
@@ -870,18 +793,11 @@ def train_step_old(
 
 
 
-    # UPDATE
-    # calculate means over device dimension (first)
-    loss = jax.lax.pmean(loss, axis_name="batch_devices")
-    grads = jax.lax.pmean(grads, axis_name="batch_devices")
-
     if batchnorm:
-        mod_vars = jax.lax.pmean(mod_vars, axis_name="batch_devices")
         state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
     else:
         state = state.apply_gradients(grads=grads)
 
-    #return loss, mod_vars, grads, state
     return state, loss
 
 
@@ -898,15 +814,24 @@ def validate(state,
              step_rescale=1.0,
              apply_method: str ='__call_ar__',
              init_hiddens=(np.array([0])),
-             log_ce_tables : bool =False):
+             log_ce_tables : bool =False,
+             mesh=None,
+             jit_eval_step_fn=None):
     """Validation function that loops over batches"""
-    # losses, accuracies, preds = np.array([]), np.array([]), np.array([])
     losses, accuracies, preds = [], [], []
     for batch_idx, batch in enumerate(tqdm(testloader)):
         inputs, labels, integration_timesteps = prep_batch(batch, seq_len, num_devices)
-        # print("eval step with method: ", apply_method)
-        # print("Validataion: Inputs 0:5:", inputs[0][0,0:5,:])
-        loss, acc, pred = eval_step(
+
+        # jit+sharding: place data on devices
+        if mesh is not None:
+            from lob.sharding_utils import get_data_shardings_for_batch
+            inputs_sh, labels_sh, times_sh = get_data_shardings_for_batch(mesh, has_book_data=(len(inputs) > 1))
+            inputs = tuple(jax.device_put(inp, sh) for inp, sh in zip(inputs, inputs_sh))
+            labels = jax.device_put(labels, labels_sh)
+            integration_timesteps = tuple(jax.device_put(ts, sh) for ts, sh in zip(integration_timesteps, times_sh))
+
+        eval_fn = jit_eval_step_fn if jit_eval_step_fn is not None else eval_step
+        loss, acc, pred = eval_fn(
             inputs, labels, integration_timesteps, state, apply_fn, batchnorm,apply_method,init_hiddens,ignore_times)
         # losses = np.append(losses, loss)
         # accuracies = np.append(accuracies, acc)
@@ -942,13 +867,6 @@ def validate(state,
     del losses, accuracies
     return aveloss, aveaccu, ce_means,acc_means
 
-@partial(
-    jax.pmap,
-    axis_name="batch_devices",
-    static_broadcasted_argnums=(4,5,6,8),
-    in_axes=(0, 0, 0, 0, None, None, None,None,None),
-    # devices=global_devices
-)
 def eval_step(
         batch_inputs,
         batch_labels,
@@ -1029,10 +947,6 @@ def eval_step(
         ce=ce.reshape(ce.shape[0],-1)
         accs=ce
 
-    # Average losses/accs across all devices (cross-node via NCCL when distributed)
-    losses = jax.lax.pmean(losses, axis_name="batch_devices")
-    accs = jax.lax.pmean(accs, axis_name="batch_devices")
-
     return losses, accs, logits
 
 
@@ -1078,5 +992,64 @@ def swap_leading(targetsize,x):
     return x
 
 
+# ============================================================================
+# JIT-compiled step functions (replacement for @pmap decorators)
+# ============================================================================
 
+def create_jit_train_step(mesh, state, has_book_data=True):
+    """Create JIT-compiled train_step with explicit sharding."""
+    from lob.sharding_utils import create_state_shardings, get_data_shardings_for_batch
+
+    state_shardings = create_state_shardings(state, mesh)
+    inputs_shardings, labels_sharding, timesteps_shardings = get_data_shardings_for_batch(mesh, has_book_data=has_book_data)
+
+    in_shardings = (
+        state_shardings,    # state - replicated
+        None,               # rng
+        inputs_shardings,   # batch_inputs - sharded
+        labels_sharding,    # batch_labels - sharded
+        timesteps_shardings,# batch_integration_timesteps - sharded
+    )
+    out_shardings = (
+        state_shardings,    # state
+        None,               # loss
+        None,               # ce
+        None,               # logits
+    )
+
+    jit_train_step = jax.jit(
+        train_step,
+        in_shardings=in_shardings,
+        out_shardings=out_shardings,
+        static_argnums=(5, 6),  # batchnorm, ignore_times
+        donate_argnums=(0,),    # donate state for memory reuse
+    )
+    print("[JIT] Created JIT-compiled train_step with sharding")
+    return jit_train_step
+
+
+def create_jit_eval_step(mesh, state, has_book_data=True):
+    """Create JIT-compiled eval_step with explicit sharding."""
+    from lob.sharding_utils import create_state_shardings, get_data_shardings_for_batch
+
+    state_shardings = create_state_shardings(state, mesh)
+    inputs_shardings, labels_sharding, timesteps_shardings = get_data_shardings_for_batch(mesh, has_book_data=has_book_data)
+
+    in_shardings = (
+        inputs_shardings,   # batch_inputs
+        labels_sharding,    # batch_labels
+        timesteps_shardings,# batch_integration_timesteps
+        state_shardings,    # state
+        None,               # init_hiddens
+    )
+    out_shardings = (None, None, None)
+
+    jit_eval_step = jax.jit(
+        eval_step,
+        in_shardings=in_shardings,
+        out_shardings=out_shardings,
+        static_argnums=(4, 5, 6, 8),  # apply_fn, batchnorm, apply_method, ignore_times
+    )
+    print("[JIT] Created JIT-compiled eval_step with sharding")
+    return jit_eval_step
 

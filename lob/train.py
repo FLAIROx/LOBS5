@@ -12,7 +12,9 @@ from lob.init_train import init_train_state, load_checkpoint, save_checkpoint, d
 from lob.dataloading import create_lobster_prediction_dataset#, Datasets
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import reduce_lr_on_plateau, linear_warmup, \
-    cosine_annealing, constant_lr, train_epoch, validate
+    cosine_annealing, constant_lr, train_epoch, validate, \
+    create_jit_train_step, create_jit_eval_step
+from lob.sharding_utils import initialize_mesh, create_state_shardings
 
 
 
@@ -132,7 +134,16 @@ def train(args):
                                                 n_book_post_layers=args.n_book_post_layers,
                                                 n_fused_layers=args.n_layers,
                                                 h_size_ema=ssm_size)
-    
+
+        # Initialize mesh and JIT-compiled step functions (replaces pmap)
+        mesh = initialize_mesh(args.num_devices)
+        state_shardings = create_state_shardings(state, mesh)
+        state = jax.jit(lambda s: s, out_shardings=state_shardings)(state)
+        print(f"[*] State distributed via sharding (replicated across {args.num_devices} devices)")
+
+        jit_train_step = create_jit_train_step(mesh, state, has_book_data=args.use_book_data)
+        jit_eval_step = create_jit_eval_step(mesh, state, has_book_data=args.use_book_data)
+
     # Training Loop over epochs
     best_loss, best_acc, best_epoch = 100000000, -100000000.0, 0  # This best loss is val_loss
     count, best_val_loss = 0, 100000000  # This line is for early stopping purposes
@@ -208,11 +219,8 @@ def train(args):
         #Pass an initial hidden state to be used in case of the 'RNN' forward pass being used. 
         state, train_loss,ce_by_tok ,step = train_epoch(state,
                                               skey,
-                                              #model_cls,
-                                              #train_model,
                                               trainloader,
                                               seq_len,
-                                              #in_dim,
                                               batchnorm,
                                               lr_params,
                                               args.num_devices,
@@ -222,7 +230,9 @@ def train(args):
                                               init_hidden,
                                               epoch,
                                               ignore_times,
-                                              args.log_ce_tables)
+                                              args.log_ce_tables,
+                                              mesh=mesh,
+                                              jit_train_step_fn=jit_train_step)
 
         if args.random_offsets_train:
             # Refresh random offsets in-place without rebuilding DataLoader.
@@ -237,7 +247,6 @@ def train(args):
               val_acc,
                 val_ce_means,
                 val_acc_means) = validate(state,
-                                        #model_cls,
                                         val_model.apply,
                                         valloader,
                                         seq_len,
@@ -248,12 +257,13 @@ def train(args):
                                         curtail_epoch=args.curtail_epochs,
                                         apply_method='__call_ar__',
                                         ignore_times=ignore_times,
-                                        log_ce_tables=args.log_ce_tables)
+                                        log_ce_tables=args.log_ce_tables,
+                                        mesh=mesh,
+                                        jit_eval_step_fn=jit_eval_step)
 
-            print(f"[*] Running Epoch {epoch + 1} Test ") #on train set (With Call RNN)...
+            print(f"[*] Running Epoch {epoch + 1} Test ")
             (test_loss, test_acc,
               test_ce_means,test_acc_means) = validate(state,
-                                           #model_cls,
                                            val_model.apply,
                                            testloader,
                                            seq_len,
@@ -264,7 +274,9 @@ def train(args):
                                            curtail_epoch=args.curtail_epochs,
                                            apply_method='__call_ar__',
                                            ignore_times=ignore_times,
-                                           log_ce_tables=args.log_ce_tables)
+                                           log_ce_tables=args.log_ce_tables,
+                                           mesh=mesh,
+                                           jit_eval_step_fn=jit_eval_step)
 
             print(f"\n=>> Epoch {epoch + 1} Metrics ===")
             print(
@@ -279,7 +291,6 @@ def train(args):
             # print("Testing on train data (diff offset) for debugging purposes")
             (test_loss, test_acc,
               test_ce_means,test_acc_means) = validate(state,
-                                         #model_cls,
                                          val_model.apply,
                                          valloader,
                                          seq_len,
@@ -289,7 +300,9 @@ def train(args):
                                          epoch,
                                          curtail_epoch=args.curtail_epochs,
                                          ignore_times=ignore_times,
-                                         log_ce_tables=args.log_ce_tables)
+                                         log_ce_tables=args.log_ce_tables,
+                                         mesh=mesh,
+                                         jit_eval_step_fn=jit_eval_step)
             val_loss=test_loss
             val_acc=test_acc
 
