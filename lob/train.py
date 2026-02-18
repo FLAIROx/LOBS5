@@ -159,24 +159,40 @@ def train(args):
 
     # print("USING VERY INFREQUENT CHECKPOINTING FOR TINY EPOCH SIZE ")
 
-    ckpt_mgr = None
-    if is_main_process:
-        mgr_options = ocp.CheckpointManagerOptions(
-            save_interval_steps=1,
-            create=True,
-            max_to_keep=10,
-            keep_period=5,
-            # step_prefix=f'{run.name}_{run.id}',
-            # enable_async_checkpointing=False,
+    # Global mesh: ALL ranks must create CheckpointManager so Orbax barriers work.
+    # Use SLURM_JOB_ID for consistent path across ranks (wandb run names differ per rank).
+    # Orbax primary_host=0 ensures only rank 0 writes; others just participate in barriers.
+    ckpt_dir = os.path.abspath(f'checkpoints/{run.name}_{run.id}/') if is_main_process else \
+               os.path.abspath(f'checkpoints/job_{os.environ.get("SLURM_JOB_ID", "local")}/')
+    if process_count > 1:
+        # Multi-node: broadcast rank 0's checkpoint dir to all ranks
+        import jax.numpy as jnp
+        if is_main_process:
+            # Encode path as fixed-length byte array
+            path_bytes = ckpt_dir.encode('utf-8')
+            path_arr = jnp.array(list(path_bytes) + [0] * (256 - len(path_bytes)), dtype=jnp.uint8)
+        else:
+            path_arr = jnp.zeros(256, dtype=jnp.uint8)
+        path_arr = jax.make_array_from_process_local_data(
+            jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()), path_arr
         )
-        ckpt_mgr = ocp.CheckpointManager(
-            os.path.abspath(f'checkpoints/{run.name}_{run.id}/'),
-            # ocp.Checkpointer(ocp.PyTreeCheckpointHandler()),
-            # ocp.Checkpointer(ocp.StandardCheckpointHandler()),
-            item_names=('state', 'metadata'),
-            options=mgr_options,
-            metadata=vars(args)
-        )
+        path_arr = jax.experimental.multihost_utils.broadcast_one_to_all(path_arr)
+        path_bytes = bytes(jax.device_get(path_arr).tolist()).rstrip(b'\x00')
+        ckpt_dir = path_bytes.decode('utf-8')
+        print(f"[Rank {process_rank}] Checkpoint dir: {ckpt_dir}")
+
+    mgr_options = ocp.CheckpointManagerOptions(
+        save_interval_steps=1,
+        create=True,
+        max_to_keep=10,
+        keep_period=5,
+    )
+    ckpt_mgr = ocp.CheckpointManager(
+        ckpt_dir,
+        item_names=('state', 'metadata'),
+        options=mgr_options,
+        metadata=vars(args) if is_main_process else {}
+    )
 
 
     if args.ignore_times:
@@ -318,30 +334,30 @@ def train(args):
                 f" Test Accuracy: {val_acc:.4f}"
             )
 
-        #save checkpoint (only main process builds and saves)
-        if is_main_process:
-            ckpt = {
-                'model': deduplicate_trainstate(state),
-                'config': vars(args),
-                'metrics': {
-                    'loss_train': float(train_loss),
-                    'loss_val_ar': float(val_loss),
-                    'loss_test_rnn': float(test_loss),
-                    'acc_val_ar': float(val_acc),
-                    'acc_test_rnn': float(test_acc),
-                }
+        # Save checkpoint — ALL ranks must call save() for Orbax barrier sync.
+        # Orbax primary_host=0 ensures only rank 0 writes to disk.
+        ckpt = {
+            'model': deduplicate_trainstate(state),
+            'config': vars(args) if is_main_process else {},
+            'metrics': {
+                'loss_train': float(train_loss),
+                'loss_val_ar': float(val_loss),
+                'loss_test_rnn': float(test_loss),
+                'acc_val_ar': float(val_acc),
+                'acc_test_rnn': float(test_acc),
             }
-            try:
-                save_checkpoint(ckpt_mgr, ckpt, epoch)
-            except OSError as e:
-                print(f"\n[FATAL] Checkpoint save failed at epoch {epoch}: {e}")
-                print("[FATAL] Likely disk quota exceeded. Exiting to avoid wasting compute.")
-                if ckpt_mgr is not None:
-                    try:
-                        ckpt_mgr.close()
-                    except Exception:
-                        pass
-                sys.exit(1)
+        }
+        try:
+            save_checkpoint(ckpt_mgr, ckpt, epoch)
+        except OSError as e:
+            print(f"\n[FATAL] Checkpoint save failed at epoch {epoch}: {e}")
+            print("[FATAL] Likely disk quota exceeded. Exiting to avoid wasting compute.")
+            if ckpt_mgr is not None:
+                try:
+                    ckpt_mgr.close()
+                except Exception:
+                    pass
+            sys.exit(1)
             del ckpt  # Free GPU memory held by deduplicated state copy
 
         # For early stopping purposes
