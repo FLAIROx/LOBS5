@@ -416,10 +416,11 @@ def train(args):
         wandb.run.summary["Best Test Loss"] = best_test_loss
         wandb.run.summary["Best Test Accuracy"] = best_test_acc
         # print("IGNORING EARLY STOPPING FOR TINY EPOCH SIZE ")
-        # After each epoch (aligned with ssm_stable):
-        # TF_GPU_ALLOCATOR=cuda_malloc_async in batch script handles defragmentation.
+        # After each epoch: clear_caches causes JIT recompilation (~193s/epoch) and
+        # accumulates NCCL cliques, leading to epoch-3+ OOM. Remove it.
+        # Instead, reduce PER_GPU_BSZ to lower train_step workspace from 71→35 GiB.
         gc.collect()
-        jax.clear_caches()
+        # jax.clear_caches()  # Removed: recompiles each epoch + NCCL clique accumulation
         # jax.profiler.stop_trace()
         if count > args.early_stop_patience:
             break
