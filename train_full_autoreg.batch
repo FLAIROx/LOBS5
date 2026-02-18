@@ -4,7 +4,7 @@
 #SBATCH --error=logs_lobs5/lobs5_%j.err
 # === 8-node config (production training) ===
 #SBATCH --nodes=8
-#SBATCH --ntasks-per-node=1
+#SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
 #SBATCH --time=23:59:59
@@ -77,8 +77,8 @@ TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
 
 # Calculate batch sizes
 GLOBAL_BSZ=$((PER_GPU_BSZ * TOTAL_GPUS))
-# Each process (node) loads its own share of the batch
-PER_PROCESS_BSZ=$((PER_GPU_BSZ * GPUS_PER_NODE))
+# Process-per-GPU: each srun task handles 1 GPU
+PER_PROCESS_BSZ=$PER_GPU_BSZ
 
 echo "[*] Per GPU batch size: $PER_GPU_BSZ"
 echo "[*] Total GPUs: $TOTAL_GPUS ($NNODES nodes × $GPUS_PER_NODE GPUs/node)"
@@ -97,21 +97,28 @@ export TEST_DIR="/projects/s5e/quant/JAN2023/GOOG_24tok_preproc"
 echo "[*] Train data: $DATA_DIR"
 echo "[*] Test data: $TEST_DIR"
 
-# Launch with srun
+# Launch with srun (process-per-GPU: 1 task per GPU)
 srun --nodes=$NNODES \
-     --ntasks=$NNODES \
-     --ntasks-per-node=1 \
+     --ntasks=$TOTAL_GPUS \
+     --ntasks-per-node=$GPUS_PER_NODE \
      --gres=gpu:$GPUS_PER_NODE \
      --gpu-bind=none \
-     --output=logs_lobs5/training_${SLURM_JOB_ID}_node%n.log \
+     --output=logs_lobs5/training_${SLURM_JOB_ID}_rank%t.log \
      --export=ALL \
      bash -c '
 # ========== Inline Wrapper ==========
+# Process-per-GPU: bind this task to its assigned local GPU
+LOCAL_RANK=${SLURM_LOCALID:-0}
+export CUDA_VISIBLE_DEVICES=$LOCAL_RANK
+# Override for Python: each process manages exactly 1 GPU
+export GPUS_PER_NODE=1
+
 echo "========================================"
 echo "[Wrapper] Running on node: $(hostname)"
 echo "[Wrapper] SLURM_NODEID: ${SLURM_NODEID:-N/A}"
 echo "[Wrapper] SLURM_PROCID: ${SLURM_PROCID:-N/A}"
-echo "[Wrapper] CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-all}"
+echo "[Wrapper] SLURM_LOCALID: ${SLURM_LOCALID:-N/A}"
+echo "[Wrapper] CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 echo "========================================"
 
 # Source conda
@@ -133,11 +140,14 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 export TF_GPU_ALLOCATOR=cuda_malloc_async
 export JAX_PLATFORMS="cuda"
 
-# XLA flags for multi-host: disable Triton GEMM and autotuning
+# Eager CUDA module loading prevents kernel loading hang (NVIDIA known issue)
+export CUDA_MODULE_LOADING=EAGER
+
+# XLA flags for multi-host:
 # 1. triton_gemm causes autotuner.cc DEVICE_TYPE_INVALID crash
 # 2. autotune_level=0 prevents multi-host autotuner deadlock
-#    (hosts may autotune ops in different order, causing allreduce deadlock)
-export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false --xla_gpu_autotune_level=0}"
+# 3. command_buffer/graph_level=0 prevents CUDA graph hangs
+export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false --xla_gpu_autotune_level=0 --xla_gpu_enable_command_buffer= --xla_gpu_graph_level=0}"
 
 # NCCL timeout
 export NCCL_TIMEOUT=3600
