@@ -54,7 +54,44 @@ ssm_stable `MODEL_PRESET=55M` = B1 "75M":
 | 3c78c2f | ssm_stable 整体替换 (错误做法) | ❌ 需要废弃 |
 | fda0372 | 去掉 clear_caches + BSZ=4 | ✅ pipeline 通过，⚠️ caveat |
 
-## 7. 跨 Epoch OOM 的完整诊断（2026-02-18）
+## 7. B1 → ssm_stable 四大原始问题的诊断结论（迁移前）
+
+在决定用手术式迁移方案之前，对 B1 和 ssm_stable 做了详细的四大问题对比（见 `four_issues_diagnosis.md`）：
+
+### 问题 1：Orbax CheckpointManager — 暂不改（local mesh 下安全）
+- B1 和 ssm_stable **都是**只有 rank 0 创建 CheckpointManager
+- 之前 job 2356386 遇到的 Orbax barrier mismatch，是因为在 `exp/B1-ignore-times`（pmap 路径）上，某次改动让所有 rank 都创建了 CM，Orbax 内部 barrier 要求所有 rank 参与，导致 hang
+- ssm_stable 用 `local_devices()` 创建 mesh（节点内 mesh，非全局 mesh），Orbax 把每个节点视为独立的单机，**不会触发跨节点 barrier**
+- **结论**：只要用 local mesh，只有 rank 0 创建 CM 是正确的。如果未来改为 global mesh，需要让所有 rank 创建 CM
+
+### 问题 2：JAX_COMPILATION_CACHE_DIR — 必须删除
+- B1 batch 脚本设了 `JAX_COMPILATION_CACHE_DIR="/lus/.../jax_cache"` 持久化缓存
+- ssm_stable **没有设**，每次都重新编译
+- **从 pmap 改为 jit+sharding 后，编译出来的 HLO 完全不同**（多节点 allreduce/sharding annotation 不同）
+- 旧缓存可能导致 stale/incompatible compiled HLO 被加载
+- **修复**：删除 `JAX_COMPILATION_CACHE_DIR`，等多节点验证完后再考虑加回来
+
+### 问题 3：缺两个 Barrier + shutdown
+- B1 缺少 `sync_global_devices("jax_distributed_init")` → job 2355647 NCCL hang 的直接根因
+- B1 缺少 `sync_global_devices("end-of-train")` → 一个 node 先退出，另一个 NCCL comm 断开
+- B1 缺少 `jax.distributed.shutdown()` → 进程退出时可能 hang 或 segfault
+- 这三个是 ssm_stable 在多节点验证后加入的，B1 直接移植过来
+
+### 问题 4：原有 B1 batch 脚本里的 XLA flags（全部删除）
+ssm_stable 没有任何 `--xla_gpu_*` flags，B1 原来有以下会导致 autotuner crash 的 flags：
+```bash
+JAX_DEFAULT_MATMUL_PRECISION=tensorfloat32       # 删除
+JAX_COMPILER_ENABLE_REMAT_PASS=true              # 删除
+XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true
+           --xla_gpu_all_reduce_combine_threshold_bytes=67108864
+           --xla_gpu_triton_gemm_any=true
+           --xla_gpu_enable_command_buffer="      # 全部删除
+```
+这些在多节点 pmap 路径下触发 `autotuner.cc:260: device_type:"DEVICE_TYPE_INVALID"` crash。
+
+---
+
+## 8. 跨 Epoch OOM 的完整诊断（2026-02-18）
 
 ### 根因
 jit+sharding 模式下 `train_step` 需要在单个 GPU 的 BFC pool 中分配 **71.62 GiB 连续块**。
@@ -64,6 +101,31 @@ jit+sharding 模式下 `train_step` 需要在单个 GPU 的 BFC pool 中分配 *
 - BSZ=8 时：Epoch 1 ✅ → Epoch 2 ✅ → Epoch 3 ❌ OOM
 - 这是**离散跳变**，不是线性积累——每个 epoch 末的 `deduplicate_trainstate + checkpoint + eval` 循环在 BFC pool 中制造特定模式的碎片
 - 经过两轮完整的 train+eval+checkpoint 之后，BFC pool 的碎片化程度首次达到无法满足 71.62 GiB 连续请求的临界
+
+### NCCL rendezvous 超时日志（Epoch 3 OOM 的伴随证据）
+
+在 job 2358257 的 Epoch 2→3 边界处，log 中出现了以下 NCCL 警告：
+```
+E0218 03:50:19 rendezvous.cc:100] [id=1] This thread has been waiting for
+  `acquire clique for rank 3; clique=devices=[4,5,6,7]; is_p2p=0; run_id=-1558191007`
+  for 10 seconds and may be stuck. Expected 4 threads to join the rendezvous,
+  but not all of them arrived on time.
+```
+- **`run_id=-1558191007`**：每次 `jax.clear_caches()` 后重新编译，NCCL 会分配新的 `run_id`
+- **`clique=devices=[4,5,6,7]`**：这是节点上 GPU 4-7 的 clique（对应第二组设备）
+- 这些警告说明 rank 3 在等待其他 rank 加入 NCCL rendezvous，说明旧的 NCCL clique 资源没有被释放，新的 rendezvous 建立受阻
+- **这是 clear_caches → 重编译 → 新 NCCL clique 积累的直接日志证据**
+
+### 训练 Loss 在所有 OOM job 中的可复现性（诊断证据）
+
+所有 BSZ=8 的 OOM job，无论使用哪种 memory management 方案，Epoch 1 和 Epoch 2 的训练 loss 完全一致：
+- Epoch 1 Train Loss：**7.59739**（每个 job 都相同）
+- Epoch 2 Train Loss：**3.28439**（每个 job 都相同）
+
+这说明：
+1. 训练本身的逻辑是**完全正确**的（梯度同步、数据加载、模型前向都没有问题）
+2. OOM 是**纯粹的内存管理问题**，不影响训练数值结果
+3. BSZ=4 job（2358280）的 loss 曲线从 7.64 开始（更高，因为更小的 global batch size），这是 BSZ 减半带来的统计效应，**不是 bug**
 
 ### 所有尝试的对比
 

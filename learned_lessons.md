@@ -127,3 +127,38 @@ warning `Allowed device set contains 8 devices, but platform only sees 4`。
   - JIT 只在第一 epoch 编译，后续所有 epoch 复用（快！）
 - **bash -c 陷阱**: 注释里的英文缩略词（如 can't）含单引号，会提前关闭 bash -c '...' 块
 - `del ckpt` + `gc.collect()` 保留（释放 checkpoint state 副本，好实践）
+- ⚠️ **Caveat**: BSZ=4 是临时 workaround，真实目标是 BSZ=8 能稳定多 epoch（BSZ=8 时 Epoch 1+2 通过，Epoch 3 OOM）
+
+### JAX 的两层缓存架构（OOM 调试中发现）
+- **Python trace 缓存**：`jax.clear_caches()` 清的是这层，下次调用重新 trace → 触发重编译
+- **XLA C++ 编译缓存**：compiled executable 存在 XLA 后端，即使 Python 层被清，C++ 层仍存活
+- **实验证据**：Epoch 3 train_step 没有 193s warmup 就直接 OOM，说明 XLA executable 被复用（不需重编），但执行时内存不足
+- **意义**：jax.clear_caches() 并不等于"释放 GPU 上的 compiled executable 内存"，它只重置 Python 的 dispatch 路径
+
+### JAX_COMPILATION_CACHE_DIR 切换架构时必须清理
+- 持久化 cache 会保存 pmap 路径的 HLO，改为 jit+sharding 后 HLO 完全不同
+- 旧 cache 可能导致加载 stale/incompatible compiled HLO，行为不可预测
+- **切换 pmap↔jit+sharding 时必须删除或用新的 cache 目录**
+
+### NCCL clique 在 jax.clear_caches() 后的积累
+- 每次 `clear_caches()` 强制重编译 → 产生新的 NCCL run_id → 申请新的 NCCL clique
+- 旧 clique 的 GPU 内存不一定立刻释放（NCCL 内部维护通信缓冲区池）
+- **log 证据**：`rendezvous.cc:100` 10 秒超时警告，`run_id` 在每个 epoch 后变化
+- 跨节点 NCCL clique 每个约 8 GiB，积累 2 个就额外消耗 ~16 GiB，Epoch 3 时达到临界
+
+### CURTAIL_EPOCHS 与 clear_caches 叠加的时间陷阱
+- CURTAIL_EPOCHS=10 本意是快速测试（10 步即结束训练），但配合 clear_caches() 变成慢测试
+- 10 步 train + 10 步 eval 实际计算只要 7 秒，JIT 重编译要 193+43=236 秒
+- **99% 的 epoch 时间都在编译**，20 epochs 需要 88 分钟（远超 30 分钟 job 时限）
+- 去掉 clear_caches 后，20 epochs 只需 12 分钟（JIT 只编译一次）
+
+### ssm_stable 直接移植不可行的两个具体原因
+- `lob.profiling_utils`（GoodputMonitor）：ssm_stable 独有模块，B1 没有
+- `local_device_ids=[0,1,2,3,4,5,6,7]`：ssm_stable 的 run_train.py 为 2×4 GPU 节点硬编码了 8 个 device ID，在 4 GPU 节点上触发 `Allowed device set contains 8 devices, but platform only sees 4`
+- **教训**：直接测试 31 秒即揭示问题，避免了在错误方向上浪费时间
+
+### Orbax local mesh 下的安全边界
+- **Orbax 在 distributed mode 下内部使用 barrier，要求所有 rank 同步**
+- ssm_stable 用 `jax.local_devices()` 创建 Mesh（每节点独立），Orbax 视为单机，不触发跨节点 barrier
+- 如果改为 `jax.devices()`（全局 Mesh），Orbax 会尝试跨节点 barrier，只有 rank 0 创建 CheckpointManager 就会 hang
+- **结论**：local mesh + rank 0 创建 ckpt_mgr = 安全；global mesh + rank 0 创建 ckpt_mgr = 死锁
