@@ -33,12 +33,20 @@ import lob.validation_helpers as valh
 def deduplicate_trainstate(
         state: TrainState,
     ) -> TrainState:
+    """Extract a single copy of state for checkpointing.
+    pmap: state has device dim, need x[0] to extract one copy.
+    jit+sharding: state already has natural shape, just move to device 0.
     """
-    """
-    return jax.device_put(
-        jax.tree.map(lambda x: x[0], state),
-        device=jax.devices('gpu')[0]
-    )
+    first_leaf = jax.tree_util.tree_leaves(state)[0]
+    if hasattr(first_leaf, 'sharding') and hasattr(first_leaf.sharding, 'mesh'):
+        # jit+sharding mode: no device dimension, just move to single device
+        return jax.device_put(state, device=jax.devices('gpu')[0])
+    else:
+        # pmap mode: strip device dimension
+        return jax.device_put(
+            jax.tree.map(lambda x: x[0], state),
+            device=jax.devices('gpu')[0]
+        )
 
 def load_args_from_checkpoint(
         checkpoint_path: str,
