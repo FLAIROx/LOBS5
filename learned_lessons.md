@@ -88,3 +88,35 @@ warning `Allowed device set contains 8 devices, but platform only sees 4`。
 - `CUDA_VISIBLE_DEVICES` 必须与实际 GPU 数量严格匹配
 - 加入多节点功能时，应先用 2 nodes + curtail_epochs 做 5 分钟验证
 - 不要硬编码设备数 — 应动态检测
+
+## B1: pmap → jit+sharding 迁移 (2026-02-18)
+
+### pmap→jit 迁移的 `[0]` 索引陷阱
+- pmap 给所有张量加 device 维度 `(num_devices, ...)`，代码到处用 `[0]` 取值
+- jit+sharding 保持原始形状，所有 `[0]` 必须清理
+- 关键位置: `loss[0]`, `deduplicate_trainstate(x[0])`, `learning_rate[0]`
+- **迁移时必须全文搜索 `[0]` 并逐一确认哪些是 pmap device dim 相关的**
+
+### `jax.devices()` vs `jax.local_devices()` 多节点陷阱
+- `jax.devices('gpu')[0]` 在多节点下可能指向全局 device 0（跨节点）
+- `jax.local_devices()[0]` 保证是当前进程的本地设备
+- **多节点代码必须用 `local_devices()`，永远不要假设 `devices()[0]` 是本地的**
+
+### `jax.clear_caches()` 是双刃剑
+- 清除 JIT 编译缓存 → 下一 epoch 重新编译
+- 编译本身需要大量临时内存 → 可能导致 OOM
+- ssm_stable 调用它，B1 注释掉了（因为导致 recompile OOM at bsz=3）
+- **替代方案**: 显式 `del` 大变量 + `gc.collect()`，而非 clear_caches
+
+### Checkpoint 保存只在 rank 0 执行
+- ssm_stable: `if is_main_process:` 包裹整个 ckpt 构建+保存
+- B1 之前: ckpt 构建在 if 外面 → 所有 rank 都调 deduplicate_trainstate → rank 1 crash
+- **ckpt dict 构建和保存必须都在 `if is_main_process` 内**
+
+### Epoch 间 OOM 的真实根因（XLA BFC Allocator 碎片化）
+- OOM 是 `PjRtLoadedExecutable::Execute()` 执行期申请 71.62 GiB 单一连续块失败
+- train_step 需要大连续块；eval_step 把内存切成小碎片；下一 epoch train_step 找不到连续空间
+- `jax.clear_caches()` 只清 Python trace 缓存，但 `jit_*_step` 对象仍持有 XLA executable 的 GPU buffer
+- **真正修复: 每 epoch 末 `del jit_train_step, jit_eval_step` + `gc.collect()` + `clear_caches()` + 重建 JIT**
+- 同时降低 MEM_FRACTION 0.90→0.80 给重编译留空间
+- `del ckpt` + `gc.collect()` 也需要保留（释放 checkpoint state 副本）
