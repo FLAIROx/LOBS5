@@ -146,8 +146,7 @@ export CUDA_MODULE_LOADING=EAGER
 # XLA flags for multi-host:
 # 1. triton_gemm causes autotuner.cc DEVICE_TYPE_INVALID crash
 # 2. autotune_level=0 prevents multi-host autotuner deadlock
-# 3. command_buffer/graph_level=0 prevents CUDA graph hangs
-export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false --xla_gpu_autotune_level=0 --xla_gpu_enable_command_buffer= --xla_gpu_graph_level=0}"
+export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false --xla_gpu_autotune_level=0}"
 
 # NCCL timeout
 export NCCL_TIMEOUT=3600
