@@ -12,7 +12,7 @@ from lob.init_train import init_train_state, load_checkpoint, save_checkpoint, d
 from lob.dataloading import create_lobster_prediction_dataset#, Datasets
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import reduce_lr_on_plateau, train_epoch, validate, \
-    create_jit_train_step, create_jit_eval_step
+    create_jit_train_step, create_jit_eval_step, create_lobs5_learning_rate_schedule
 from lob.sharding_utils import initialize_mesh, create_state_shardings
 
 
@@ -156,6 +156,18 @@ def train(args):
     lr_count, opt_acc = 0, -100000000.0  # This line is for learning rate decay
     step = 0  # for per step learning rate decay
     steps_per_epoch = int(train_size / (args.bsz * process_count)) if args.curtail_epochs is None else args.curtail_epochs+1
+
+    # Create LR schedule functions for wandb logging (optax manages LR inside JIT)
+    total_steps = steps_per_epoch * args.epochs
+    warmup_end_step = steps_per_epoch * args.warmup_end
+    lr_schedule_fn = create_lobs5_learning_rate_schedule(
+        base_lr=lr, warmup_end_step=warmup_end_step,
+        total_steps=total_steps, lr_min=args.lr_min,
+        use_cosine_anneal=args.cosine_anneal)
+    ssm_lr_schedule_fn = create_lobs5_learning_rate_schedule(
+        base_lr=ssm_lr, warmup_end_step=warmup_end_step,
+        total_steps=total_steps, lr_min=args.lr_min,
+        use_cosine_anneal=args.cosine_anneal)
 
     # print("USING VERY INFREQUENT CHECKPOINTING FOR TINY EPOCH SIZE ")
 
@@ -387,6 +399,10 @@ def train(args):
             ce_table=wandb.Table(columns=ce_table.columns,data=ce_table.data)
         
 
+        # Compute LR from schedule for logging (optax manages LR inside JIT)
+        current_lr = float(lr_schedule_fn(step))
+        current_ssm_lr = float(ssm_lr_schedule_fn(step))
+
         if valloader is not None:
             wandb.log(
                 {
@@ -398,9 +414,8 @@ def train(args):
                     "count": count,
                     "Learning rate count": lr_count,
                     "Opt acc": opt_acc,
-                    "lr": float(state.opt_state.inner_states['regular'].inner_state.hyperparams['learning_rate']),
-                    "ssm_lr": float(state.opt_state.inner_states['ssm'].inner_state.hyperparams['learning_rate']),
-                    # "Training CE by token":ce_table
+                    "lr": current_lr,
+                    "ssm_lr": current_ssm_lr,
                 }
             )
         else:
@@ -412,9 +427,8 @@ def train(args):
                     "count": count,
                     "Learning rate count": lr_count,
                     "Opt acc": opt_acc,
-                    "lr": float(state.opt_state.inner_states['regular'].inner_state.hyperparams['learning_rate']),
-                    "ssm_lr": float(state.opt_state.inner_states['ssm'].inner_state.hyperparams['learning_rate']),
-                    # "Training CE by token":ce_table
+                    "lr": current_lr,
+                    "ssm_lr": current_ssm_lr,
                 }
             )
 
