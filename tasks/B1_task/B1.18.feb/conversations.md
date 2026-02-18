@@ -1,0 +1,7 @@
+# B1.18.feb 对话追踪
+
+| 日期 | Session ID | 描述 | pwd | JSONL 路径 | 恢复命令 |
+|------|-----------|------|-----|-----------|---------|
+| 2026-02-18 | d6eca98a-093c-49c0-aba4-935389d9b6f6 | B1 pmap→jit+sharding 迁移调试，OOM根因分析（BFC碎片化），jax.clear_caches + MEM_FRACTION=0.80 | /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5 | /projects/s5e/quant/.claude/projects/-lus-lfs1aip2-projects-s5e-quant-AlphaTrade-LOBS5/d6eca98a-093c-49c0-aba4-935389d9b6f6.jsonl | cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5 && claude --resume d6eca98a-093c-49c0-aba4-935389d9b6f6 |
+| 2026-02-18 | 93b201fe-b9b4-42e1-aadd-0134b4b50544 | 继续 OOM 调试：对比 ssm_stable，发现 del+recreate jit 是错误方向，找到正确解法 TF_GPU_ALLOCATOR=cuda_malloc_async | /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5 | /projects/s5e/quant/.claude/projects/-lus-lfs1aip2-projects-s5e-quant-AlphaTrade-LOBS5/93b201fe-b9b4-42e1-aadd-0134b4b50544.jsonl | cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5 && claude --resume 93b201fe-b9b4-42e1-aadd-0134b4b50544 |
+| 2026-02-18 | c474264e-69a4-43ec-b353-e6b845679892 | 监控 job 2358257 (cuda_malloc_async) + 2358255 (del+recreate 对比) | /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5 | /projects/s5e/quant/.claude/projects/-lus-lfs1aip2-projects-s5e-quant-AlphaTrade-LOBS5/c474264e-69a4-43ec-b353-e6b845679892.jsonl | cd /lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5 && claude --resume c474264e-69a4-43ec-b353-e6b845679892 |
