@@ -298,7 +298,9 @@ def init_train_state(
     ssm_lr_schedule = None
     lr_schedule = None
     if train_size > 0:
-        steps_per_epoch = train_size // args.bsz
+        process_count = getattr(args, 'process_count', jax.process_count())
+        # args.bsz is per-process BSZ; global BSZ = bsz * process_count
+        steps_per_epoch = train_size // (args.bsz * process_count)
         if hasattr(args, 'curtail_epochs') and args.curtail_epochs is not None:
             steps_per_epoch = min(steps_per_epoch, args.curtail_epochs + 1)
         total_steps = steps_per_epoch * args.epochs
