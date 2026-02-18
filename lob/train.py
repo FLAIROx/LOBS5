@@ -336,6 +336,7 @@ def train(args):
                     except Exception:
                         pass
                 sys.exit(1)
+            del ckpt  # Free GPU memory held by deduplicated state copy
 
         # For early stopping purposes
         if val_loss < best_val_loss:
@@ -415,10 +416,13 @@ def train(args):
         wandb.run.summary["Best Test Loss"] = best_test_loss
         wandb.run.summary["Best Test Accuracy"] = best_test_acc
         # print("IGNORING EARLY STOPPING FOR TINY EPOCH SIZE ")
-        # After each epoch
+        # After each epoch: clear XLA caches to defragment BFC allocator
+        # Without this, epoch 2 train_step fails with 71.62 GiB OOM because eval_step
+        # fragments the BFC allocator, and train_step can't find a contiguous block.
+        # ssm_stable uses the same approach (gc.collect + jax.clear_caches).
+        # Cost: recompilation at start of each epoch (~3 min warmup).
         gc.collect()
-        # jax.clear_backends()
-        # jax.clear_caches()  # Removed: causes XLA recompilation every epoch, OOM at Epoch 2 with bsz=3
+        jax.clear_caches()
         # jax.profiler.stop_trace()
         if count > args.early_stop_patience:
             break
