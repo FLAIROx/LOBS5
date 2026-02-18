@@ -124,12 +124,11 @@ module load cuda/12.6
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
 # JAX environment (aligned with ssm_stable)
-# PREALLOCATE=false: disables BFC pre-allocated pool, uses CUDA native malloc per allocation.
-# This prevents BFC pool fragmentation when train_step and eval_step have different allocation
-# patterns across epochs. jit+sharding needs large contiguous blocks (71.62 GiB) that BFC
-# can't guarantee after fragmentation. With PREALLOCATE=false, CUDA handles defragmentation.
+# PREALLOCATE=false: disables BFC pre-allocated pool, uses CUDA native malloc.
+# Fixes epoch-3 OOM: BFC pool fragments across train/eval steps (jit+sharding
+# needs 71.62 GiB contiguous blocks that fragmented BFC pool cannot satisfy).
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export TF_GPU_ALLOCATOR=cuda_malloc_async  # May not affect JAX (TF var), but harmless
+export TF_GPU_ALLOCATOR=cuda_malloc_async
 export JAX_PLATFORMS="cuda"
 
 # NCCL timeout
