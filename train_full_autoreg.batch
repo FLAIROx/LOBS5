@@ -124,6 +124,9 @@ module load cuda/12.6
 # Set LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
+# NCCL OFI plugin for cross-node communication via Slingshot/libfabric
+export LD_LIBRARY_PATH=/tools/brics/apps/linux-sles15-neoverse_v2/gcc-12.3.0/aws-ofi-nccl-1.8.1-c47cd5ivrugm3jzlyqyis4igyflnydmo/lib:/opt/cray/libfabric/1.22.0/lib64:$LD_LIBRARY_PATH
+
 # JAX environment (aligned with ssm_stable)
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
@@ -137,8 +140,8 @@ export NCCL_TIMEOUT=3600
 echo "[Wrapper] SLURM_PROCID=${SLURM_PROCID:-0} (process rank)"
 echo "[Wrapper] SLURM_NNODES=${SLURM_NNODES:-1} (total nodes)"
 echo "[Wrapper] JAX_COORDINATOR_ADDRESS=${JAX_COORDINATOR_ADDRESS:-none}"
-# NCCL debug for verification (set to WARN after verified)
-export NCCL_DEBUG=WARN
+# NCCL debug for cross-node verification (set to WARN after verified)
+export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
 
 # CUDA config
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
