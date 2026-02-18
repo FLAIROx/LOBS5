@@ -136,10 +136,16 @@ def train(args):
                                                 h_size_ema=ssm_size)
 
         # Initialize mesh and JIT-compiled step functions (replaces pmap)
-        mesh = initialize_mesh(args.num_devices)
+        # Multi-node: global mesh over ALL devices for cross-node gradient sync
+        # Single-node: local mesh over num_devices GPUs
+        if jax.process_count() > 1:
+            mesh = initialize_mesh(jax.device_count())
+        else:
+            mesh = initialize_mesh(args.num_devices)
         state_shardings = create_state_shardings(state, mesh)
         state = jax.jit(lambda s: s, out_shardings=state_shardings)(state)
-        print(f"[*] State distributed via sharding (replicated across {args.num_devices} devices)")
+        total_devices = jax.device_count() if jax.process_count() > 1 else args.num_devices
+        print(f"[*] State distributed via sharding (replicated across {total_devices} devices)")
 
         jit_train_step = create_jit_train_step(mesh, state, has_book_data=args.use_book_data)
         jit_eval_step = create_jit_eval_step(mesh, state, has_book_data=args.use_book_data)

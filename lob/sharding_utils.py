@@ -22,31 +22,28 @@ def create_simple_mesh(num_devices: int) -> Mesh:
     """
     Create a simple data-parallel mesh.
 
-    pmap implicitly parallelizes over the first axis.
-    We explicitly create a mesh with only a 'data' axis to replicate the same behavior.
-
-    In multi-node mode, each process creates LOCAL mesh with its own devices.
-    Gradient sync across nodes would require psum across processes (not yet implemented).
+    Single-node: mesh over local devices (num_devices GPUs).
+    Multi-node: GLOBAL mesh over ALL devices across all nodes.
+      JAX auto-inserts allreduce for replicated state + sharded data,
+      so no manual psum is needed in train_step.
     """
     from jax.experimental import mesh_utils
-
-    local_devs = jax.local_devices()
-    devices = local_devs[:num_devices]
+    import numpy as np
 
     if jax.process_count() > 1:
+        # Global mesh: use ALL devices across all nodes for proper gradient sync
+        devices = jax.devices()
         print(f"[Sharding] Multi-node mode: Process {jax.process_index()}/{jax.process_count()}")
-        print(f"[Sharding] Using {len(devices)} LOCAL devices (gradient sync via psum)")
+        print(f"[Sharding] Global mesh with {len(devices)} devices across {jax.process_count()} processes")
     else:
+        # Single-node: use local devices
+        local_devs = jax.local_devices()
+        devices = local_devs[:num_devices]
         print(f"[Sharding] Single-node mode: Using {len(devices)} local devices")
 
-    actual_num_devices = len(devices)
-    devices_array = mesh_utils.create_device_mesh(
-        [actual_num_devices],
-        devices,
-    )
-
+    devices_array = np.array(devices).reshape(-1)
     mesh = Mesh(devices_array, axis_names=('data',))
-    print(f"[Sharding] Created mesh with {actual_num_devices} devices along 'data' axis")
+    print(f"[Sharding] Created mesh with {len(devices)} devices along 'data' axis")
     return mesh
 
 
