@@ -11,8 +11,7 @@ import gc
 from lob.init_train import init_train_state, load_checkpoint, save_checkpoint, deduplicate_trainstate
 from lob.dataloading import create_lobster_prediction_dataset#, Datasets
 from lob.lobster_dataloader import LOBSTER_Dataset
-from lob.train_helpers import reduce_lr_on_plateau, linear_warmup, \
-    cosine_annealing, constant_lr, train_epoch, validate, \
+from lob.train_helpers import reduce_lr_on_plateau, train_epoch, validate, \
     create_jit_train_step, create_jit_eval_step
 from lob.sharding_utils import initialize_mesh, create_state_shardings
 
@@ -113,6 +112,7 @@ def train(args):
             seq_len=seq_len,
             book_dim=book_dim,
             book_seq_len=book_seq_len,
+            train_size=train_size,
             print_shapes=True
         )
 
@@ -216,37 +216,17 @@ def train(args):
             trainloader.sampler.set_epoch(epoch)
 
         print(f"[*] Starting Training Epoch {epoch + 1}...")
-        # jax.profiler.start_trace("./jax-traces")
-
-        if epoch < args.warmup_end:
-            print("using linear warmup for epoch {}".format(epoch+1))
-            decay_function = linear_warmup
-            end_step = steps_per_epoch * args.warmup_end
-
-        elif args.cosine_anneal:
-            print("using cosine annealing for epoch {}".format(epoch+1))
-            decay_function = cosine_annealing
-            # for per step learning rate decay
-            end_step = steps_per_epoch * args.epochs - (steps_per_epoch * args.warmup_end)
-        else:
-            print("using constant lr for epoch {}".format(epoch+1))
-            decay_function = constant_lr
-            end_step = None
-
-        # TODO: Switch to letting Optax handle this.
-        #  Passing this around to manually handle per step learning rate decay.
-        lr_params = (decay_function, ssm_lr, lr, step, end_step, args.opt_config, args.lr_min)
-
+        print(f"[*] Step {step} - LR managed by optax schedules")
         print('Training on', args.num_devices, 'devices.')
         train_rng, skey = random.split(train_rng)
 
-        #Pass an initial hidden state to be used in case of the 'RNN' forward pass being used. 
-        state, train_loss,ce_by_tok ,step = train_epoch(state,
+        #Pass an initial hidden state to be used in case of the 'RNN' forward pass being used.
+        state, train_loss, ce_by_tok, step = train_epoch(state,
                                               skey,
                                               trainloader,
                                               seq_len,
                                               batchnorm,
-                                              lr_params,
+                                              None,  # lr_params=None → optax schedules
                                               args.num_devices,
                                               args.debug_loading,
                                               args.enable_profiler,
@@ -338,8 +318,7 @@ def train(args):
 
         # Save checkpoint — ALL ranks must call save() for Orbax barrier sync.
         # Orbax primary_host=0 ensures only rank 0 writes to disk.
-        # Multi-host: re-shard state to global NamedSharding (LR scheduler creates
-        # host-local scalars that orbax cannot serialize in multi-host).
+        # Multi-host: re-shard state to ensure consistent NamedSharding for Orbax.
         # Single-host: deduplicate to single device first.
         if is_distributed:
             ckpt_state = jax.jit(lambda s: s, out_shardings=state_shardings)(state)
@@ -387,9 +366,9 @@ def train(args):
             else:
                 best_test_loss, best_test_acc = best_loss, best_acc
 
-        # For learning rate decay purposes:
+        # reduce_lr_on_plateau is informational only — LR managed by optax schedules
         input = lr, ssm_lr, lr_count, val_acc, opt_acc
-        lr, ssm_lr, lr_count, opt_acc = reduce_lr_on_plateau(input, factor=args.reduce_factor, patience=args.lr_patience, lr_min=args.lr_min)
+        _, _, lr_count, opt_acc = reduce_lr_on_plateau(input, factor=args.reduce_factor, patience=args.lr_patience, lr_min=args.lr_min)
 
         # Print best accuracy & loss so far...
         print(

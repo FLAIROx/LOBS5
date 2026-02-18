@@ -61,6 +61,55 @@ def constant_lr(step, base_lr, end_step,  lr_min=None):
     return base_lr
 
 
+# ==============================================================================
+# Learning Rate Schedule Creation (MaxText-style optax schedules)
+# ==============================================================================
+
+def create_lobs5_learning_rate_schedule(
+    base_lr: float,
+    warmup_end_step: int,
+    total_steps: int,
+    lr_min: float = 0.0,
+    use_cosine_anneal: bool = True,
+) -> optax.Schedule:
+    """
+    Creates an optax Schedule: warmup -> cosine decay (or constant).
+    Passed directly to the optimizer, eliminating manual per-step LR updates.
+    """
+    warmup_schedule = optax.linear_schedule(
+        init_value=0.0,
+        end_value=base_lr,
+        transition_steps=warmup_end_step
+    )
+
+    if use_cosine_anneal:
+        cosine_steps = total_steps - warmup_end_step
+
+        def make_cos_schedule(init_lr, final_lr, len_steps):
+            """Custom cosine schedule matching LOBS5's original cosine_annealing."""
+            def schedule(step):
+                pct = step / len_steps
+                pct = np.minimum(pct, 1.0)
+                cosine_decay = 0.5 * (1 + np.cos(np.pi * pct))
+                lr = (init_lr - final_lr) * cosine_decay + final_lr
+                return lr
+            return schedule
+
+        cosine_schedule = make_cos_schedule(base_lr, lr_min, cosine_steps)
+        schedule = optax.join_schedules(
+            schedules=[warmup_schedule, cosine_schedule],
+            boundaries=[warmup_end_step]
+        )
+    else:
+        constant_schedule = optax.constant_schedule(base_lr)
+        schedule = optax.join_schedules(
+            schedules=[warmup_schedule, constant_schedule],
+            boundaries=[warmup_end_step]
+        )
+
+    return schedule
+
+
 def update_learning_rate_per_step(lr_params, state, mesh=None):
     decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min = lr_params
 
@@ -170,26 +219,17 @@ def create_train_state(model_cls,
                        opt_config="standard",
                        ssm_lr=1e-3,
                        lr=1e-3,
+                       ssm_lr_schedule=None,
+                       lr_schedule=None,
                        dt_global=False,
                        num_devices=1,
                        ):
     """
-    Initializes the training state using optax
+    Initializes the training state using optax.
 
-    :param model_cls:
-    :param rng:
-    :param padded:
-    :param retrieval:
-    :param in_dim:
-    :param bsz:
-    :param seq_len:
-    :param weight_decay:
-    :param batchnorm:
-    :param opt_config:
-    :param ssm_lr:
-    :param lr:
-    :param dt_global:
-    :return:
+    When ssm_lr_schedule/lr_schedule are provided (optax.Schedule functions),
+    they are passed directly to the optimizer — no inject_hyperparams needed.
+    When None, falls back to inject_hyperparams with scalar LRs (legacy mode).
     """
 
     # batch size is given for data across all devices
@@ -242,6 +282,24 @@ def create_train_state(model_cls,
 
     print(params['message_encoder']['encoder']['embedding'].shape)
 
+    # Determine whether to use optax schedules (new) or inject_hyperparams (legacy)
+    use_schedules = ssm_lr_schedule is not None and lr_schedule is not None
+    if use_schedules:
+        print("[Optimizer] Using optax schedules (LR managed inside JIT)")
+        _ssm_lr = ssm_lr_schedule
+        _lr = lr_schedule
+    else:
+        print("[Optimizer] Using inject_hyperparams (legacy scalar LR)")
+        _ssm_lr = ssm_lr
+        _lr = lr
+
+    def _make_opt(optimizer_fn, learning_rate, **kwargs):
+        """Create optimizer with or without inject_hyperparams."""
+        if use_schedules:
+            return optimizer_fn(learning_rate=learning_rate, **kwargs)
+        else:
+            return optax.inject_hyperparams(optimizer_fn)(learning_rate=learning_rate, **kwargs)
+
     if opt_config in ["standard"]:
         """This option applies weight decay to C, but B is kept with the
             SSM parameters with no weight decay.
@@ -262,10 +320,9 @@ def create_train_state(model_cls,
             )
         tx = optax.multi_transform(
             {
-                "none": optax.inject_hyperparams(optax.sgd)(learning_rate=0.0),
-                "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
-                "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
-                                                                 weight_decay=weight_decay),
+                "none": optax.sgd(learning_rate=0.0),
+                "ssm": _make_opt(optax.adam, _ssm_lr),
+                "regular": _make_opt(optax.adamw, _lr, weight_decay=weight_decay),
             },
             ssm_fn,
         )
@@ -289,17 +346,15 @@ def create_train_state(model_cls,
             )
         tx = optax.multi_transform(
             {
-                "none": optax.inject_hyperparams(optax.adamw)(learning_rate=ssm_lr,
-                                                              weight_decay=weight_decay),
-                "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
-                "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
-                                                                 weight_decay=weight_decay),
+                "none": _make_opt(optax.adamw, _ssm_lr, weight_decay=weight_decay),
+                "ssm": _make_opt(optax.adam, _ssm_lr),
+                "regular": _make_opt(optax.adamw, _lr, weight_decay=weight_decay),
             },
             ssm_fn,
         )
 
     elif opt_config in ["BfastandCdecay"]:
-        """This option applies weight decay to both C and B. Note here we apply 
+        """This option applies weight decay to both C and B. Note here we apply
            faster global learning rate to B also.
         """
         print("configuring optimization with B in AdamW setup with lr")
@@ -317,16 +372,15 @@ def create_train_state(model_cls,
             )
         tx = optax.multi_transform(
             {
-                "none": optax.inject_hyperparams(optax.adamw)(learning_rate=0.0),
-                "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
-                "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
-                                                                 weight_decay=weight_decay),
+                "none": optax.adamw(learning_rate=0.0, weight_decay=0.0),
+                "ssm": _make_opt(optax.adam, _ssm_lr),
+                "regular": _make_opt(optax.adamw, _lr, weight_decay=weight_decay),
             },
             ssm_fn,
         )
 
     elif opt_config in ["noBCdecay"]:
-        """This option does not apply weight decay to B or C. C is included 
+        """This option does not apply weight decay to B or C. C is included
             with the SSM parameters and uses ssm learning rate.
          """
         print("configuring optimization with C not in AdamW setup")
@@ -346,10 +400,9 @@ def create_train_state(model_cls,
             )
         tx = optax.multi_transform(
             {
-                "none": optax.inject_hyperparams(optax.sgd)(learning_rate=0.0),
-                "ssm": optax.inject_hyperparams(optax.adam)(learning_rate=ssm_lr),
-                "regular": optax.inject_hyperparams(optax.adamw)(learning_rate=lr,
-                                                                 weight_decay=weight_decay),
+                "none": optax.sgd(learning_rate=0.0),
+                "ssm": _make_opt(optax.adam, _ssm_lr),
+                "regular": _make_opt(optax.adamw, _lr, weight_decay=weight_decay),
             },
             ssm_fn,
         )
@@ -530,12 +583,19 @@ def train_epoch(
 
     """
     Training function for an epoch that loops over batches.
+
+    lr_params: If None, LR is managed by optax schedules (no manual update).
+               If provided, legacy mode with update_learning_rate_per_step.
     """
     # Store Metrics
     batch_losses = []
-    cross_entropies= [] #list of 1xNTok losses 
+    cross_entropies= [] #list of 1xNTok losses
 
-    decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min = lr_params
+    use_optax_schedules = lr_params is None
+    if not use_optax_schedules:
+        decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min = lr_params
+    else:
+        step = int(state.step)
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     for batch_idx, batch in enumerate(tqdm(trainloader)):
         # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
@@ -570,35 +630,27 @@ def train_epoch(
                 batchnorm,
                 ignore_times,
             )
-            # Multi-host: block after each step to prevent async dispatch +
-            # Python LR mutation from creating inconsistent state shardings
-            # that deadlock NCCL. GPU-bound so no throughput loss.
-            if mesh is not None:
-                loss.block_until_ready()
             if debug_profiler:
                 loss.block_until_ready()
-            # print("completes train step")
-            # if (batch_idx==0) & (epoch%100==0):
-            #     np.set_printoptions(threshold=sys.maxsize)
-            #     with open(f'/data1/sascha/data/losses/losses_batch_{batch_idx}_training.txt', 'w') as f:
-            #         print( ce, file=f)
-            #     print("Printing logits of shape ", logits.shape, " to file")
-            #     with open(f'/data1/sascha/data/losses/logits_batch_{batch_idx}_training.txt', 'w') as f:
-            #         print( logits[0,0,0:44,:], file=f)
-            #     np.set_printoptions()
-            #     print('Done Printing')
 
             # jit+sharding: loss is already a scalar (no device dimension)
             batch_losses.append(loss)
             if log_ce_tables:
                 cross_entropies.append(ce)
-            lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
-            state, step = update_learning_rate_per_step(lr_params, state, mesh=mesh)
+
+            if use_optax_schedules:
+                # LR managed by optax — no manual update needed
+                step = int(state.step)
+            else:
+                # Legacy mode: manual per-step LR update
+                lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
+                state, step = update_learning_rate_per_step(lr_params, state, mesh=mesh)
+
             if (step>20) & (step<=21) & debug_profiler:
                 jax.profiler.stop_trace()
                 break
             if (curtail_epochs is not None) and (batch_idx>=curtail_epochs):
-                print("Ending epoch early due to curtail_epochs being ",curtail_epochs)
+                print("Ending epoch early at step", step, "due to curtail_epoch arg.")
                 break
         else:
             continue
