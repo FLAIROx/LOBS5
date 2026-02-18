@@ -31,21 +31,25 @@
 - **症状**: 两节点 NCCL 通信 hang，17 分钟后手动 scancel
 - **根因**: `jax.distributed.initialize()` 后缺少全局 barrier，node 0 和 node 1 步调不一致
 - **修复**: commit `e12e10f` — 添加 `sync_global_devices("jax_distributed_init")`
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/rc8jd7y9
 - **log**: `logs_lobs5/training_2355647_node*.log`
 
 ### Job 2355695 — 2-node 测试 #2 ❌ 重复测试（2 分 47 秒）
 - **配置**: 2 nodes (nid010064-010065), 8 GPU
 - **状态**: CANCELLED after 2:47
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/mu6nh9hv
 - **说明**: 调试中的短暂测试，确认问题重现
 
 ### Job 2355708 — 2-node 测试 #3 ❌ NCCL hang 重试（2 分 45 秒）
 - **配置**: 2 nodes (nid010025-010026), 8 GPU
 - **状态**: CANCELLED after 2:45，同 2355647 问题
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/k8b0h6ww
 
 ### Job 2356386 — 2-node 测试 #4 ❌ Orbax barrier mismatch（3 分 36 秒）
 - **配置**: 2 nodes (nid010087-010088), 8 GPU
 - **症状**: Orbax CheckpointManager 内部调用了 distributed barrier，但只有 rank 0 创建了 CheckpointManager，rank 1 没有参与，导致 barrier 不匹配 hang/crash
 - **修复**: commit `37a7ae4` — 所有 rank 都创建 CheckpointManager，满足 Orbax 的 barrier 要求
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/j35agw6y
 - **log**: `logs_lobs5/training_2356386_node*.log`
 
 ### Jobs 2356395, 2356410, 2356445, 2356470 — 2-node 测试 #5-8 ❌ XLA autotuner crash（各约 3 分钟）
@@ -53,6 +57,11 @@
 - **错误**: `Sharding autotuning failed: device_type:"DEVICE_TYPE_INVALID"` in `autotuner.cc:260`
 - **即使移除了所有 XLA flags**（triton_gemm、command_buffer 等）仍然 crash
 - **结论**: pmap 的 multi-host 路径有 XLA bug，**无法通过调参绕过，必须换 jit+sharding**
+- **wandb**:
+  - 2356395: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/s6688tzc
+  - 2356410: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/4evd8g2n
+  - 2356445: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/d2yf359q
+  - 2356470: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/ak4ltd79
 - **log**: `logs_lobs5/training_235639*/training_235644*/training_235647*_node*.log`
 
 ### Job 2356422 — 单节点对照测试 ✅（6 分 48 秒）
@@ -60,6 +69,19 @@
 - **结果**: 单节点完全正常，Epoch 1 训练通过，JIT 编译正常，无 autotuner 错误
 - **结论**: XLA autotuner bug 只在 multi-host pmap 路径触发，单节点 pmap 不受影响
 - **注意**: log 里有 `CUDA_ERROR_NO_DEVICE` 噪音，这是 force_cpu 数据加载 worker 尝试检测 GPU 时的预期错误，不影响训练
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/h465acsd
+
+### Job 2356765 — ssm_stable 直接移植测试 ❌（31 秒，1 node）
+- **配置**: 1 node (nid010961), commit `3c78c2f`（ssm_stable 整体替换版本）
+- **目的**: 验证直接用 ssm_stable 的 run_train.py 能否在 B1 环境跑起来
+- **错误 1**: `ModuleNotFoundError: No module named 'lob.profiling_utils'`
+  - ssm_stable 有 GoodputMonitor 依赖，B1 没有这个模块
+- **错误 2**: `local_device_ids=[0,1,2,3,4,5,6,7]`，但节点只有 4 个 GPU
+  - ssm_stable 的 run_train.py 硬编码了 8 个 local_device_ids（为 2×4 GPU 节点设计）
+  - `W: Allowed device set contains 8 devices, but platform only sees 4`
+- **结论**: ssm_stable 直接移植不可行，需要手术式迁移
+- **耗时**: 31 秒即 import 阶段失败
+- **log**: `logs_lobs5/training_2356765_node0.log`
 
 ---
 
@@ -128,13 +150,14 @@
 - **错误**: `deduplicate_trainstate` 的 `x[0]` 对 0-dim scalar 失败
 - **根因**: pmap state 有 device dim，jit+sharding 没有
 - **修复**: e1f4916 — 检测 sharding 属性来区分 pmap/jit 模式
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/urht0vqs
 - **log**: `logs_lobs5/training_2357062_node*.log`
 - **好消息**: 训练循环本身跑通了（JIT编译、mesh、sync barrier 全部正常）
 
-#### Job 2357532 — 2-node smoke test #2 (含 deduplicate fix)
+#### Job 2357532 — 2-node smoke test #2 (含 deduplicate fix) ❌
 - **配置**: 2 nodes, 8 GPU, 30 min, CURTAIL_EPOCHS=100, EPOCHS=20
 - **代码**: HEAD e1f4916 (含 deduplicate_trainstate 修复)
-- **状态**: PENDING
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/6mpazbbl
 - **log**: `logs_lobs5/lobs5_2357532.out` + `logs_lobs5/training_2357532_node*.log`
 
 ## Commit 链 (更新)
@@ -155,10 +178,10 @@
   1. `train.py`: ckpt 构建移入 `if is_main_process` (对齐 ssm_stable)
   2. `init_train.py`: `device_get` → `device_put(local_devices[0])` (安全的拓扑无关实现)
 
-#### Job 2358097 — 2-node smoke test #3
+#### Job 2358097 — 2-node smoke test #3 ⚠️ 部分成功
 - **配置**: 2 nodes, 8 GPU, 30 min, CURTAIL_EPOCHS=100, EPOCHS=20
 - **代码**: HEAD 491f092
-- **状态**: PENDING
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/kl26zrqw
 
 ## Commit 链 (更新)
 
@@ -228,6 +251,7 @@
 - **假设**: 每 epoch 末 `del jit_train_step, jit_eval_step` → `gc.collect()` → `jax.clear_caches()` → 重建 JIT，以释放旧 XLA executable 占用的 GPU 内存
 - **实际**: Epoch 1 ✅，Epoch 2 ✅，Epoch 3 step 0 ❌ 同样 OOM 71.62 GiB
 - **ssm_stable 从未这样做**，是错误方向
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/ymzh0jm3
 - **log**: `logs_lobs5/training_2358255_node1.log`
 
 ### 最终根因（2026-02-18 真正结论）
@@ -246,6 +270,7 @@
 - **实际**: Epoch 1 ✅，Epoch 2 ✅，Epoch 3 step 0 ❌ 同样 OOM 71.62 GiB
 - **根因**: `TF_GPU_ALLOCATOR` 是 TensorFlow 的环境变量，JAX/XLA 的 BFC allocator 完全不读取它
 - **Train Loss 一致性**: 所有失败 job 的 Epoch 1 Train Loss 均为 7.59739，Epoch 2 为 3.28439，说明训练结果可复现，只是内存问题
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/lmwpkrx4
 - **log**: `logs_lobs5/training_2358257_node1.log`
 
 #### Job 2358266 — ❌ 立刻失败（bash -c 单引号语法错误，8秒）
@@ -270,6 +295,7 @@
   - OOM 错误含 `[tf-allocator-allocation-error='']`，这是 XLA 对分配失败的通用提示格式
 - **结论**: PREALLOCATE=false 是反直觉的更差选择；BFC 预分配大池虽然会碎片化，但总体上比无池时更好管理大块分配
 - **耗时**: 12 分钟 19 秒（Epoch 1 完整跑完，Epoch 2 第 0 步失败）
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/5kyixdlw
 - **log**: `logs_lobs5/training_2358268_node1.log`
 
 #### Job 2358280 — ⚠️ Caveat: BSZ=4 workaround (fda0372: BSZ=4, no clear_caches)
