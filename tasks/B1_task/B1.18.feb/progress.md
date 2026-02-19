@@ -312,29 +312,189 @@
 - 所以原来 clear_caches 方案 + BSZ=8 能到 Epoch 3，说明问题是在第 3 个 epoch 的内存累积到临界点
 - **真实目标：让 BSZ=8 能正常多 epoch 训练**，BSZ=4 只是验证 pipeline 能通过的 workaround
 
-## 下一步
-- [x] 验证 pipeline 可以多 epoch 训练 ✅ (BSZ=4 workaround, job 2358280)
-- [ ] **真正目标**: 让 BSZ=8 能稳定多 epoch（研究 Epoch 3 的临界点）
-  - **A** remat/gradient checkpointing：workspace 71→40 GiB，保持 BSZ=8（优先推荐）
-  - **B** Epoch 边界 BFC 整理：`jax.block_until_ready(state)` 在 checkpoint 后确保异步释放
-  - **C** XLA dump 分析：`--xla_dump_to` 在 Epoch 3 OOM 前获取 BFC 碎片结构
-  - **D** SSM scan 内存优化：探索分块 associative scan 降低峰值
-- [ ] 生产训练：大 epoch 数量（BSZ=4 workaround 或等 BSZ=8 修复）
+## BSZ Sweep（2026-02-18，2节点，CURTAIL_EPOCHS=10，EPOCHS=20，无 clear_caches）
 
-## 当前 Commit 链（HEAD = 83b2d05）
+| BSZ | Job | Global BSZ | 20 Epoch 结果 | Train Loss | Val Loss | Val Acc | 耗时 | wandb |
+|-----|-----|-----------|--------------|-----------|---------|---------|------|-------|
+| 4 | 2358280 | 32 | ✅ 20/20 | 2.215 | 2.136 | 0.602 | 13:23 | [juv0tktc](https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/juv0tktc) |
+| 5 | 2358296 | 40 | ✅ 20/20 | 2.200 | 2.141 | 0.601 | ~13min | [1j3sgajw](https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/1j3sgajw) |
+| 6 | 2358297 | 48 | ✅ 20/20 | 2.197 | 2.147 | 0.601 | ~13min | [vz5zxub4](https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/vz5zxub4) |
+| **7** | **2358298** | **56** | **✅ 20/20** | **2.186** | **2.146** | **0.601** | **13:19** | **[is6i6vzr](https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/is6i6vzr)** |
+| 8 | 2358299 | 64 | ❌ 19/20 OOM | 2.190 | 2.145 | 0.602 | 13:57 | [8vaezg2d](https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/8vaezg2d) |
+
+**结论：PER_GPU_BSZ=7 是最优选择**
+- 最大的能跑完 20 epoch 的 BSZ
+- Loss 值与 BSZ=4 几乎相同（2.186 vs 2.215），global batch 大 75%（56 vs 32）
+- BSZ=8 在 Epoch 20 OOM（极限临界，比之前 no-clear-caches 的 Epoch 2 OOM 好得多）
+- BSZ=5/6 也可用，相对更安全的余量
+
+**16节点推算（BSZ=7）**：16×4×7 = **448 global BSZ**
+
+## 全局 Mesh 修复 + NCCL 问题（2026-02-18 下半）
+
+### 发现：跨节点梯度同步 Bug
+- `sharding_utils.py:29` 注释明确写 "Gradient sync across nodes would require psum across processes (not yet implemented)"
+- 每 node 用 `jax.local_devices()` 创建 LOCAL mesh → 多节点实际是 N 个独立模型
+- **修复 commit 9c64e1c**: `jax.local_devices()` → `jax.devices()` 创建全局 mesh
+- **修复 commit 0076b03**: batch 脚本 LR/WARMUP 环境变量覆盖
+
+### Job 2358444 — 全局 mesh 验证 #1 ❌ device_put ValueError
+- **配置**: 2 nodes, BSZ=7, CURTAIL_EPOCHS=10, EPOCHS=5
+- **代码**: HEAD 0076b03
+- **错误**: `ValueError: global size of dimension 0 should be divisible by 8, but it is equal to 28`
+- **根因**: `jax.device_put(local_batch, global_sharding)` 把 28 样本当全局数组，但 8 device mesh 要求整除
+- **修复 commit ed28bff**: `device_put` → `jax.make_array_from_process_local_data`（6 处）
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/djz3cyhk
+
+### Job 2358460 — 全局 mesh 验证 #2 ❌ NCCL cross-node hang (TIMEOUT 30 min)
+- **配置**: 2 nodes, BSZ=7, CURTAIL_EPOCHS=10, EPOCHS=5
+- **代码**: HEAD ed28bff
+- **成功部分**:
+  - `[Sharding] Global mesh with 8 devices across 2 processes` ✅
+  - `[*] State distributed via sharding (replicated across 8 devices)` ✅
+  - `[JIT] Created JIT-compiled train/eval_step with sharding` ✅
+  - Node 1 到达 "Starting Training Epoch 1" + "Batch 0" ✅
+- **失败部分**: Batch 0 的 `jit_train_step` 调用 hang 了 25+ 分钟
+  - train_step 的反向传播需要跨节点 allreduce（NCCL）
+  - State 分发成功是因为 replicated sharding 不需要 allreduce
+  - NCCL 跨节点通信在 Slingshot 互连上可能缺少 OFI plugin
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/w3je1ukq
+
+### 当前阻塞
+- **NCCL 跨节点 allreduce hang**: 全局 mesh 下 XLA 插入的 allreduce 需要 NCCL 跨节点通信
+- 节点内 NVLink 正常（之前所有 local-mesh job 都通过）
+- 跨节点 Slingshot 上的 NCCL 配置可能有问题
+
+### 下一步
+- [ ] 诊断 NCCL: `NCCL_DEBUG=INFO` 提交 diagnostic job
+- [ ] 检查 aws-ofi-nccl / cray NCCL plugin 是否可用
+- [ ] 备选方案: local mesh + 手动 gradient allreduce
+
+### Job 2358472 — 全局 mesh 验证 #3 ❌ TIMEOUT (aws-ofi-nccl 加载成功但仍 hang)
+- **配置**: 2 nodes, BSZ=7, 30 min
+- **代码**: HEAD f6b4e16 (aws-ofi-nccl plugin)
+- NCCL OFI: aws-ofi-nccl 1.8.1 加载成功，4 comm, 40 rings, GDRDMA ✅
+- 仍然 hang 在 Batch 0 → 证明不是 NCCL 问题
+- **wandb**: 同 2358460
+
+### Job 2358487 — 1h 诊断 (JAX_LOG_COMPILES=1) → 发现 Orbax 死锁
+- **配置**: 2 nodes, BSZ=7, 1h, JAX_LOG_COMPILES=1
+- **关键发现**: train_step 编译从未开始！Rank 0 卡在 CheckpointManager()
+- **根因**: Orbax 分布式 barrier 死锁（见 findings 9d）
+
+### Job 2358489 — 最小 global mesh 测试 ✅ ALL TESTS PASSED (10s)
+- **配置**: 2 nodes
+- **结果**: 全局 mesh + 跨节点 allreduce 全部通过
+
+### Job 2358495 — Orbax 修复后验证 ❌ XLA Triton GEMM crash
+- **配置**: 2 nodes, BSZ=7, 30 min
+- **代码**: HEAD 61eb6f3 (Orbax fix: all ranks create CheckpointManager)
+- ✅ Orbax 死锁修复成功，两节点都到 Batch 0
+- ❌ train_step 编译时 autotuner.cc crash: `__triton_gemm` + `DEVICE_TYPE_INVALID`
+- **修复**: commit 1ae5519 — `--xla_gpu_enable_triton_gemm=false`
+- **wandb**: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/vo1x9blk
+
+### Job 2358497 — triton_gemm 禁用后 ❌ 编译卡死 20+ 分钟
+- **配置**: 2 nodes, BSZ=7, 30 min
+- **代码**: HEAD 1ae5519 (triton_gemm disabled)
+- ✅ 不再 crash，两节点都到 Batch 0
+- ❌ GPU 利用率仅 1.3 GB，编译未在 GPU 上执行
+- **假说**: cuBLAS autotuner 多主机死锁
+- **修复**: commit 45bbe0c — `--xla_gpu_autotune_level=0`
+
+### Job 2358860 — autotuning 完全禁用 🔄 IN PROGRESS
+- **配置**: 2 nodes, BSZ=7, 30 min
+- **代码**: HEAD 45bbe0c (triton_gemm=false + autotune_level=0)
+- **验证中**
+
+## Session 3 — Epoch 2+ hang 修复 (2026-02-18 下半)
+
+### 背景
+全局 mesh 工作后，Epoch 1 通过但 Epoch 2 training hang。
+
+### Job 2368024 — Epoch 2 hang（session 3 初始 job）
+- Epoch 1 完成: Train Loss 7.69806, Val Loss 3.67015, Test Acc 0.5098
+- Epoch 2 Batch 0: 数据加载完成但 `train_fn()` hang 14+ 分钟
+- CUDA_ERROR_NO_DEVICE × 5（DataLoader workers，不影响训练）
+
+### Job 2368536 — sync checkpoint only ❌
+- commit 490c575: `enable_async_checkpointing=False`
+- Epoch 2 step 0 完成 (2.29s)，step 1 hang
+- **结论**: sync checkpoint alone 不够
+
+### Job 2368882 — debug block_until_ready ✅ KEY VALIDATION
+- commit 9508198: block_until_ready + verbose debug for first 3 steps of epoch >= 1
+- **3 个 epoch 全部成功!**
+- Epoch 2: Val Loss 2.677, Val Acc 0.5400
+- Epoch 3: Val Loss 2.405, Val Acc 0.5632
+- W&B: good-spaceship-122 / runs/3b06xt03
+
+### Job 2369091 — block step 0 only (clean) ❌
+- commit 2acb86c: block_until_ready only at batch_idx==0
+- Epoch 2 step 0 本身 hang（state 在 epoch 边界已被 LR mutation 污染）
+
+### Job 2369429 — re-shard only (no block) ❌
+- commit a2c2f4e: epoch 开始时 re-shard，无 block_until_ready
+- Epoch 2 step 0-1 通过，step 2 hang（每步 LR mutation 重新污染）
+
+### Job 2369971 — optax schedule (HEAD=6335eb5) ✅ 40/40 EPOCH
+- 实际运行代码: HEAD (optax schedules + wandb fix)
+- W&B: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/giwfdaig
+- Best Val Loss: 2.05655, Best Val Acc: 61.82% at Epoch 38
+- 节点: nid[010996-010997], 运行时间: 14:31
+
+### Job 2370026 — optax schedule (HEAD=6335eb5) ✅ 40/40 EPOCH
+- W&B: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/y8roj5w1
+- Best Val Loss: 2.05658, Best Val Acc: 61.82% at Epoch 38
+- 节点: nid[011047-011048], 运行时间: 15:20
+
+### Job 2370046 — optax schedule (HEAD=6335eb5) ✅ 40/40 EPOCH
+- W&B: https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/05nx52xk
+- Best Val Loss: 2.05653, Best Val Acc: 61.82% at Epoch 40
+- 节点: nid[011051-011052], 运行时间: 14:31
+
+### Job 2369989 — timeout (15min 时限不够) ⏰
+- TIMEOUT at 15:14
+
+## 当前 Commit 链（HEAD = 4722ecf）
 ```
 41d336b  ← v2 分支点（干净 B1）
-  18f832d  refactor: pmap → jit+sharding
-  491f092  fix: deduplicate_trainstate
-  49c265d  fix: lr[0] scalar
-  070facd  fix: restore jax.clear_caches（后来移除）
-  caf58db  fix: del+recreate jit（错误方向）
-  84c52ba  fix: TF_GPU_ALLOCATOR（无效）
-  8147fd6  docs: OOM 分析
-  3c5a55c  fix: PREALLOCATE=false（更差）
-  b49e469  fix: 修复注释里的单引号 bash 语法 bug
-  fda0372  fix: 去掉 clear_caches + BSZ=4 workaround
-  5db3599  docs: 记录 OOM 最终修复
-  f4e69cf  docs: job 2358280 成功记录
-  83b2d05  docs: BSZ=4 标记为 caveat（当前 HEAD）
+  ...
+  45bbe0c  fix: disable autotune_level=0
+  4e4f8d7  fix: NCCL P2P env override
+  9143892  fix: skip deduplicate in multi-host
+  105eaee  fix: re-shard state before checkpoint save
+  490c575  fix: disable async checkpoint
+  9508198  debug: verbose logging for Epoch 2+ hang
+  2acb86c  fix: block first step each epoch
+  a2c2f4e  fix: re-shard state before each epoch
+  ec1afd4  fix: create globally-replicated LR arrays
+  7e16fb5  fix: block every step in multi-host
+  4722ecf  refactor: optax schedules replace inject_hyperparams
+  b952008  fix: correct steps_per_epoch for multi-host
+  6335eb5  fix: wandb LR logging with schedule mode  ← HEAD
 ```
+
+---
+
+## 2026-02-19: DDP 实现历程回顾 + 参考实现分析
+
+**会话**: dc29e4b2 (同 ssm-stable 分析会话)
+
+### 完成项
+- [x] 回顾 B1 DDP 完整历程 (三阶段, 20 commits, 12 个 bug)
+- [x] 分析 HyperscaleES 多节点模式 (shard_map + process_allgather)
+- [x] 分析 MaxText 多节点模式 (ICI/DCN hybrid mesh + SPMD 自动 allreduce)
+- [x] 对比 ssm-stable 分支 (LOCAL mesh, 无跨节点梯度同步, BF16 混合精度)
+- [x] 三方对比表 + MaxText 核心文件引用
+- [x] 写入 findings.md (B1_task + ssm-stable-08-feb 两处)
+
+### 关键结论
+- B1 的 jit+sharding 做法与 MaxText 核心架构一致（SPMD 自动 allreduce）
+- ssm-stable 多节点 = N 个独立模型（LOCAL mesh，无梯度同步）
+- HyperscaleES 用 ES 不做 backprop，模式不可直接借鉴
+- 未来 >1B 参数时升级路径: 1D mesh → 2D mesh (data+fsdp)
+
+### 相关文档
+- `tasks/ssm-stable-08-feb/findings.md` — ssm-stable 分支完整分析
+- `tasks/B1_task/B1.18.feb/findings.md` — B1 DDP 历程 + 参考实现对比

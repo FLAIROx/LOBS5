@@ -50,12 +50,24 @@ else:
     mesh = initialize_mesh(args.num_devices)    # 单机
 ```
 
+### train_helpers.py (device_put → make_array_from_process_local_data)
+```python
+# BUG: device_put 在全局 mesh 下把 local batch 当全局数组
+inputs = tuple(jax.device_put(inp, sh) for inp, sh in zip(inputs, inputs_sh))
+# → 28 样本 / 8 devices = 3.5 ❌ ValueError
+
+# FIX: 每个 process 提供本地分片，JAX 拼装全局数组
+inputs = tuple(jax.make_array_from_process_local_data(sh, inp) for inp, sh in zip(inputs, inputs_sh))
+# → 每 process 28 样本映射到本地 4 devices，全局 56 样本 / 8 devices = 7 ✅
+```
+
 ## ssm_stable 需要修改的文件
 
 | 文件 | 改动 | 说明 |
 |------|------|------|
 | `sharding_utils.py` (或等效) | `jax.local_devices()` → `jax.devices()` when multi-node | 核心修复 |
 | `train.py` | mesh 初始化传 `jax.device_count()` | 配套 |
+| `train_helpers.py` | `jax.device_put` → `jax.make_array_from_process_local_data` | **必须**，否则 ValueError |
 | Orbax checkpoint | **可能需要** 所有 rank 创建 CheckpointManager | 全局 mesh 可能触发 Orbax barrier |
 
 ## 注意事项
