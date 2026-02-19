@@ -144,7 +144,7 @@ export CUDA_MODULE_LOADING=EAGER
 #    First 1N run populates cache, multi-node runs read from it (bypass autotuner bug)
 AUTOTUNE_CACHE_DIR="/lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5/.xla_autotune_cache"
 mkdir -p "${AUTOTUNE_CACHE_DIR}" 2>/dev/null || true
-# Append flags (don't use :- default syntax — XLA_FLAGS may already be set by JAX)
+# Append flags -- do not use :- default syntax, XLA_FLAGS may already be set by JAX
 export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false --xla_gpu_per_fusion_autotune_cache_dir=${AUTOTUNE_CACHE_DIR}"
 echo "[XLA] XLA_FLAGS=${XLA_FLAGS}"
 
