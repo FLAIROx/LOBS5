@@ -160,6 +160,9 @@ def train(args):
                                                 n_fused_layers=args.n_layers,
                                                 h_size_ema=ssm_size)
 
+        # Move state to host numpy (device-agnostic) then shard to global mesh.
+        # This handles both init (jax array on local device) and restore (numpy from checkpoint).
+        state = jax.device_get(state)
         state_shardings = create_state_shardings(state, mesh)
         state = jax.device_put(state, state_shardings)
         total_devices = jax.device_count() if jax.process_count() > 1 else args.num_devices

@@ -148,11 +148,10 @@ def load_checkpoint(
     # copy train state back to all devices
     if train:
         if mesh is not None:
-            from lob.sharding_utils import create_state_shardings
-            state_shardings = create_state_shardings(loaded['state'], mesh)
-            # device_put handles single-device→multi-device re-shard
-            # (jax.jit identity fails when input device ⊄ output mesh devices)
-            ckpt['model'] = jax.device_put(loaded['state'], state_shardings)
+            # Orbax restores to single device; move to numpy (device-agnostic)
+            # then let caller shard to global mesh
+            host_state = jax.device_get(loaded['state'])
+            ckpt['model'] = host_state
         else:
             ckpt['model'] = jax_utils.replicate(loaded['state'])
     else:
