@@ -134,11 +134,16 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=true
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 export JAX_PLATFORMS="cuda"
 
-# XLA autotuner: JAX 0.9.0 had multi-host autotuner crash (DEVICE_TYPE_INVALID in autotuner.cc:260)
-# Fixed in JAX 0.9.0.1 via XLA#36579 (sort before sharding) + XLA#36755 (deterministic iteration)
-# autotune_level=0 is FORBIDDEN — XLA AutoTune is why we use JAX
-# Rollback: pip install jax==0.9.0 jaxlib==0.9.0 jax-cuda12-pjrt==0.9.0 jax-cuda12-plugin==0.9.0
-#           then uncomment: export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false --xla_gpu_shard_autotuning=false}"
+# CAVEAT — XLA FLAGS FOR MULTI-HOST AUTOTUNER
+# autotune_level=0 is FORBIDDEN — XLA AutoTune (kernel fusion) is why we use JAX
+#
+# JAX 0.9.0 had multi-host autotuner crash: autotuner.cc:260 DEVICE_TYPE_INVALID
+# Root cause: non-deterministic iteration + unsorted sharding across hosts
+# Fixed in JAX 0.9.0.1 via XLA#36579 + XLA#36755
+# CAVEAT: DO NOT re-enable these flags unless downgrading below JAX 0.9.0.1
+# CAVEAT: ssm-stable, HyperscaleES, MaxText all use XLA defaults (no flags)
+# Rollback to JAX 0.9.0: pip install jax==0.9.0 jaxlib==0.9.0 jax-cuda12-pjrt==0.9.0 jax-cuda12-plugin==0.9.0
+#export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false --xla_gpu_shard_autotuning=false}"
 export CUDA_MODULE_LOADING=EAGER
 echo "[XLA] XLA_FLAGS=${XLA_FLAGS}"
 
