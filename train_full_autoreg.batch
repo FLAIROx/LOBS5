@@ -138,12 +138,16 @@ export JAX_PLATFORMS="cuda"
 export CUDA_MODULE_LOADING=EAGER
 
 # XLA flags for multi-host:
-# 1. triton_gemm causes autotuner.cc DEVICE_TYPE_INVALID crash on multi-host
-# 2. shard_autotuning=false: each host autotunes independently, avoids DEVICE_TYPE_INVALID
-#    shard_autotuning distributes autotuning across hosts, but sets device_type=INVALID
-#    for non-primary hosts. Disabling it keeps full autotuning on each host.
 # NOTE: autotune_level=0 is FORBIDDEN — XLA AutoTune is why we use JAX
-export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false --xla_gpu_shard_autotuning=false"
+#
+# CAVEAT: the following two flags are COMMENTED OUT intentionally.
+# ssm-stable-08-feb, HyperscaleES, and MaxText all use XLA DEFAULTS (both true).
+# Only this branch had them disabled. Reverting to defaults for parity.
+#
+# If multi-host autotuner crashes (DEVICE_TYPE_INVALID in autotuner.cc:260),
+# uncomment these flags as a workaround:
+#   export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false --xla_gpu_shard_autotuning=false"
+#
 echo "[XLA] XLA_FLAGS=${XLA_FLAGS}"
 
 # NCCL config
