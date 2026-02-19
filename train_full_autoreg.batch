@@ -118,7 +118,7 @@ echo "========================================"
 
 # Source conda
 source ~/miniforge3/etc/profile.d/conda.sh
-conda activate lob
+conda activate ${CONDA_ENV:-lob}
 
 # Load CUDA module
 module load cuda/12.6
