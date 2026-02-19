@@ -138,9 +138,9 @@ export JAX_PLATFORMS="cuda"
 export CUDA_MODULE_LOADING=EAGER
 
 # XLA flags for multi-host:
-# 1. triton_gemm causes autotuner.cc DEVICE_TYPE_INVALID crash
-# 2. autotune_level=0 prevents multi-host autotuner deadlock
-export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false --xla_gpu_autotune_level=0}"
+# 1. triton_gemm causes autotuner.cc DEVICE_TYPE_INVALID crash on multi-host
+# NOTE: autotune_level=0 is FORBIDDEN — XLA AutoTune (kernel fusion) is why we use JAX
+export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false}"
 
 # NCCL config
 export NCCL_TIMEOUT=3600
