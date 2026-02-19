@@ -921,11 +921,16 @@ def validate(state,
         losses.append(np.asarray(loss))
         accuracies.append(np.asarray(acc))
         if curtail_epoch is not None and batch_idx>=curtail_epoch:
-            print(f"Ending epoch early at step {batch_idx} due to curtail_epoch arg.")
+            print(f"Ending epoch early at step {batch_idx} due to curtail_epoch arg.", flush=True)
+            print(f"[DEBUG] About to break from validate loop. losses len={len(losses)}, type={type(losses[-1])}", flush=True)
             break
 
+    import sys; sys.stdout.flush(); sys.stderr.flush()
+    print(f"[DEBUG] validate post-loop: {len(losses)} losses, types: {type(losses[0]) if losses else 'empty'}", flush=True)
     concat_loss=np.concatenate(losses,axis=0)
+    print(f"[DEBUG] concat_loss done: {concat_loss.shape}", flush=True)
     concat_acc=np.concatenate(accuracies,axis=0)
+    print(f"[DEBUG] concat_acc done: {concat_acc.shape}", flush=True)
     print(f"Concat Loss is {concat_loss.shape}")
     print(f"Concat Acc is {concat_acc.shape}")
     if log_ce_tables:
@@ -934,8 +939,13 @@ def validate(state,
     else:
         ce_means=None
         acc_means=None
-    aveloss, aveaccu = np.mean(concat_loss), np.mean(np.asarray(accuracies))
+    print("[DEBUG] computing aveloss...", flush=True)
+    aveloss = np.mean(concat_loss)
+    print(f"[DEBUG] aveloss={aveloss}", flush=True)
+    aveaccu = np.mean(concat_acc)
+    print(f"[DEBUG] aveaccu={aveaccu}", flush=True)
     del losses, accuracies
+    print("[DEBUG] validate returning", flush=True)
     return aveloss, aveaccu, ce_means,acc_means
 
 def eval_step(
