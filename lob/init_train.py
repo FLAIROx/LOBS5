@@ -121,6 +121,7 @@ def load_checkpoint(
         # config_dict: dict,
         step: Optional[int] = None,
         train: bool = True,
+        mesh=None,
     ) -> dict[str, Any]:
 
     mngr = ocp.CheckpointManager(
@@ -146,7 +147,12 @@ def load_checkpoint(
     ckpt = loaded['metadata']
     # copy train state back to all devices
     if train:
-        ckpt['model'] = jax_utils.replicate(loaded['state'])
+        if mesh is not None:
+            from lob.sharding_utils import create_state_shardings
+            state_shardings = create_state_shardings(loaded['state'], mesh)
+            ckpt['model'] = jax.jit(lambda s: s, out_shardings=state_shardings)(loaded['state'])
+        else:
+            ckpt['model'] = jax_utils.replicate(loaded['state'])
     else:
         ckpt['model'] = loaded['state']
     return ckpt

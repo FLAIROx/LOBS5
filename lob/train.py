@@ -116,6 +116,14 @@ def train(args):
             print_shapes=True
         )
 
+        # Initialize mesh first (needed for restore and JIT step functions)
+        # Multi-node: global mesh over ALL devices for cross-node gradient sync
+        # Single-node: local mesh over num_devices GPUs
+        if jax.process_count() > 1:
+            mesh = initialize_mesh(jax.device_count())
+        else:
+            mesh = initialize_mesh(args.num_devices)
+
         if args.restore is not None and args.restore != '':
             print(f"[*] Restoring weights from {args.restore}")
             ckpt = load_checkpoint(
@@ -123,9 +131,10 @@ def train(args):
                 args.restore,
                 # args.__dict__,
                 step=args.restore_step,
+                mesh=mesh,
             )
             state = ckpt['model']
-        
+
         val_model = model_cls(training=False, step_rescale=1)
         init_hidden=model_cls().initialize_carry(batch_size=args.bsz//args.num_devices,
                                                 hidden_size=(ssm_size // pow(2,int(args.conj_sym))),
@@ -135,13 +144,6 @@ def train(args):
                                                 n_fused_layers=args.n_layers,
                                                 h_size_ema=ssm_size)
 
-        # Initialize mesh and JIT-compiled step functions (replaces pmap)
-        # Multi-node: global mesh over ALL devices for cross-node gradient sync
-        # Single-node: local mesh over num_devices GPUs
-        if jax.process_count() > 1:
-            mesh = initialize_mesh(jax.device_count())
-        else:
-            mesh = initialize_mesh(args.num_devices)
         state_shardings = create_state_shardings(state, mesh)
         state = jax.jit(lambda s: s, out_shardings=state_shardings)(state)
         total_devices = jax.device_count() if jax.process_count() > 1 else args.num_devices
