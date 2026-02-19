@@ -137,17 +137,16 @@ export JAX_PLATFORMS="cuda"
 # Eager CUDA module loading prevents kernel loading hang (NVIDIA known issue)
 export CUDA_MODULE_LOADING=EAGER
 
-# XLA flags for multi-host:
+# XLA flags for multi-host GPU training (JAX 0.9.0 / jaxlib 0.9.0):
 # NOTE: autotune_level=0 is FORBIDDEN — XLA AutoTune is why we use JAX
 #
-# CAVEAT: the following two flags are COMMENTED OUT intentionally.
-# ssm-stable-08-feb, HyperscaleES, and MaxText all use XLA DEFAULTS (both true).
-# Only this branch had them disabled. Reverting to defaults for parity.
+# Both flags below are REQUIRED to avoid autotuner.cc:260 DEVICE_TYPE_INVALID crash.
+# Verified: XLA defaults (both true) crash on 2N+ (v5: jobs 2379118, 2379119).
+# ssm-stable/HyperscaleES/MaxText don't set these because they don't do multi-node GPU.
 #
-# If multi-host autotuner crashes (DEVICE_TYPE_INVALID in autotuner.cc:260),
-# uncomment these flags as a workaround:
-#   export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false --xla_gpu_shard_autotuning=false"
-#
+# triton_gemm=false: triton GEMM fusions trigger DEVICE_TYPE_INVALID on multi-host
+# shard_autotuning=false: each host autotunes independently, avoids INVALID device_type
+export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false --xla_gpu_shard_autotuning=false"
 echo "[XLA] XLA_FLAGS=${XLA_FLAGS}"
 
 # NCCL config
