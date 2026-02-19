@@ -150,7 +150,9 @@ def load_checkpoint(
         if mesh is not None:
             from lob.sharding_utils import create_state_shardings
             state_shardings = create_state_shardings(loaded['state'], mesh)
-            ckpt['model'] = jax.jit(lambda s: s, out_shardings=state_shardings)(loaded['state'])
+            # device_put handles single-device→multi-device re-shard
+            # (jax.jit identity fails when input device ⊄ output mesh devices)
+            ckpt['model'] = jax.device_put(loaded['state'], state_shardings)
         else:
             ckpt['model'] = jax_utils.replicate(loaded['state'])
     else:

@@ -161,7 +161,7 @@ def train(args):
                                                 h_size_ema=ssm_size)
 
         state_shardings = create_state_shardings(state, mesh)
-        state = jax.jit(lambda s: s, out_shardings=state_shardings)(state)
+        state = jax.device_put(state, state_shardings)
         total_devices = jax.device_count() if jax.process_count() > 1 else args.num_devices
         print(f"[*] State distributed via sharding (replicated across {total_devices} devices)")
 
