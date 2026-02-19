@@ -916,8 +916,10 @@ def validate(state,
         #     print("Done Printing")
 
 
-        losses.append(loss)
-        accuracies.append(acc)
+        # Multi-host: materialize sharded arrays to numpy immediately to prevent
+        # accumulated async allgather operations from deadlocking at np.concatenate
+        losses.append(np.asarray(loss))
+        accuracies.append(np.asarray(acc))
         if curtail_epoch is not None and batch_idx>=curtail_epoch:
             print(f"Ending epoch early at step {batch_idx} due to curtail_epoch arg.")
             break
