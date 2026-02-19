@@ -140,12 +140,18 @@ export CUDA_MODULE_LOADING=EAGER
 # XLA flags for multi-host:
 # 1. triton_gemm causes autotuner.cc DEVICE_TYPE_INVALID crash on multi-host
 # NOTE: autotune_level=0 is FORBIDDEN — XLA AutoTune (kernel fusion) is why we use JAX
-# 2. per_fusion_autotune_cache_dir: persist autotuning results to shared Lustre dir
-#    First 1N run populates cache, multi-node runs read from it (bypass autotuner bug)
-AUTOTUNE_CACHE_DIR="/lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5/.xla_autotune_cache"
-mkdir -p "${AUTOTUNE_CACHE_DIR}" 2>/dev/null || true
-# Append flags -- do not use :- default syntax, XLA_FLAGS may already be set by JAX
-export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false --xla_gpu_per_fusion_autotune_cache_dir=${AUTOTUNE_CACHE_DIR}"
+# 2. Persisted autotuning: dump results from 1N, load for multi-node
+#    This bypasses the DEVICE_TYPE_INVALID autotuner crash on multi-host
+AUTOTUNE_CACHE="/lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5/.xla_autotune_cache.pb"
+if [ -f "${AUTOTUNE_CACHE}" ]; then
+    # Load cached autotune results -- skip autotuner entirely for cached fusions
+    export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false --xla_gpu_load_autotune_results_from=${AUTOTUNE_CACHE}"
+    echo "[XLA] Loading autotune cache from ${AUTOTUNE_CACHE}"
+else
+    # No cache exists -- dump autotune results for future runs
+    export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false --xla_gpu_dump_autotune_results_to=${AUTOTUNE_CACHE}"
+    echo "[XLA] Will dump autotune cache to ${AUTOTUNE_CACHE}"
+fi
 echo "[XLA] XLA_FLAGS=${XLA_FLAGS}"
 
 # NCCL config
