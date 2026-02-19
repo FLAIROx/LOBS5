@@ -124,6 +124,7 @@ def train(args):
         else:
             mesh = initialize_mesh(args.num_devices)
 
+        restored_metrics = {}
         if args.restore is not None and args.restore != '':
             print(f"[*] Restoring weights from {args.restore}")
             ckpt = load_checkpoint(
@@ -148,6 +149,7 @@ def train(args):
             print(f"[Restore] Adam nu norms (first 3 params): {nu_norms}")
             schedule_count = ssm_inner[1].count  # ScaleByScheduleState
             print(f"[Restore] Schedule count = {int(schedule_count)}")
+            restored_metrics = ckpt.get('metrics', {})
 
         val_model = model_cls(training=False, step_rescale=1)
         init_hidden=model_cls().initialize_carry(batch_size=args.bsz//args.num_devices,
@@ -170,7 +172,17 @@ def train(args):
     best_loss, best_acc, best_epoch = 100000000, -100000000.0, 0  # This best loss is val_loss
     count, best_val_loss = 0, 100000000  # This line is for early stopping purposes
     lr_count, opt_acc = 0, -100000000.0  # This line is for learning rate decay
-    step = 0  # for per step learning rate decay
+    step = int(state.step)  # for per step learning rate decay (restored from checkpoint or 0)
+
+    # Restore best metrics from checkpoint if available
+    if restored_metrics:
+        best_loss = restored_metrics.get('loss_val_ar', best_loss)
+        best_acc = restored_metrics.get('acc_val_ar', best_acc)
+        best_val_loss = restored_metrics.get('loss_val_ar', best_val_loss)
+        best_test_loss = restored_metrics.get('loss_test_rnn', best_test_loss)
+        best_test_acc = restored_metrics.get('acc_test_rnn', best_test_acc)
+        print(f"[Restore] Best metrics restored: val_loss={best_loss:.5f}, val_acc={best_acc:.4f}, "
+              f"test_loss={best_test_loss:.5f}, test_acc={best_test_acc:.4f}")
     steps_per_epoch = int(train_size / (args.bsz * process_count)) if args.curtail_epochs is None else args.curtail_epochs+1
 
     # Create LR schedule functions for wandb logging (optax manages LR inside JIT)
@@ -235,7 +247,16 @@ def train(args):
     ignore_times=args.ignore_times
     batchnorm=args.batchnorm
 
-    for epoch in range(args.epochs):
+    start_epoch = 0
+    if args.restore is not None and args.restore != '':
+        if args.restore_step is not None:
+            start_epoch = args.restore_step + 1
+        else:
+            # Infer from state.step: epoch ≈ step / steps_per_epoch
+            start_epoch = int(state.step) // max(steps_per_epoch, 1)
+        print(f"[Restore] Resuming training from epoch {start_epoch} (of {args.epochs})")
+
+    for epoch in range(start_epoch, args.epochs):
         # Free residual memory from previous epoch's val/test before training
         gc.collect()
 
