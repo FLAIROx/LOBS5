@@ -134,6 +134,20 @@ def train(args):
                 mesh=mesh,
             )
             state = ckpt['model']
+            # Debug: verify restored state
+            print(f"[Restore] state.step = {int(state.step)}")
+            print(f"[Restore] Restored metrics: {ckpt.get('metrics', {})}")
+            # Check optimizer momentum is non-zero (proves Adam state restored)
+            ssm_inner = state.opt_state.inner_states['ssm'].inner_state
+            adam_state = ssm_inner[0]  # ScaleByAdamState (optax schedule mode)
+            mu_leaves = jax.tree_util.tree_leaves(adam_state.mu)
+            nu_leaves = jax.tree_util.tree_leaves(adam_state.nu)
+            mu_norms = [float(jnp.linalg.norm(m)) for m in mu_leaves[:3]]
+            nu_norms = [float(jnp.linalg.norm(n)) for n in nu_leaves[:3]]
+            print(f"[Restore] Adam mu norms (first 3 params): {mu_norms}")
+            print(f"[Restore] Adam nu norms (first 3 params): {nu_norms}")
+            schedule_count = ssm_inner[1].count  # ScaleByScheduleState
+            print(f"[Restore] Schedule count = {int(schedule_count)}")
 
         val_model = model_cls(training=False, step_rescale=1)
         init_hidden=model_cls().initialize_carry(batch_size=args.bsz//args.num_devices,
