@@ -143,9 +143,7 @@ export CUDA_MODULE_LOADING=EAGER
 #    shard_autotuning distributes autotuning across hosts, but sets device_type=INVALID
 #    for non-primary hosts. Disabling it keeps full autotuning on each host.
 # NOTE: autotune_level=0 is FORBIDDEN — XLA AutoTune is why we use JAX
-AUTOTUNE_CACHE_DIR="/lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5/.xla_autotune_cache"
-mkdir -p "${AUTOTUNE_CACHE_DIR}" 2>/dev/null || true
-export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false --xla_gpu_shard_autotuning=false --xla_gpu_experimental_autotune_cache_dir=${AUTOTUNE_CACHE_DIR}"
+export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false --xla_gpu_shard_autotuning=false"
 echo "[XLA] XLA_FLAGS=${XLA_FLAGS}"
 
 # NCCL config
