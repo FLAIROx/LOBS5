@@ -134,19 +134,14 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=true
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 export JAX_PLATFORMS="cuda"
 
-# Eager CUDA module loading prevents kernel loading hang (NVIDIA known issue)
-export CUDA_MODULE_LOADING=EAGER
-
-# XLA flags for multi-host GPU training (JAX 0.9.0 / jaxlib 0.9.0):
+# CAVEAT: Multi-host GPU autotuner crash (JAX 0.9.0 / jaxlib 0.9.0)
+# XLA defaults cause autotuner.cc:260 DEVICE_TYPE_INVALID on 2N+
+# Verified: jobs 2379118 (2N, __cublas), 2379119 (4N, __triton_gemm)
+# ssm-stable, HyperscaleES, MaxText all use XLA defaults -- they don't do multi-node GPU.
+# Uncomment these as temporary workaround if needed:
+#   export CUDA_MODULE_LOADING=EAGER
+#   export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false --xla_gpu_shard_autotuning=false"
 # NOTE: autotune_level=0 is FORBIDDEN — XLA AutoTune is why we use JAX
-#
-# Both flags below are REQUIRED to avoid autotuner.cc:260 DEVICE_TYPE_INVALID crash.
-# Verified: XLA defaults (both true) crash on 2N+ (v5: jobs 2379118, 2379119).
-# ssm-stable/HyperscaleES/MaxText don't set these because they don't do multi-node GPU.
-#
-# triton_gemm=false: triton GEMM fusions trigger DEVICE_TYPE_INVALID on multi-host
-# shard_autotuning=false: each host autotunes independently, avoids INVALID device_type
-export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false --xla_gpu_shard_autotuning=false"
 echo "[XLA] XLA_FLAGS=${XLA_FLAGS}"
 
 # NCCL config
