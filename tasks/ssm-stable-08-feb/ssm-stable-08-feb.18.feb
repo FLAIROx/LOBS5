@@ -1,0 +1,53 @@
+ssm-stable-08-feb.18.feb
+
+
+我讲解一下这个 Branch 的做法
+
+ssm-stable-08-feb
+
+实现真正的 DDP (全局 Mesh) — 多节点梯度同步  
+
+
+发现和结果都写入这里：
+/projects/s5e/quant/AlphaTrade/LOBS5/tasks/ssm-stable-08-feb/
+
+
+
+这个也可以参考 如果实现真正的 DDP (全局 Mesh) — 多节点梯度同步  
+
+
+(base) kangli.s5e@login44:~/AlphaTrade/LOBS5>                                                                                                                                              
+(base) kangli.s5e@login44:~/AlphaTrade/LOBS5>                                                                                                                                              
+(base) kangli.s5e@login44:~/AlphaTrade/LOBS5> cd ..                                                                                                                                        
+(base) kangli.s5e@login44:~/AlphaTrade> ls
+ 03.feb.todo  'c.945 [info] Resolving'    DiT           gen-option      image.png        lobgen       mamba_reference   OrderbookDiT  'tem['            vmohl_LOBS5                        
+ 2.sty         CLAUDE.md.bak              es-lobs5      HyperscaleES    jax-lob-legacy   LOBS5        maxdiffusion      overleaf       temp                                                
+ ai.20jan      core                       experiments   HyperscaleES2   JaxMARL-HFT      LOBS5_3      maxtext           poly           test_git_lobs5                                      
+ AlphaTrade    discobench-agent-testing   findings.md   ICML_EGGROLL    lob_bench        logs_lobs5   nano-egg          src            tmp                                                 
+(base) kangli.s5e@login44:~/AlphaTrade> pwd                                                                                                                                                
+/projects/s5e/quant/AlphaTrade                                                                                                                                                             
+(base) kangli.s5e@login44:~/AlphaTrade> cd maxtext/                                                                                                                                        
+(base) kangli.s5e@login44:~/AlphaTrade/maxtext> pwd                                                                                                                                        
+/projects/s5e/quant/AlphaTrade/maxtext                                                                                                                                                     
+(base) kangli.s5e@login44:~/AlphaTrade/maxtext> ls                                                                                                                                         
+AUTHORS     build_hooks.py   core          docs        LICENSE         pedagogical_examples  preflight.sh  pylintrc        pytest.ini  RESTRUCTURE.md  src    tools                        
+benchmarks  CONTRIBUTING.md  dependencies  end_to_end  local_datasets  PREFLIGHT.md          __pycache__   pyproject.toml  README.md   rto_setup.sh    tests                               
+(base) kangli.s5e@login44:~/AlphaTrade/maxtext> cd ..
+(base) kangli.s5e@login44:~/AlphaTrade> cd HyperscaleES
+(base) kangli.s5e@login44:~/AlphaTrade/HyperscaleES> ls
+ 1.ini          claude       Dockerfile_gpu                                  gpt                  LICENSE                    pyproject.toml   slurm_scripts   tests
+ 2.ini          configs      eggroll.pdf                                     grok                 llm_experiments            README.org       src             To_Li.pdf
+ alex           core         gemini.sty                                      gymnax_experiments   mnist_experiments          rl_experiments   sweep
+ build_gpu.sh   Dockerfile  'git commit -m "Fix: Use XLA_FFI_DEFINE_H.ini'   image.png            PLAN_HLE_GAIA_EGGROLL.md   run_docker.sh    swe_smith_ft
+(base) kangli.s5e@login44:~/AlphaTrade/HyperscaleES> pwd
+/projects/s5e/quant/AlphaTrade/HyperscaleES
+(base) kangli.s5e@login44:~/AlphaTrade/HyperscaleES> 
+
+
+看完他俩的做法 
+看看我解决我的问题的过去的做法/projects/s5e/quant/AlphaTrade/LOBS5/tasks/B1_task
+如果不够帮我看看我过去20个commit（LOBS5） 尝试解决这个问题的尝试
+描述一下路径 写到更新到/projects/s5e/quant/AlphaTrade/LOBS5/tasks/B1_task里
+
+看完他俩（maxtext Hyperscalees）的做法 以及我LOBS5过去的问题
+看看如果帮我（LOBS5）实现目标（实现真正的 DDP (全局 Mesh) — 多节点梯度同步  ）
