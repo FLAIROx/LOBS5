@@ -209,7 +209,6 @@ def train(args):
                os.path.abspath(f'checkpoints/job_{os.environ.get("SLURM_JOB_ID", "local")}/')
     if process_count > 1:
         # Multi-node: broadcast rank 0's checkpoint dir to all ranks
-        import jax.numpy as jnp
         if is_main_process:
             # Encode path as fixed-length byte array
             path_bytes = ckpt_dir.encode('utf-8')
