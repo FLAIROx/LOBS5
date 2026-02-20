@@ -162,11 +162,11 @@ export NCCL_TIMEOUT=3600
 # Verified: nvidia-smi topo -m shows NV6 between all GPU pairs.
 #export NCCL_P2P_DISABLE=1
 
-# NCCL collective algorithm — CAVEAT: both TREE and RING are slow on 4N Slingshot
-# NCCL_ALGO=TREE: crash (AllGather doesn't support TREE) — job 2382073
-# NCCL_ALGO="allreduce:tree": 21.83 s/step (TREE 2.2x SLOWER than RING) — job 2382095
-# NCCL_ALGO default (RING): 9.78 s/step — job 2381259
-# Root cause is NOT algorithm selection but Slingshot/CXI transport config (see below).
+# NCCL collective algorithm — both TREE and RING are slow on 4N Slingshot
+# NCCL_ALGO=TREE: crash, AllGather does not support TREE — job 2382073
+# NCCL_ALGO=allreduce:tree: 21.83 s/step, TREE 2.2x SLOWER than RING — job 2382095
+# NCCL_ALGO default RING: 9.78 s/step — job 2381259
+# Root cause is NOT algorithm selection but Slingshot/CXI transport config below.
 #export NCCL_ALGO="allreduce:tree"
 
 # Slingshot/CXI optimization (ref: CSCS Alps + ALCF standard)
