@@ -119,8 +119,9 @@ def train(args):
         # Initialize mesh first (needed for restore and JIT step functions)
         # Multi-node: global mesh over ALL devices for cross-node gradient sync
         # Single-node: local mesh over num_devices GPUs
+        use_hierarchical = getattr(args, 'hierarchical', False)
         if jax.process_count() > 1:
-            mesh = initialize_mesh(jax.device_count())
+            mesh = initialize_mesh(jax.device_count(), hierarchical=use_hierarchical)
         else:
             mesh = initialize_mesh(args.num_devices)
 
@@ -168,7 +169,10 @@ def train(args):
         total_devices = jax.device_count() if jax.process_count() > 1 else args.num_devices
         print(f"[*] State distributed via sharding (replicated across {total_devices} devices)")
 
-        jit_train_step = create_jit_train_step(mesh, state, has_book_data=args.use_book_data)
+        jit_train_step = create_jit_train_step(
+            mesh, state, has_book_data=args.use_book_data,
+            hierarchical=use_hierarchical,
+            batchnorm=args.batchnorm, ignore_times=args.ignore_times)
         jit_eval_step = create_jit_eval_step(mesh, state, has_book_data=args.use_book_data)
 
     # Training Loop over epochs

@@ -1065,8 +1065,16 @@ def swap_leading(targetsize,x):
 # JIT-compiled step functions (replacement for @pmap decorators)
 # ============================================================================
 
-def create_jit_train_step(mesh, state, has_book_data=True):
-    """Create JIT-compiled train_step with explicit sharding."""
+def create_jit_train_step(mesh, state, has_book_data=True, hierarchical=False,
+                          batchnorm=False, ignore_times=True):
+    """Create JIT-compiled train_step with explicit sharding.
+
+    hierarchical=True: uses shard_map + explicit pmean('gpus') + pmean('nodes')
+    for hierarchical AllReduce on 2D mesh. Requires mesh with ('nodes','gpus') axes.
+    """
+    if hierarchical:
+        return _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times)
+
     from lob.sharding_utils import create_state_shardings, get_data_shardings_for_batch
 
     state_shardings = create_state_shardings(state, mesh)
@@ -1095,6 +1103,110 @@ def create_jit_train_step(mesh, state, has_book_data=True):
     )
     print("[JIT] Created JIT-compiled train_step with sharding")
     return jit_train_step
+
+
+def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times):
+    """Create shard_map-based train_step with hierarchical AllReduce.
+
+    Uses 2D mesh ('nodes', 'gpus') to decompose gradient reduction:
+    1. pmean('gpus')  — intra-node via NVLink (478 GB/s)
+    2. pmean('nodes') — inter-node via Slingshot
+
+    XLA combine threshold merges each group's pmean ops independently,
+    avoiding the BlueConnect + combine deadlock (C4 experiments).
+    """
+    from jax.experimental.shard_map import shard_map
+
+    batch_axis = ('nodes', 'gpus')
+
+    # in_specs must match pytree structure of each argument
+    if has_book_data:
+        in_data = (P(batch_axis, None), P(batch_axis, None))
+        in_times = (P(batch_axis, None), P(batch_axis, None))
+    else:
+        in_data = (P(batch_axis, None),)
+        in_times = (P(batch_axis, None),)
+
+    in_specs = (
+        P(),            # state — replicated
+        P(),            # rng — replicated
+        in_data,        # batch_inputs — sharded tuple
+        P(batch_axis),  # batch_labels — sharded
+        in_times,       # batch_integration_timesteps — sharded tuple
+    )
+    # state, loss, ce are replicated after pmean; logits replaced with dummy scalar
+    out_specs = (P(), P(), P(), P())
+
+    def sharded_step(state, rng, batch_inputs, batch_labels,
+                     batch_integration_timesteps):
+        """Per-shard train step with hierarchical gradient reduction."""
+        batch_inputs = repeat_book(*batch_inputs, True)
+
+        def loss_fn(params):
+            if batchnorm:
+                logits, mod_vars = state.apply_fn(
+                    {"params": params, "batch_stats": state.batch_stats},
+                    *batch_inputs, *batch_integration_timesteps,
+                    rngs={"dropout": rng},
+                    mutable=["intermediates", "batch_stats"],
+                    method='__call_ar__'
+                )
+            else:
+                logits, mod_vars = state.apply_fn(
+                    {"params": params},
+                    *batch_inputs, *batch_integration_timesteps,
+                    rngs={"dropout": rng},
+                    mutable=["intermediates"],
+                    method='__call_ar__'
+                )
+
+            ce = cross_entropy_loss(logits, batch_labels)
+            if ignore_times:
+                ce = ce.reshape(ce.shape[0], -1, Message_Tokenizer.MSG_LEN)
+                ce_1 = ce[:, :, :TIME_START_I]
+                ce_2 = ce[:, :, (TIME_END_I + 1):]
+                ce = np.concatenate([ce_1, ce_2], axis=2)
+                ce = ce.reshape(ce.shape[0], -1)
+
+            ce = np.mean(ce, axis=0)
+            loss = np.mean(ce)
+            return loss, (mod_vars, logits, ce)
+
+        (loss, (mod_vars, logits, ce)), grads = jax.value_and_grad(
+            loss_fn, has_aux=True)(state.params)
+
+        # ── Hierarchical AllReduce ──
+        # Level 1: NVLink within each node (4 GPUs, ~478 GB/s)
+        grads = jax.lax.pmean(grads, axis_name='gpus')
+        loss = jax.lax.pmean(loss, axis_name='gpus')
+        ce = jax.lax.pmean(ce, axis_name='gpus')
+        # Level 2: Slingshot across nodes (N nodes)
+        grads = jax.lax.pmean(grads, axis_name='nodes')
+        loss = jax.lax.pmean(loss, axis_name='nodes')
+        ce = jax.lax.pmean(ce, axis_name='nodes')
+
+        if batchnorm:
+            state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
+        else:
+            state = state.apply_gradients(grads=grads)
+
+        # Return dummy scalar for logits (not needed, avoids shipping per-shard data)
+        return state, loss, ce, np.float32(0.0)
+
+    mapped_fn = shard_map(sharded_step, mesh=mesh,
+                          in_specs=in_specs, out_specs=out_specs,
+                          check_rep=False)
+    jitted_fn = jax.jit(mapped_fn, donate_argnums=(0,))
+
+    # API-compatible wrapper: train_epoch passes batchnorm, ignore_times as args 6-7
+    def compatible_fn(state, rng, batch_inputs, batch_labels,
+                      batch_integration_timesteps, _batchnorm, _ignore_times):
+        return jitted_fn(state, rng, batch_inputs, batch_labels,
+                         batch_integration_timesteps)
+
+    print(f"[JIT] Created hierarchical shard_map train_step "
+          f"(2D mesh, pmean('gpus') + pmean('nodes'))")
+    return compatible_fn
 
 
 def create_jit_eval_step(mesh, state, has_book_data=True):

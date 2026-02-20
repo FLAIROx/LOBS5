@@ -18,23 +18,34 @@ from typing import Any, Tuple, Optional
 _GLOBAL_MESH = None
 
 
-def create_simple_mesh(num_devices: int) -> Mesh:
+def create_simple_mesh(num_devices: int, hierarchical: bool = False) -> Mesh:
     """
-    Create a simple data-parallel mesh.
+    Create a data-parallel mesh.
 
-    Single-node: mesh over local devices (num_devices GPUs).
-    Multi-node: GLOBAL mesh over ALL devices across all nodes.
-      JAX auto-inserts allreduce for replicated state + sharded data,
-      so no manual psum is needed in train_step.
+    hierarchical=False (default): 1D mesh ('data',) — flat AllReduce
+    hierarchical=True (multi-node): 2D mesh ('nodes', 'gpus') — enables
+      shard_map with per-axis pmean for hierarchical AllReduce:
+      pmean('gpus') via NVLink within node, pmean('nodes') via Slingshot.
+
+    Single-node: always 1D mesh (hierarchical ignored).
     """
     from jax.experimental import mesh_utils
     import numpy as np
 
     if jax.process_count() > 1:
-        # Global mesh: use ALL devices across all nodes for proper gradient sync
+        # Global mesh: use ALL devices across all nodes
         devices = jax.devices()
-        print(f"[Sharding] Multi-node mode: Process {jax.process_index()}/{jax.process_count()}")
-        print(f"[Sharding] Global mesh with {len(devices)} devices across {jax.process_count()} processes")
+        num_nodes = jax.process_count()
+        gpus_per_node = len(jax.local_devices())
+        print(f"[Sharding] Multi-node mode: Process {jax.process_index()}/{num_nodes}")
+        print(f"[Sharding] Global mesh with {len(devices)} devices across {num_nodes} processes")
+
+        if hierarchical:
+            # 2D mesh: (nodes, gpus) for shard_map hierarchical AllReduce
+            devices_2d = np.array(devices).reshape(num_nodes, gpus_per_node)
+            mesh = Mesh(devices_2d, axis_names=('nodes', 'gpus'))
+            print(f"[Sharding] 2D hierarchical mesh: ({num_nodes} nodes, {gpus_per_node} gpus)")
+            return mesh
     else:
         # Single-node: use local devices
         local_devs = jax.local_devices()
@@ -43,14 +54,14 @@ def create_simple_mesh(num_devices: int) -> Mesh:
 
     devices_array = np.array(devices).reshape(-1)
     mesh = Mesh(devices_array, axis_names=('data',))
-    print(f"[Sharding] Created mesh with {len(devices)} devices along 'data' axis")
+    print(f"[Sharding] Created 1D mesh with {len(devices)} devices along 'data' axis")
     return mesh
 
 
-def initialize_mesh(num_devices: int) -> Mesh:
+def initialize_mesh(num_devices: int, hierarchical: bool = False) -> Mesh:
     """Initialize the global mesh. Call once at training start."""
     global _GLOBAL_MESH
-    _GLOBAL_MESH = create_simple_mesh(num_devices)
+    _GLOBAL_MESH = create_simple_mesh(num_devices, hierarchical=hierarchical)
     return _GLOBAL_MESH
 
 
@@ -62,12 +73,24 @@ def get_global_mesh() -> Mesh:
     return _GLOBAL_MESH
 
 
+def _get_batch_axis(mesh: Mesh):
+    """Return the batch PartitionSpec axis based on mesh dimensionality.
+
+    1D mesh ('data',): returns 'data'
+    2D mesh ('nodes', 'gpus'): returns ('nodes', 'gpus') — shards across both
+    """
+    if len(mesh.axis_names) == 2 and 'nodes' in mesh.axis_names:
+        return ('nodes', 'gpus')
+    return 'data'
+
+
 def create_data_sharding(mesh: Mesh) -> NamedSharding:
     """
-    Create sharding for data: batch dimension sharded along 'data' axis.
-    P('data', None) = first dim sharded, rest replicated.
+    Create sharding for data: batch dimension sharded along all mesh axes.
+    1D: P('data', None), 2D: P(('nodes','gpus'), None)
     """
-    return NamedSharding(mesh, P('data', None))
+    batch_axis = _get_batch_axis(mesh)
+    return NamedSharding(mesh, P(batch_axis, None))
 
 
 def create_replicated_sharding(mesh: Mesh) -> NamedSharding:
@@ -113,9 +136,11 @@ def get_data_shardings_for_batch(
     """
     Create shardings for batch data components.
     Returns (inputs_sharding, labels_sharding, integration_times_sharding).
+    Auto-detects 1D vs 2D mesh for correct PartitionSpecs.
     """
+    batch_axis = _get_batch_axis(mesh)
     data_sharding_2d = create_data_sharding(mesh)
-    data_sharding_1d = NamedSharding(mesh, P('data'))
+    data_sharding_1d = NamedSharding(mesh, P(batch_axis))
 
     if has_book_data:
         inputs_sharding = (data_sharding_2d, data_sharding_2d)

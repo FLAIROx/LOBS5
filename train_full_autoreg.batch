@@ -253,7 +253,8 @@ python -u -B run_train.py \
     --bsz='"$PER_PROCESS_BSZ"' \
     ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS} \
     ${RESTORE_PATH:+--restore=$RESTORE_PATH} \
-    ${RESTORE_STEP:+--restore_step=$RESTORE_STEP}
+    ${RESTORE_STEP:+--restore_step=$RESTORE_STEP} \
+    ${HIERARCHICAL:+--hierarchical=$HIERARCHICAL}
 '
 
 echo "============================================"
