@@ -54,23 +54,25 @@ def make_DPLR_HiPPO(N):
         eigenvectors V, HiPPO B pre-conjugation
 
     """
-    # Force CPU execution: eigh() needs cuSolver handles which fail at 128+ GPU scale
-    # (gpusolverDnCreate contention). These are tiny NxN matrices, CPU is fine.
-    cpu = jax.devices('cpu')[0]
-    with jax.default_device(cpu):
-        A, P, B = make_NPLR_HiPPO(N)
+    A, P, B = make_NPLR_HiPPO(N)
 
-        S = A + P[:, np.newaxis] * P[np.newaxis, :]
+    S = A + P[:, np.newaxis] * P[np.newaxis, :]
 
-        S_diag = np.diagonal(S)
-        Lambda_real = np.mean(S_diag) * np.ones_like(S_diag)
+    S_diag = np.diagonal(S)
+    Lambda_real = np.mean(S_diag) * np.ones_like(S_diag)
 
-        # Diagonalize S to V \Lambda V^*
-        Lambda_imag, V = eigh(S * -1j)
+    # Use numpy eigh instead of JAX eigh to avoid cuSolver handle contention
+    # at 128+ GPU scale (gpusolverDnCreate fails with 128 simultaneous CUDA contexts).
+    # These are tiny NxN matrices (N=16), CPU is fine.
+    import numpy as onp
+    S_np = onp.asarray(S * -1j)
+    Lambda_imag_np, V_np = onp.linalg.eigh(S_np)
+    Lambda_imag = np.array(Lambda_imag_np)
+    V = np.array(V_np)
 
-        P = V.conj().T @ P
-        B_orig = B
-        B = V.conj().T @ B
+    P = V.conj().T @ P
+    B_orig = B
+    B = V.conj().T @ B
     return Lambda_real + 1j * Lambda_imag, P, B, V, B_orig
 
 
