@@ -162,14 +162,16 @@ export NCCL_TIMEOUT=3600
 # Verified: nvidia-smi topo -m shows NV6 between all GPU pairs.
 #export NCCL_P2P_DISABLE=1
 
-# NCCL collective algorithm — force TREE for 4N+ (16+ ranks)
+# NCCL collective algorithm — force TREE for AllReduce on 4N+ (16+ ranks)
 # CAVEAT: NCCL auto-tuner wrongly selects RING at 16 ranks on Slingshot/CXI,
 # causing AllReduce 45.65ms/call (vs TREE 1.43ms/call, 86x slower).
 # Profiler evidence: jobs 2381959(2N) vs 2381960(4N) — GEMM compute identical,
 # 100% bottleneck in RING AllReduce. 2N unaffected (already uses TREE).
 # TREE safe up to 64 ranks (16N); re-benchmark beyond that.
+# NOTE: Must use per-collective syntax — global NCCL_ALGO=TREE crashes AllGather
+# (AllGather only supports RING/PAT, not TREE). Requires NCCL 2.24+, we have 2.29.2.
 # Rollback: comment out this line (NCCL defaults to auto-select).
-export NCCL_ALGO=TREE
+export NCCL_ALGO="allreduce:tree"
 
 # Multi-node JAX distributed info
 echo "[Wrapper] SLURM_PROCID=${SLURM_PROCID:-0} (process rank)"
