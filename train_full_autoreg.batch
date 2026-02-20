@@ -143,14 +143,23 @@ export JAX_PLATFORMS="cuda"
 # CAVEAT: DO NOT re-enable these flags unless downgrading below JAX 0.9.0.1
 # CAVEAT: ssm-stable, HyperscaleES, MaxText all use XLA defaults (no flags)
 # Rollback to JAX 0.9.0: pip install jax==0.9.0 jaxlib==0.9.0 jax-cuda12-pjrt==0.9.0 jax-cuda12-plugin==0.9.0
-#export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false --xla_gpu_shard_autotuning=false}"
+# export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_triton_gemm=false --xla_gpu_shard_autotuning=false}"
+# Force all CUDA modules to load at startup (vs LAZY default which loads on first use).
+# Why EAGER: in multi-node training, lazy loading causes non-deterministic load timing
+# across nodes → NCCL collective timeouts and XLA autotuner device-binding races.
+# Trade-off: slightly slower startup, but eliminates mid-training CUDA load stalls.
 export CUDA_MODULE_LOADING=EAGER
 echo "[XLA] XLA_FLAGS=${XLA_FLAGS}"
 
 # NCCL config
 export NCCL_TIMEOUT=3600
-# Disable P2P: GH200 4-GPU nodes lack direct NVLink between GPUs
-export NCCL_P2P_DISABLE=1
+# CAVEAT — DO NOT re-enable NCCL_P2P_DISABLE=1
+# GH200 nodes HAVE NV6 (6x NVLink bonded, 478 GB/s) between all 4 GPUs.
+# P2P_DISABLE=1 forces intra-node comm to SHM (CPU memcpy, ~50 GB/s),
+# causing 25x slowdown on 4N+ (11.2 s/step vs 0.46 s/step).
+# 2N is unaffected because each NCCL comm has localRanks=1 (no intra-node comm).
+# Verified: nvidia-smi topo -m shows NV6 between all GPU pairs.
+#export NCCL_P2P_DISABLE=1
 
 # Multi-node JAX distributed info
 echo "[Wrapper] SLURM_PROCID=${SLURM_PROCID:-0} (process rank)"
