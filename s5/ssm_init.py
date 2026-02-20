@@ -1,3 +1,4 @@
+import jax
 from jax import random
 import jax.numpy as np
 from jax.nn.initializers import lecun_normal
@@ -53,19 +54,23 @@ def make_DPLR_HiPPO(N):
         eigenvectors V, HiPPO B pre-conjugation
 
     """
-    A, P, B = make_NPLR_HiPPO(N)
+    # Force CPU execution: eigh() needs cuSolver handles which fail at 128+ GPU scale
+    # (gpusolverDnCreate contention). These are tiny NxN matrices, CPU is fine.
+    cpu = jax.devices('cpu')[0]
+    with jax.default_device(cpu):
+        A, P, B = make_NPLR_HiPPO(N)
 
-    S = A + P[:, np.newaxis] * P[np.newaxis, :]
+        S = A + P[:, np.newaxis] * P[np.newaxis, :]
 
-    S_diag = np.diagonal(S)
-    Lambda_real = np.mean(S_diag) * np.ones_like(S_diag)
+        S_diag = np.diagonal(S)
+        Lambda_real = np.mean(S_diag) * np.ones_like(S_diag)
 
-    # Diagonalize S to V \Lambda V^*
-    Lambda_imag, V = eigh(S * -1j)
+        # Diagonalize S to V \Lambda V^*
+        Lambda_imag, V = eigh(S * -1j)
 
-    P = V.conj().T @ P
-    B_orig = B
-    B = V.conj().T @ B
+        P = V.conj().T @ P
+        B_orig = B
+        B = V.conj().T @ B
     return Lambda_real + 1j * Lambda_imag, P, B, V, B_orig
 
 
