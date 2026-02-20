@@ -1,5 +1,34 @@
 # Learned Lessons
 
+## B2: 1-128 GPU Scaling Benchmark with 2D Mesh + FSDP (2026-02-20)
+
+### Scaling Results (75M model, GOOG 2022, PER_GPU_BSZ=7)
+
+| GPU | Nodes | s/step | samp/s | eff% | 并行模式 |
+|-----|-------|--------|--------|------|----------|
+| 1   | 1     | 0.410  | 17.1   | 100% | 无并行 |
+| 2   | 1     | 0.430  | 32.6   | 95%  | DDP (1D mesh) |
+| 4   | 1     | 0.455  | 61.5   | 90%  | 纯 FSDP (2D mesh 1×4) |
+| 8   | 2     | 0.565  | 99.1   | 73%  | FSDP+DDP (2D mesh 2×4) |
+| 16  | 4     | 0.695  | 161.2  | 59%  | FSDP+DDP (2D mesh 4×4) |
+| 32  | 8     | 0.875  | 256.0  | 47%  | FSDP+DDP (2D mesh 8×4) |
+| 64  | 16    | 2.130  | 210.3  | 19%  | FSDP+DDP (2D mesh 16×4) ⚠ |
+| 128 | 32    | 1.745  | 513.5  | 23%  | FSDP+DDP (2D mesh 32×4) |
+
+### Key Findings
+1. **Scaling wall at 32 GPU** for 75M model — peak throughput/cost efficiency
+2. **2D Mesh vs 1D DDP**: 16 GPU 9.5x faster (0.695 vs 6.58 s/step)
+3. **Intra-node scaling** near-linear (90-100% eff), **cross-node** adds ~24% per doubling
+4. 64 GPU anomalously slower than 128 GPU (sharded autotuning kernel quality issue)
+
+### 128 GPU Fix Chain
+1. `numpy.linalg.eigh()` — avoid cuSolver handle contention at 128 CUDA contexts
+2. `--xla_gpu_shard_autotuning=false` for 32+ nodes — avoid DEVICE_TYPE_INVALID
+3. `NCCL_BUFFSIZE=2097152` — avoid NCCL OOM from 32-node channel buffers
+4. **Do NOT use shard_autotuning=false on 16 nodes** — causes 30+ min JIT freeze
+
+---
+
 ## A2: ssm_stable 22tok Scaleup (2026-02-08)
 
 ### BSZ Sweep Results (360M, 22tok, BF16, 96GB GH200)
@@ -176,3 +205,21 @@ warning `Allowed device set contains 8 devices, but platform only sees 4`。
   - `deduplicate_trainstate()`: `jax.device_get()` 对 replicated 全局数组仍有效
   - Orbax checkpoint: 可能风险（见上条），需实测
 - **ssm_stable 同样存在此 bug**: 需要同步修复（见 `tasks/B1_task/B1.18.feb/ssm_stable_global_mesh_fix.md`）
+
+## B2 BF16 Mixed Precision (2026-02-19)
+
+### BF16 Sandwich 策略
+- **Scan 必须 FP32**: BF16 的 7-bit 尾数在 14 层递归后累积误差 (1+ε)^14 ≈ 1.15，实测 NaN
+- **Matmul 可以 BF16**: B@u, C@xs 是单次矩阵乘，BF16 误差不累积，GH200 Tensor Core 2x 加速
+- **vmap→batch matmul**: 独立优化，消除 12000 次 Python 循环开销
+
+### XLA 多节点 Autotuner 修复
+- `--xla_gpu_autotune_level=0` 绝对禁止（性能退化 10-24x）
+- `--xla_gpu_shard_autotuning=false` 是正确方案: 禁用跨节点 autotune 分片，避免 DEVICE_TYPE_INVALID crash
+- 所有主流框架（MaxText, HyperscaleES）都用默认 level=4
+
+### BF16 速度提升
+- 1N: 1.69x faster (440→260 ms/step), 41% GPU-hrs 节省
+- 2N: 1.28x faster (460→360 ms/step), 22% GPU-hrs 节省
+- 2N 加速低于 1N 因为 allreduce 通信不受 BF16 影响（Amdahl 定律）
+- 精度完全无损: Val Loss 2.056 (BF16) vs 2.06 (FP32), Test Acc 62.50% (完全一致)
