@@ -921,8 +921,8 @@ def validate(state,
         # then convert to numpy to avoid XLA trace explosion on 2D mesh concat.
         from jax.experimental.multihost_utils import process_allgather
         import numpy as onp
-        losses.append(onp.asarray(process_allgather(loss)))
-        accuracies.append(onp.asarray(process_allgather(acc)))
+        losses.append(onp.asarray(process_allgather(loss, tiled=True)))
+        accuracies.append(onp.asarray(process_allgather(acc, tiled=True)))
         if curtail_epoch is not None and batch_idx>=curtail_epoch:
             print(f"Ending epoch early at step {batch_idx} due to curtail_epoch arg.")
             break
