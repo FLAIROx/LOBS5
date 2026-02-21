@@ -11,6 +11,8 @@ from lob.encoding import Message_Tokenizer
 from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 import sys
 import time
+import threading
+import signal
 
 import psutil
 import os
@@ -18,6 +20,44 @@ import os
 # Step-level timeout for NCCL hang detection (seconds).
 # Normal step ~1s; if D2H transfer exceeds this, likely NCCL deadlock.
 STEP_TIMEOUT = int(os.environ.get('STEP_TIMEOUT', '300'))
+
+# Watchdog timeout per training step (seconds). Daemon thread fires SIGTERM if exceeded.
+WATCHDOG_TIMEOUT = int(os.environ.get('WATCHDOG_TIMEOUT', '120'))
+
+
+class StepWatchdog:
+    """Per-step watchdog using threading.Timer.
+
+    Call kick() at the start of each step and stop() at the end of each epoch.
+    If kick() is not called again within `timeout` seconds, the process is
+    killed with SIGTERM so SLURM can clean up and the job can be restarted
+    from the last checkpoint.
+
+    Unlike the D2H-based watchdog (which itself hangs when NCCL is stuck),
+    this runs on a daemon thread that is independent of GPU operations.
+    """
+    def __init__(self, timeout=WATCHDOG_TIMEOUT):
+        self.timeout = timeout
+        self._timer = None
+
+    def kick(self, epoch, batch_idx):
+        if self._timer:
+            self._timer.cancel()
+        self._timer = threading.Timer(
+            self.timeout, self._abort, args=(epoch, batch_idx))
+        self._timer.daemon = True
+        self._timer.start()
+
+    def stop(self):
+        if self._timer:
+            self._timer.cancel()
+            self._timer = None
+
+    def _abort(self, epoch, batch_idx):
+        msg = (f"FATAL: Step watchdog timeout ({self.timeout}s) "
+               f"at epoch {epoch} batch {batch_idx}. Likely NCCL deadlock.")
+        print(msg, flush=True)
+        os.kill(os.getpid(), signal.SIGTERM)
 # from lob.lob_seq_model import LobPredModel
 
 
@@ -600,8 +640,10 @@ def train_epoch(
         step = int(state.step)
 
     epoch_start = time.monotonic()
+    watchdog = StepWatchdog()
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     for batch_idx, batch in enumerate(tqdm(trainloader)):
+        watchdog.kick(epoch, batch_idx)
         # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
         # print(f"train_epoch: Batch input shape: {batch[0].shape}, batch target shape: {batch[1].shape}")
         if not debug_loading:
@@ -674,9 +716,9 @@ def train_epoch(
                       f"avg {avg_step_time:.2f} s/step")
         else:
             continue
-        
-    
-        
+
+
+    watchdog.stop()
     # Return average loss over batches
     if log_ce_tables:
         ce_means=np.mean(np.concatenate(cross_entropies,axis=0),axis=0)
@@ -1206,10 +1248,12 @@ def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times
         grads = jax.lax.pmean(grads, axis_name='gpus')
         loss = jax.lax.pmean(loss, axis_name='gpus')
         ce = jax.lax.pmean(ce, axis_name='gpus')
-        # Level 2: Slingshot across nodes (N nodes)
+        # Level 2: Slingshot across nodes — grads only
+        # loss/ce are logging-only (not used for gradient updates).
+        # Skipping their cross-node pmean reduces Slingshot AllReduces by ~40%,
+        # lowering the probability of transient fabric deadlocks (job 2426449).
+        # train_epoch aggregates per-step losses via np.mean(batch_losses) anyway.
         grads = jax.lax.pmean(grads, axis_name='nodes')
-        loss = jax.lax.pmean(loss, axis_name='nodes')
-        ce = jax.lax.pmean(ce, axis_name='nodes')
 
         if batchnorm:
             state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])

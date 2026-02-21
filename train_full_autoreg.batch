@@ -303,6 +303,17 @@ export NCCL_NCHANNELS_PER_NET_PEER=4
 #export FI_CXI_RX_MATCH_MODE=software
 #export FI_MR_CACHE_MONITOR=userfaultfd
 
+# Slingshot CXI resilience — prevent transient fabric errors from becoming permanent deadlocks
+# NOTE: The commented-out FI_CXI_* above are PERFORMANCE tuning (37% slower, harmful).
+# These are RESILIENCE tuning — no normal-path performance impact, only fault recovery.
+# Root cause of job 2426449 hang: CXI rendezvous default retries=5, exhausted on transient error.
+if [ "${NNODES}" -ge 8 ]; then
+  export FI_CXI_RDZV_RETRIES=100           # default=5, survive transient Slingshot fabric errors
+  export FI_CXI_OFLOW_BUF_SIZE=8388608     # 8MB overflow buffer (prevent CXI ENOMEM under bursty traffic)
+  export FI_CXI_REQ_BUF_SIZE=8388608       # 8MB request buffer (reduce flow control stalls)
+  echo "[CXI] ${NNODES}N: FI_CXI resilience enabled (RDZV_RETRIES=100, bufs=8MB)"
+fi
+
 # Multi-node JAX distributed info
 echo "[Wrapper] SLURM_PROCID=${SLURM_PROCID:-0} (process rank)"
 echo "[Wrapper] SLURM_NNODES=${SLURM_NNODES:-1} (total nodes)"
