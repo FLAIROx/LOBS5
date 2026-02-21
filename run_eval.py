@@ -80,7 +80,8 @@ def eval(eval_args):
             seed=args.jax_seed,
             mask_fn=mask_fn,
             msg_seq_len=args.msg_seq_len,
-            bsz=args.bsz,
+            micro_bsz=args.micro_bsz,
+            num_devices=args.num_devices,
             use_book_data=args.use_book_data,
             use_simple_book=args.use_simple_book,
             book_transform=args.book_transform,
@@ -126,7 +127,7 @@ def eval(eval_args):
 
 
         #Pass an initial hidden state to be used in case of the 'RNN' forward pass being used. 
-        init_hidden=model_cls().initialize_carry(batch_size=args.bsz//args.num_devices,
+        init_hidden=model_cls().initialize_carry(batch_size=args.micro_bsz,
                                                 hidden_size=(ssm_size // pow(2,int(args.conj_sym))),
                                                 n_message_layers=args.n_message_layers,
                                                 n_book_pre_layers=args.n_book_pre_layers ,
@@ -227,8 +228,8 @@ if __name__ == "__main__":
                     help="wandb entity name, e.g. username")
     parser.add_argument("--n_data_workers", type=int, default=0,
                     help="number of workers used in DataLoader")
-    parser.add_argument("--bsz", type=int, default=16, #64, (max 16 with full size)
-                    help="batch size")
+    parser.add_argument("--micro_bsz", type=int, default=16,
+                    help="per-GPU (micro) batch size")
     parser.add_argument("--num_devices", type=int, default=1,
                     help="number of devices (GPUs) to use")
     parser.add_argument("--USE_WANDB", type=str2bool, default=True,

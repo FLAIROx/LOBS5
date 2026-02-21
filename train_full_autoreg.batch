@@ -13,6 +13,52 @@
 # --- 32-node 24h production submit command ---
 # sbatch --nodes=32 --time=24:00:00 train_full_autoreg.batch
 #
+# ============================================
+# LR Scaling Theory for Batch Size Changes
+# ============================================
+#
+# When scaling batch size by factor κ = new_BSZ / old_BSZ:
+#
+# (a) Linear Scaling (LR × κ) — for SGD
+#     Goyal et al. 2017, "Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour"
+#     Ref: https://arxiv.org/abs/1706.02677
+#
+#     SGD update:  Δw = -LR × ∇L(w)
+#     Gradient noise:  Var(∇L) ∝ σ² / B
+#     When B × κ: gradient variance ÷ κ → LR must also × κ
+#     Applies to: SGD (with momentum), CV tasks, medium batch (8K-64K)
+#
+# (b) Square Root Scaling (LR × √κ) — for Adam/AdamW  ★ THIS PROJECT ★
+#     Hoffer et al. 2017; Krizhevsky 2014; Princeton SDE Framework 2024
+#     Ref: https://arxiv.org/abs/1705.03341
+#     Ref: https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
+#
+#     Adam update:  Δw = -LR × m̂ / (√v̂ + ε)
+#                              ↑ adaptive term already compensates noise
+#     Key difference:
+#       SGD:   noise → directly affects update direction & magnitude → full compensation → × κ
+#       Adam:  v̂ (2nd moment) already tracks gradient variance → only compensate "variance of variance" → × √κ
+#
+#     AED (Aligned Equation Derivation):
+#       Var(Adam_update) ∝ LR² × Var(m̂/(√v̂+ε))
+#                        ∝ LR² × 1/B     (approximation)
+#       To maintain Var constant:
+#         LR_new² / B_new = LR_old² / B_old
+#         LR_new = LR_old × √(B_new / B_old)
+#                = LR_old × √κ
+#
+#     2024 NeurIPS Surge Phenomenon (Ref: https://arxiv.org/abs/2405.14578):
+#       Adam's optimal LR is NOT monotonically increasing with batch size.
+#       Small→medium batch: LR ∝ √κ (growth phase)
+#       Medium→large batch: LR peaks then may decrease
+#       → Always do a sweep, don't blindly trust the formula.
+#
+# This project: AdamW optimizer (optax standard config), S5 SSM, 75M params
+#   Baseline:  BSZ=28  (7 GPU × 4/GPU),  LR=5e-4
+#   128 GPU:   BSZ=1536 (128 GPU × 12/GPU), κ=54.9, √κ=7.4 → LR≈3.7e-3
+#
+# ============================================
+#
 # --- ssm_lr_base sweep (32N, 80min, no curtail, normal training) ---
 # SSM_LR_BASE=1e-4  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
 # SSM_LR_BASE=3e-4  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
@@ -31,8 +77,8 @@
 #
 # Usage:
 #   # Batch size sweep (single node)
-#   for bsz in 1 2 4 8 12 16; do
-#       PER_GPU_BSZ=$bsz CURTAIL_EPOCHS=10 sbatch train_full_autoreg.batch
+#   for micro_bsz in 1 2 4 8 12 16; do
+#       PER_GPU_BSZ=$micro_bsz CURTAIL_EPOCHS=10 sbatch train_full_autoreg.batch
 #   done
 #
 #   # Full training (8 nodes) - update --nodes=8 first
@@ -311,7 +357,7 @@ python -u -B run_train.py \
     --ssm_size_base='"$SSM_SIZE_BASE"' \
     --ssm_lr_base='"$SSM_LR_BASE"' \
     --lr_factor='"$LR_FACTOR"' \
-    --bsz='"$PER_PROCESS_BSZ"' \
+    --micro_bsz='"$PER_GPU_BSZ"' \
     ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS} \
     ${RESTORE_PATH:+--restore=$RESTORE_PATH} \
     ${RESTORE_STEP:+--restore_step=$RESTORE_STEP} \
@@ -507,7 +553,7 @@ lr_min               0.0                                           -            
 32-Node Specific Values:
 Parameter            Value      Calculation
 ---------            -----      -----------
-steps_per_epoch      ~549       train_size / (bsz x proc_count)
+steps_per_epoch      ~549       train_size / (micro_bsz x num_devices x proc_count)
 warmup_steps         ~549       1 epoch
 cosine_steps         ~21,411    39 x 549
 total_steps          ~21,960    40 x 549
@@ -742,7 +788,7 @@ this branch from train_full_autoreg.batch (32N).  **Bold** = differs from argpar
 | 11 | --book_transform        | False                      | **True**                           | **True**                     | Data           |
 | 12 | --book_depth            | 500                        | 500 (default)                      | 500 (default)                 | Data           |
 | 13 | --msg_seq_len           | 500                        | 500                                | 500                           | Data           |
-| 14 | --bsz                   | 16                         | **28**                             | **32** (PER_PROCESS_BSZ)     | Data           |
+| 14 | --micro_bsz             | 16                         | **4** (28/7 GPUs)                  | **8** (PER_GPU_BSZ)          | Data           |
 | 15 | --num_devices           | 1                          | **7**                              | **4** (GPUS_PER_NODE)        | Hardware       |
 | 16 | --n_data_workers        | 0                          | **7**                              | **12**                       | Data           |
 | 17 | --random_offsets_train  | True                       | True                               | True                          | Data           |
@@ -801,7 +847,7 @@ this branch from train_full_autoreg.batch (32N).  **Bold** = differs from argpar
 | **test_dir_name**        | N/A (val=test from same dir)         | **JAN2023** (separate dir)            | Temporal extrapolation evaluation                      |
 | **hierarchical**         | N/A (single-node pmap)               | **True** (2D mesh shard_map)          | Multi-node DDP with NVLink+Slingshot hierarchy         |
 | **epochs**               | 400                                  | **40**                                | 10x fewer epochs (128 GPU compensates)                 |
-| **bsz**                  | 28 (7 GPU x 4/GPU)                  | **32** (4 GPU x 8/GPU per node)       | Hardware: 7 GPU -> 4 GPU/node                          |
+| **micro_bsz**            | 4 (28/7 GPUs)                       | **8** (PER_GPU_BSZ)                   | Hardware: 7 GPU -> 4 GPU/node                          |
 | **num_devices**           | 7                                   | **4** (per node)                      | GH200 = 4 GPU/node (vs original 7-GPU server)         |
 | **n_data_workers**        | 7                                   | **12**                                | More CPU cores on GH200 (72 per NUMA)                  |
 | **LR management**        | inject_hyperparams (Python scalars)  | **optax schedule** (inside JIT)       | inject_hyperparams caused NCCL deadlock on multi-node  |
@@ -840,17 +886,17 @@ this branch from train_full_autoreg.batch (32N).  **Bold** = differs from argpar
             v                  v                   v
      +-----------------------------------------------------+
      |        torch DataLoader (per rank)                   |
-     |   bsz=32 (PER_PROCESS_BSZ), workers=12               |
+     |   batch_size=micro_bsz*num_devices (per-process), workers=12 |
      |   DistributedSampler (epoch-aware shuffle)            |
-     |   Output: (messages[bsz,500,22], book[bsz,...])       |
+     |   Output: (messages[per_process_bsz,500,22], book[...]) |
      +-----------------------+-----------------------------+
                              |
                              v
      +-----------------------------------------------------+
      |  prep_batch() + make_array_from_process_local_data   |
-     |  -> inputs:  (msg[bsz,11000], book[bsz,...])         |
-     |  -> labels:  [bsz, 11000]                            |
-     |  -> times:   [bsz, 11000]                            |
+     |  -> inputs:  (msg[per_process_bsz,11000], book[...])  |
+     |  -> labels:  [per_process_bsz, 11000]                |
+     |  -> times:   [per_process_bsz, 11000]                |
      |  Sharding: P(('nodes','gpus'), None)                  |
      +-----------------------+-----------------------------+
                              |
@@ -858,7 +904,7 @@ this branch from train_full_autoreg.batch (32N).  **Bold** = differs from argpar
      +-----------------------------------------------------+
      |     shard_map(sharded_step, mesh=2D(32,4))           |
      |                                                      |
-     |  Per-shard (1 GPU, bsz=8):                           |
+     |  Per-shard (1 GPU, micro_bsz=8):                      |
      |    logits = model(msg[8,11000], book[8,...])          |
      |    ce = cross_entropy_loss(logits, labels)            |
      |    if ignore_times:                                   |

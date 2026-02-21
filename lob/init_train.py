@@ -306,8 +306,8 @@ def init_train_state(
     lr_schedule = None
     if train_size > 0:
         process_count = getattr(args, 'process_count', jax.process_count())
-        # args.bsz is per-process BSZ; global BSZ = bsz * process_count
-        steps_per_epoch = train_size // (args.bsz * process_count)
+        # args.micro_bsz is per-GPU BSZ; global BSZ = micro_bsz * num_devices * process_count
+        steps_per_epoch = train_size // (args.micro_bsz * args.num_devices * process_count)
         if hasattr(args, 'curtail_epochs') and args.curtail_epochs is not None:
             steps_per_epoch = min(steps_per_epoch, args.curtail_epochs + 1)
         total_steps = steps_per_epoch * args.epochs
@@ -344,7 +344,7 @@ def init_train_state(
         in_dim=1, # in_dim,
         book_dim=book_dim,
         book_seq_len=book_seq_len,
-        bsz=args.bsz,
+        micro_bsz=args.micro_bsz,
         seq_len=seq_len,
         weight_decay=args.weight_decay,
         batchnorm=args.batchnorm,

@@ -22,7 +22,8 @@ def create_lobster_prediction_dataset(
 		seed: int = 42,
 		mask_fn = LOBSTER_Dataset.no_mask,
 		msg_seq_len: int = 500,
-		bsz: int=128,
+		micro_bsz: int=128,
+		num_devices: int=4,
 		use_book_data: bool = False,
 		use_simple_book: bool = False,
 		book_transform: bool = False,
@@ -80,8 +81,9 @@ def create_lobster_prediction_dataset(
 	#trn_sampler = LOBSTER_Sampler(
 	#		dataset_obj.dataset_train, n_files_shuffle=5, batch_size=1, seed=seed)
 	
+	per_process_bsz = micro_bsz * num_devices
 	trn_loader = create_lobster_train_loader(
-		dataset_obj, seed, bsz, n_data_workers, reset_train_offsets=rand_offset, shuffle=shuffle_train,
+		dataset_obj, seed, per_process_bsz, n_data_workers, reset_train_offsets=rand_offset, shuffle=shuffle_train,
 		pin_memory=pin_memory, prefetch_factor=prefetch_factor, persistent_workers=persistent_workers,
 		use_distributed_sampler=use_distributed_sampler, process_rank=process_rank, process_count=process_count)
 	# NOTE: drop_last=True recompiles the model for a smaller batch size
@@ -100,11 +102,11 @@ def create_lobster_prediction_dataset(
 		print(f"[*] Test DistributedSampler: rank={process_rank}/{process_count}, "
 			  f"samples_per_node={len(tst_sampler)}")
 	val_loader = make_data_loader(
-		dataset_obj.dataset_val, dataset_obj, seed=seed, batch_size=bsz,
+		dataset_obj.dataset_val, dataset_obj, seed=seed, batch_size=per_process_bsz,
 		drop_last=True, shuffle=False, sampler=val_sampler, num_workers=n_data_workers,
 		pin_memory=pin_memory, prefetch_factor=prefetch_factor, persistent_workers=persistent_workers)
 	tst_loader = make_data_loader(
-		dataset_obj.dataset_test, dataset_obj, seed=seed, batch_size=bsz,
+		dataset_obj.dataset_test, dataset_obj, seed=seed, batch_size=per_process_bsz,
 		drop_last=True, shuffle=False, sampler=tst_sampler, num_workers=n_data_workers,
 		pin_memory=pin_memory, prefetch_factor=prefetch_factor, persistent_workers=persistent_workers)
 
@@ -120,7 +122,7 @@ def create_lobster_prediction_dataset(
 	return (dataset_obj, trn_loader, val_loader, tst_loader, aux_loaders, 
 	 		N_CLASSES, SEQ_LENGTH, IN_DIM, BOOK_SEQ_LEN, BOOK_DIM, TRAIN_SIZE)
 
-def create_lobster_train_loader(dataset_obj, seed, bsz, num_workers, reset_train_offsets=False, shuffle=True,
+def create_lobster_train_loader(dataset_obj, seed, per_process_bsz, num_workers, reset_train_offsets=False, shuffle=True,
 								pin_memory=True, prefetch_factor=2, persistent_workers=True,
 								use_distributed_sampler=False, process_rank=0, process_count=1):
 	if reset_train_offsets:
@@ -145,7 +147,7 @@ def create_lobster_train_loader(dataset_obj, seed, bsz, num_workers, reset_train
 		dataset_obj.dataset_train,
 		dataset_obj,
 		seed=seed,
-		batch_size=bsz,
+		batch_size=per_process_bsz,
 		shuffle=shuffle,
 		drop_last=True,
 		sampler=train_sampler,

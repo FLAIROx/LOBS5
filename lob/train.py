@@ -84,7 +84,8 @@ def train(args):
             seed=args.jax_seed,
             mask_fn=mask_fn,
             msg_seq_len=args.msg_seq_len,
-            bsz=args.bsz,
+            micro_bsz=args.micro_bsz,
+            num_devices=args.num_devices,
             use_book_data=args.use_book_data,
             use_simple_book=args.use_simple_book,
             book_transform=args.book_transform,
@@ -153,7 +154,7 @@ def train(args):
             restored_metrics = ckpt.get('metrics', {})
 
         val_model = model_cls(training=False, step_rescale=1)
-        init_hidden=model_cls().initialize_carry(batch_size=args.bsz//args.num_devices,
+        init_hidden=model_cls().initialize_carry(batch_size=args.micro_bsz,
                                                 hidden_size=(ssm_size // pow(2,int(args.conj_sym))),
                                                 n_message_layers=args.n_message_layers,
                                                 n_book_pre_layers=args.n_book_pre_layers ,
@@ -190,7 +191,7 @@ def train(args):
         best_test_acc = restored_metrics.get('acc_test_rnn', best_test_acc)
         print(f"[Restore] Best metrics restored: val_loss={best_loss:.5f}, val_acc={best_acc:.4f}, "
               f"test_loss={best_test_loss:.5f}, test_acc={best_test_acc:.4f}")
-    steps_per_epoch = int(train_size / (args.bsz * process_count)) if args.curtail_epochs is None else args.curtail_epochs+1
+    steps_per_epoch = int(train_size / (args.micro_bsz * args.num_devices * process_count)) if args.curtail_epochs is None else args.curtail_epochs+1
 
     # Create LR schedule functions for wandb logging (optax manages LR inside JIT)
     total_steps = steps_per_epoch * args.epochs
