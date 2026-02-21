@@ -160,11 +160,23 @@ export XLA_FLAGS="${XLA_FLAGS} \
   --xla_gpu_enable_latency_hiding_scheduler=true \
   --xla_gpu_enable_highest_priority_async_stream=true"
 
+# 32+ nodes: disable shard_autotuning to avoid DEVICE_TYPE_INVALID race
+# CAVEAT: 16N and below MUST use default (sharded autotune). Disabling at 16N → JIT stall >30min (job 2421931)
+if [ "${NNODES}" -ge 32 ]; then
+  export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_shard_autotuning=false"
+  echo "[XLA] 32+ nodes: shard_autotuning disabled"
+fi
+
 export CUDA_MODULE_LOADING=EAGER
 echo "[XLA] XLA_FLAGS=${XLA_FLAGS}"
 
 # NCCL config
 export NCCL_TIMEOUT=3600
+# 32+ nodes: increase NCCL buffer to prevent channel OOM
+if [ "${NNODES}" -ge 32 ]; then
+  export NCCL_BUFFSIZE=2097152
+  echo "[NCCL] 32+ nodes: NCCL_BUFFSIZE=2MB"
+fi
 # CAVEAT — DO NOT re-enable NCCL_P2P_DISABLE=1
 # GH200 nodes HAVE NV6 (6x NVLink bonded, 478 GB/s) between all 4 GPUs.
 # P2P_DISABLE=1 forces intra-node comm to SHM (CPU memcpy, ~50 GB/s),

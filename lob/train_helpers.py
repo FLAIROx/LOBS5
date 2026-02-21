@@ -916,23 +916,26 @@ def validate(state,
         #     print("Done Printing")
 
 
-        losses.append(loss)
-        accuracies.append(acc)
+        # device_get → numpy before append: avoids XLA trace explosion
+        # on 2D mesh when concatenating 200+ sharded arrays (C5 hang fix)
+        losses.append(jax.device_get(loss))
+        accuracies.append(jax.device_get(acc))
         if curtail_epoch is not None and batch_idx>=curtail_epoch:
             print(f"Ending epoch early at step {batch_idx} due to curtail_epoch arg.")
             break
 
-    concat_loss=np.concatenate(losses,axis=0)
-    concat_acc=np.concatenate(accuracies,axis=0)
+    import numpy as onp
+    concat_loss=onp.concatenate(losses,axis=0)
+    concat_acc=onp.concatenate(accuracies,axis=0)
     print(f"Concat Loss is {concat_loss.shape}")
     print(f"Concat Acc is {concat_acc.shape}")
     if log_ce_tables:
-        acc_means=np.mean(concat_acc,axis=(0,1))
-        ce_means=np.mean(concat_loss,axis=(0,1))
+        acc_means=onp.mean(concat_acc,axis=(0,1))
+        ce_means=onp.mean(concat_loss,axis=(0,1))
     else:
         ce_means=None
         acc_means=None
-    aveloss, aveaccu = np.mean(concat_loss), np.mean(np.asarray(accuracies))
+    aveloss, aveaccu = onp.mean(concat_loss), onp.mean(onp.asarray(accuracies))
     del losses, accuracies
     return aveloss, aveaccu, ce_means,acc_means
 
