@@ -253,7 +253,11 @@ export CUDA_MODULE_LOADING=EAGER
 echo "[XLA] XLA_FLAGS=${XLA_FLAGS}"
 
 # NCCL config
-export NCCL_TIMEOUT=3600
+# NCCL_TIMEOUT=3600 did NOT prevent a 6h hang at 32N (job 2426449, epoch 14 step 356).
+# Multiple timeout mechanisms for broader NCCL version compatibility:
+export NCCL_TIMEOUT=600                     # 10 min (NCCL 2.19+, seconds)
+export NCCL_BLOCKING_WAIT=0                 # Non-blocking wait mode (NCCL 2.x)
+export NCCL_ASYNC_ERROR_HANDLING=1           # Async error handling (NCCL 2.13+)
 
 # NCCL_BUFFSIZE=2MB — CRITICAL for multi-node shard_map performance
 # Experimentally verified (C5a, 2026-02-21):

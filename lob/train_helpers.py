@@ -10,9 +10,14 @@ from typing import Any, Dict, Optional, Tuple, Union
 from lob.encoding import Message_Tokenizer
 from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 import sys
+import time
 
 import psutil
 import os
+
+# Step-level timeout for NCCL hang detection (seconds).
+# Normal step ~1s; if D2H transfer exceeds this, likely NCCL deadlock.
+STEP_TIMEOUT = int(os.environ.get('STEP_TIMEOUT', '300'))
 # from lob.lob_seq_model import LobPredModel
 
 
@@ -593,6 +598,8 @@ def train_epoch(
         decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min = lr_params
     else:
         step = int(state.step)
+
+    epoch_start = time.monotonic()
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     for batch_idx, batch in enumerate(tqdm(trainloader)):
         # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
@@ -636,8 +643,18 @@ def train_epoch(
                 cross_entropies.append(ce)
 
             if use_optax_schedules:
-                # LR managed by optax — no manual update needed
-                step = int(state.step)
+                # Python counter avoids per-step D2H sync (async dispatch friendly).
+                # Periodic watchdog every 100 steps uses int(state.step) to detect NCCL hangs.
+                step += 1
+                if batch_idx % 100 == 99:
+                    t0 = time.monotonic()
+                    _device_step = int(state.step)
+                    d2h_elapsed = time.monotonic() - t0
+                    if d2h_elapsed > STEP_TIMEOUT:
+                        print(f"FATAL: D2H transfer took {d2h_elapsed:.1f}s "
+                              f"(threshold={STEP_TIMEOUT}s). NCCL collective likely deadlocked. "
+                              f"Epoch {epoch}, batch {batch_idx}, global_step {step}")
+                        raise TimeoutError(f"NCCL hang detected at epoch {epoch} step {step}")
             else:
                 # Legacy mode: manual per-step LR update
                 lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
@@ -649,6 +666,12 @@ def train_epoch(
             if (curtail_epochs is not None) and (batch_idx>=curtail_epochs):
                 print("Ending epoch early at step", step, "due to curtail_epoch arg.")
                 break
+
+            # Periodic timing log for hang diagnosis
+            if batch_idx % 100 == 99 and batch_idx > 0:
+                avg_step_time = (time.monotonic() - epoch_start) / (batch_idx + 1)
+                print(f"[Timing] Epoch {epoch} step {batch_idx+1}/{len(trainloader)}: "
+                      f"avg {avg_step_time:.2f} s/step")
         else:
             continue
         
