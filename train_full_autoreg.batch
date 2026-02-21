@@ -131,7 +131,13 @@ export LD_LIBRARY_PATH=/tools/brics/apps/linux-sles15-neoverse_v2/gcc-12.3.0/aws
 
 # JAX environment
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+# 32+ nodes: 2D mesh creates two NCCL communicators (gpus+nodes), more buffer needed
+# Reduce JAX memory to leave room for NCCL channel buffers
+if [ "${NNODES}" -ge 32 ]; then
+  export XLA_PYTHON_CLIENT_MEM_FRACTION=0.80
+else
+  export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+fi
 export JAX_PLATFORMS="cuda"
 export TF_GPU_ALLOCATOR=cuda_malloc_async
 
