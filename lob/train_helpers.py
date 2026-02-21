@@ -87,6 +87,7 @@ def create_lobs5_learning_rate_schedule(
 
         def make_cos_schedule(init_lr, final_lr, len_steps):
             """Custom cosine schedule matching LOBS5's original cosine_annealing."""
+            len_steps = max(len_steps, 1)  # Guard: CURTAIL_EPOCHS can make cosine_steps=0
             def schedule(step):
                 pct = step / len_steps
                 pct = np.minimum(pct, 1.0)
