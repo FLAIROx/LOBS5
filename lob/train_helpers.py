@@ -916,10 +916,13 @@ def validate(state,
         #     print("Done Printing")
 
 
-        # device_get → numpy before append: avoids XLA trace explosion
-        # on 2D mesh when concatenating 200+ sharded arrays (C5 hang fix)
-        losses.append(jax.device_get(loss))
-        accuracies.append(jax.device_get(acc))
+        # Multi-host: loss/acc are global arrays spanning non-local devices.
+        # jax.device_get() fails on these. Use process_allgather first,
+        # then convert to numpy to avoid XLA trace explosion on 2D mesh concat.
+        from jax.experimental.multihost_utils import process_allgather
+        import numpy as onp
+        losses.append(onp.asarray(process_allgather(loss)))
+        accuracies.append(onp.asarray(process_allgather(acc)))
         if curtail_epoch is not None and batch_idx>=curtail_epoch:
             print(f"Ending epoch early at step {batch_idx} due to curtail_epoch arg.")
             break
