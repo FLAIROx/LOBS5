@@ -72,6 +72,7 @@ cd "$WORKDIR"
 # Configuration
 GPUS_PER_NODE=${GPUS_PER_NODE:-4}
 NNODES=$SLURM_NNODES
+export NNODES  # Must export for bash -c wrapper to see it
 TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
 
 # Calculate batch sizes
