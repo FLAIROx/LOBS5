@@ -13,12 +13,14 @@
 # --- 32-node 24h production submit command ---
 # sbatch --nodes=32 --time=24:00:00 train_full_autoreg.batch
 #
-# --- ssm_lr_base sweep (32N, 1h, no curtail, normal training) ---
-# SSM_LR_BASE=1e-4  sbatch --nodes=32 --time=01:00:00 train_full_autoreg.batch
-# SSM_LR_BASE=3e-4  sbatch --nodes=32 --time=01:00:00 train_full_autoreg.batch
-# SSM_LR_BASE=5e-4  sbatch --nodes=32 --time=01:00:00 train_full_autoreg.batch  # current default
-# SSM_LR_BASE=1e-3  sbatch --nodes=32 --time=01:00:00 train_full_autoreg.batch  # argparse default
-# SSM_LR_BASE=2e-3  sbatch --nodes=32 --time=01:00:00 train_full_autoreg.batch
+# --- ssm_lr_base sweep (32N, 80min, no curtail, normal training) ---
+# SSM_LR_BASE=1e-4  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
+# SSM_LR_BASE=3e-4  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
+# SSM_LR_BASE=5e-4  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch  # current default ★
+# SSM_LR_BASE=1e-3  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch  # argparse default
+# SSM_LR_BASE=2e-3  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
+# SSM_LR_BASE=5e-3  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
+# SSM_LR_BASE=1e-2  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
 
 # ============================================
 # 75M Model Training Script (22 token mode)
@@ -296,7 +298,7 @@ python -u -B run_train.py \
     --random_offsets_train=True \
     --shuffle_train=True \
     --debug_overfit=False \
-    --ignore_times=True \
+    --ignore_times='"${IGNORE_TIMES:-True}"' \
     --lr_patience=4 \
     --d_model='"$D_MODEL"' \
     --n_layers='"$N_LAYERS"' \
