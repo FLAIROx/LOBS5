@@ -154,12 +154,17 @@ export LD_LIBRARY_PATH=/tools/brics/apps/linux-sles15-neoverse_v2/gcc-12.3.0/aws
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
 # 2D mesh (hierarchical) creates two NCCL communicators (gpus+nodes), more buffer needed
 # 32+ nodes: 0.80 (double communicators at scale); 8-16N: 0.85 (moderate overhead)
-if [ "${NNODES}" -ge 32 ] && [ "${HIERARCHICAL}" = "True" ]; then
-  export XLA_PYTHON_CLIENT_MEM_FRACTION=0.80
-elif [ "${NNODES}" -ge 8 ] && [ "${HIERARCHICAL}" = "True" ]; then
-  export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
+# Override with MEM_FRACTION env var for BSZ tuning (e.g. MEM_FRACTION=0.85)
+if [ -z "${MEM_FRACTION}" ]; then
+  if [ "${NNODES}" -ge 32 ] && [ "${HIERARCHICAL}" = "True" ]; then
+    export XLA_PYTHON_CLIENT_MEM_FRACTION=0.80
+  elif [ "${NNODES}" -ge 8 ] && [ "${HIERARCHICAL}" = "True" ]; then
+    export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
+  else
+    export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+  fi
 else
-  export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+  export XLA_PYTHON_CLIENT_MEM_FRACTION=${MEM_FRACTION}
 fi
 export JAX_PLATFORMS="cuda"
 export TF_GPU_ALLOCATOR=cuda_malloc_async
