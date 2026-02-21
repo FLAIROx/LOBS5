@@ -40,6 +40,14 @@
 # Default per-GPU batch size (can be overridden via environment variable)
 export PER_GPU_BSZ=${PER_GPU_BSZ:-8}
 
+# Multi-node: default to hierarchical shard_map (2D mesh)
+# Hierarchical splits allreduce into NVLink (intra-node) + Slingshot (inter-node)
+# Without it, 32N is 2.18x slower (2.05 vs 0.94 s/step) due to flat 128-GPU ring
+# Job 2426414: forgot HIERARCHICAL=True → 1D flat mesh → 2.05 s/step (should be 0.94)
+if [ "${SLURM_NNODES:-1}" -ge 2 ]; then
+  export HIERARCHICAL=${HIERARCHICAL:-True}
+fi
+
 echo "============================================"
 echo "Job started at: $(date)"
 echo "Job ID: $SLURM_JOB_ID"
