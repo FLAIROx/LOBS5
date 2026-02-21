@@ -689,6 +689,11 @@ def train_epoch(
                 # Periodic watchdog every 100 steps uses int(state.step) to detect NCCL hangs.
                 step += 1
                 if batch_idx % 100 == 99:
+                    # Reset watchdog BEFORE D2H sync — the sync materializes all
+                    # accumulated async computations, which can take >120s on first
+                    # check (XLA warmup + 99 steps of async backlog). The timer
+                    # should only measure the D2H transfer itself, not the backlog.
+                    watchdog.kick(epoch, batch_idx)
                     t0 = time.monotonic()
                     _device_step = int(state.step)
                     d2h_elapsed = time.monotonic() - t0
