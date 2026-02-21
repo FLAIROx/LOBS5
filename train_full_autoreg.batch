@@ -183,11 +183,24 @@ echo "[XLA] XLA_FLAGS=${XLA_FLAGS}"
 
 # NCCL config
 export NCCL_TIMEOUT=3600
-# 32+ nodes: increase NCCL buffer to prevent channel OOM
-if [ "${NNODES}" -ge 32 ]; then
+
+# NCCL_BUFFSIZE=2MB — CRITICAL for multi-node shard_map performance
+# Experimentally verified (C5a, 2026-02-21):
+#   16N + BUFF=default(4MB): 1.58 s/step (34.8% eff) — Jobs 2424845, 2425406, 2426301
+#   16N + BUFF=2MB:          0.66 s/step (83.3% eff) — Job 2426303  → 2.4x faster!
+#   32N + BUFF=2MB:          0.94 s/step (58.5% eff) — Job 2424846
+# With 40 NCCL channels (default on GH200), 4MB per channel saturates Slingshot
+# injection bandwidth. 2MB reduces per-chunk size, improving pipeline efficiency.
+# This is the sole cause of the previous 16N<32N efficiency anomaly.
+if [ "${NNODES}" -ge 2 ]; then
   export NCCL_BUFFSIZE=2097152
-  echo "[NCCL] 32+ nodes: NCCL_BUFFSIZE=2MB"
+  echo "[NCCL] Multi-node: NCCL_BUFFSIZE=2MB (verified 2.4x speedup at 16N)"
 fi
+
+# Isambard GH200 Slingshot best practices (ref: docs.isambard.ac.uk, NCCL Issue #1272)
+# Experimentally: no measurable impact alone (1.60 vs 1.58 s/step), but recommended.
+export NCCL_MIN_NCHANNELS=4
+export NCCL_NCHANNELS_PER_NET_PEER=4
 # CAVEAT — DO NOT re-enable NCCL_P2P_DISABLE=1
 # GH200 nodes HAVE NV6 (6x NVLink bonded, 478 GB/s) between all 4 GPUs.
 # P2P_DISABLE=1 forces intra-node comm to SHM (CPU memcpy, ~50 GB/s),
