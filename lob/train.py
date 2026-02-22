@@ -364,8 +364,8 @@ def train(args):
 
         if valloader is not None:
             # Eval watchdog: kill process if val/test eval hangs (e.g. NCCL deadlock).
-            # 600s timeout covers JIT compilation (~50s) + eval batches (~100s) with margin.
-            eval_watchdog = StepWatchdog(timeout=600)
+            # 1200s (20min) timeout: 600s was too aggressive at 32N scale (job 2438369).
+            eval_watchdog = StepWatchdog(timeout=1200)
             eval_watchdog.kick(epoch, 0)
 
             print(f"[*] Running Epoch {epoch + 1} Validation ") #on train set (With call)...
@@ -416,7 +416,7 @@ def train(args):
 
         else:
             # else use test set as validation set (e.g. IMDB)
-            eval_watchdog = StepWatchdog(timeout=600)
+            eval_watchdog = StepWatchdog(timeout=1200)
             eval_watchdog.kick(epoch, 0)
             print(f"[*] Running Epoch {epoch + 1} Test...")
             # print("Testing on train data (diff offset) for debugging purposes")
