@@ -33,7 +33,9 @@ def train(args):
     else:
         if args.USE_WANDB and is_main_process:
             # Rank 0: online sync to wandb cloud
-            run = wandb.init(project=args.wandb_project, job_type='model_training', config=vars(args), entity=args.wandb_entity)
+            slurm_job_id = os.environ.get("SLURM_JOB_ID", "")
+            wandb_name = f"j{slurm_job_id}" if slurm_job_id else None
+            run = wandb.init(project=args.wandb_project, job_type='model_training', config=vars(args), entity=args.wandb_entity, name=wandb_name)
         elif args.USE_WANDB:
             # Non-rank-0: local logging only, no duplicate cloud runs
             run = wandb.init(mode='offline')
@@ -210,8 +212,9 @@ def train(args):
     # Global mesh: ALL ranks must create CheckpointManager so Orbax barriers work.
     # Use SLURM_JOB_ID for consistent path across ranks (wandb run names differ per rank).
     # Orbax primary_host=0 ensures only rank 0 writes; others just participate in barriers.
-    ckpt_dir = os.path.abspath(f'checkpoints/{run.name}_{run.id}/') if is_main_process else \
-               os.path.abspath(f'checkpoints/job_{os.environ.get("SLURM_JOB_ID", "local")}/')
+    slurm_jid = os.environ.get("SLURM_JOB_ID", "local")
+    ckpt_dir = os.path.abspath(f'checkpoints/{run.name}_{run.id}_{slurm_jid}/') if is_main_process else \
+               os.path.abspath(f'checkpoints/job_{slurm_jid}/')
     if process_count > 1:
         # Multi-node: broadcast rank 0's checkpoint dir to all ranks
         if is_main_process:
