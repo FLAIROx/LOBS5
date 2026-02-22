@@ -22,7 +22,7 @@ import os
 STEP_TIMEOUT = int(os.environ.get('STEP_TIMEOUT', '300'))
 
 # Watchdog timeout per training step (seconds). Daemon thread fires os._exit if exceeded.
-WATCHDOG_TIMEOUT = int(os.environ.get('WATCHDOG_TIMEOUT', '120'))
+WATCHDOG_TIMEOUT = int(os.environ.get('WATCHDOG_TIMEOUT', '900'))  # 15 min
 
 # Grace period: first N steps use WATCHDOG_WARMUP_TIMEOUT instead of WATCHDOG_TIMEOUT.
 # XLA autotuning + NCCL channel init are one-time costs that make early steps 100x slower.
