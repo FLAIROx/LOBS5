@@ -1183,7 +1183,7 @@ def eval_step(
         ce=ce.reshape(ce.shape[0],-1)
         accs=ce
 
-    return losses, accs, np.float32(0.0)  # dummy: logits not used, saves ~6 GiB eval buffer
+    return losses, accs, logits
 
 
 def eval_rnn_scan(apply_fn,hiddens,state,batch_inputs,batch_dones,batch_inttimes,batchnorm):
