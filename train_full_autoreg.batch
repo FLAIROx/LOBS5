@@ -69,6 +69,16 @@
 # SSM_LR_BASE=1e-2  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
 
 # ============================================
+# Reproduce baseline_full_autoreg (GOOG 2022)
+# ============================================
+# Baseline branch: baseline_full_autoreg at commit 9386d01 (2026-01-27)
+# Original runs: twilight-sound-77 (bsz=28, 7GPU), sleek-night-72/robust-darkness-68 (bsz=32, 8GPU)
+# Original config: micro_bsz=4, ignore_times=False, ssm_lr_base=5e-4, epochs=40
+# Created: 2026-02-22
+#
+# PER_GPU_BSZ=1 IGNORE_TIMES=False EPOCHS=40 sbatch --nodes=8 --time=24:00:00 train_full_autoreg.batch
+#
+# ============================================
 # 75M Model Training Script (22 token mode)
 # ============================================
 # Branch: exp/B1-ignore-times (based on baseline_full_autoreg)
