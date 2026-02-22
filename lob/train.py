@@ -3,6 +3,7 @@ import sys
 import time
 import jax
 from jax import random
+from jax.experimental.multihost_utils import sync_global_devices
 import jax.numpy as jnp
 import flax
 import orbax.checkpoint as ocp
@@ -362,6 +363,14 @@ def train(args):
         print(f"val model hash: {val_model.__hash__()}")
         print(f"val model apply hash: {val_model.__hash__()}")
 
+        # Barrier: sync all ranks before eval to prevent NCCL deadlock.
+        # Without this, rank timing differences from GC/checkpoint I/O can cause
+        # one rank to enter eval's NCCL collective while others are still delayed
+        # → timeout → deadlock (observed in jobs 2438014, 2438369 at eval step 0).
+        # Standard practice in JAX ecosystem (Orbax uses sync_global_processes).
+        if is_distributed:
+            sync_global_devices(f"pre_eval_epoch_{epoch}")
+
         if valloader is not None:
             # Eval watchdog: kill process if val/test eval hangs (e.g. NCCL deadlock).
             # 1200s (20min) timeout: 600s was too aggressive at 32N scale (job 2438369).
@@ -565,6 +574,11 @@ def train(args):
         gc.collect()
         # jax.clear_caches()  # Removed: recompiles each epoch + NCCL clique accumulation
         # jax.profiler.stop_trace()
+        # Barrier: sync all ranks after epoch cleanup before next iteration.
+        # gc.collect() timing varies across ranks; without this, fast ranks may
+        # start next epoch's train while slow ranks are still in GC.
+        if is_distributed:
+            sync_global_devices(f"post_epoch_{epoch}")
         if count > args.early_stop_patience:
             break
 
