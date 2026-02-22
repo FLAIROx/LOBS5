@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import jax
 from jax import random
 import jax.numpy as jnp
@@ -137,6 +138,7 @@ def train(args):
                 # args.__dict__,
                 step=args.restore_step,
                 mesh=mesh,
+                partial_restore=getattr(args, 'partial_restore', False),
             )
             state = ckpt['model']
             # Debug: verify restored state
@@ -259,12 +261,45 @@ def train(args):
 
     start_epoch = 0
     if args.restore is not None and args.restore != '':
-        if args.restore_step is not None:
-            start_epoch = args.restore_step + 1
-        else:
-            # Infer from state.step: epoch ≈ step / steps_per_epoch
-            start_epoch = int(state.step) // max(steps_per_epoch, 1)
+        # Always infer from state.step (works for both epoch-end and mid-epoch checkpoints)
+        start_epoch = int(state.step) // max(steps_per_epoch, 1)
         print(f"[Restore] Resuming training from epoch {start_epoch} (of {args.epochs})")
+
+    # Mid-epoch checkpoint: callback + resume state
+    job_start_time = time.monotonic()
+    resume_from_step = getattr(args, 'resume_from_step', None)
+
+    def step_checkpoint_callback(cb_state, cb_epoch, cb_batch_idx, cb_loss, save_flag=True):
+        """Mid-epoch: log to wandb and optionally save checkpoint."""
+        global_step = int(cb_state.step)
+        if is_main_process and args.USE_WANDB:
+            wandb.log({
+                "step_loss": float(cb_loss),
+                "epoch": cb_epoch + 1,
+                "step_in_epoch": cb_batch_idx + 1,
+                "global_step": global_step,
+            }, step=global_step)
+        if save_flag:
+            if is_distributed:
+                ckpt_st = jax.jit(lambda s: s, out_shardings=state_shardings)(cb_state)
+            else:
+                ckpt_st = deduplicate_trainstate(cb_state)
+            ckpt = {
+                'model': ckpt_st,
+                'config': vars(args) if is_main_process else {},
+                'metrics': {
+                    'loss_train': float(cb_loss),
+                    'epoch': cb_epoch,
+                    'step_in_epoch': cb_batch_idx,
+                }
+            }
+            try:
+                save_checkpoint(ckpt_mgr, ckpt, global_step)
+                if is_main_process:
+                    print(f"[Checkpoint] Mid-epoch save: epoch={cb_epoch}, "
+                          f"step={cb_batch_idx}, global_step={global_step}")
+            except (OSError, ValueError) as e:
+                print(f"[Checkpoint] WARNING: mid-epoch save failed: {e}")
 
     for epoch in range(start_epoch, args.epochs):
         # Free residual memory from previous epoch's val/test before training
@@ -280,7 +315,7 @@ def train(args):
         train_rng, skey = random.split(train_rng)
 
         #Pass an initial hidden state to be used in case of the 'RNN' forward pass being used.
-        state, train_loss, ce_by_tok, step = train_epoch(state,
+        state, train_loss, ce_by_tok, interrupted_at_step = train_epoch(state,
                                               skey,
                                               trainloader,
                                               seq_len,
@@ -295,7 +330,25 @@ def train(args):
                                               ignore_times,
                                               args.log_ce_tables,
                                               mesh=mesh,
-                                              jit_train_step_fn=jit_train_step)
+                                              jit_train_step_fn=jit_train_step,
+                                              checkpoint_callback=step_checkpoint_callback,
+                                              checkpoint_every_n_steps=getattr(args, 'checkpoint_every_n_steps', 'auto'),
+                                              job_start_time=job_start_time,
+                                              max_job_hours=getattr(args, 'max_job_hours', 24.0),
+                                              save_before_timeout_minutes=getattr(args, 'save_before_timeout_minutes', 30),
+                                              resume_from_step=resume_from_step,
+                                              )
+        # resume_from_step only applies to the first epoch after restore
+        resume_from_step = None
+        step = int(state.step)
+
+        # Handle timeout interrupt: skip validation + epoch-end checkpoint, exit
+        if interrupted_at_step is not None:
+            if is_main_process:
+                print(f"[Train] Epoch {epoch+1} interrupted at step {interrupted_at_step} due to timeout")
+                print(f"[Train] To resume: RESTORE_PATH={ckpt_dir} RESTORE_STEP={step} "
+                      f"RESUME_FROM_STEP={interrupted_at_step}")
+            break
 
         if args.random_offsets_train:
             # Refresh random offsets in-place without rebuilding DataLoader.
@@ -395,7 +448,9 @@ def train(args):
             }
         }
         try:
-            save_checkpoint(ckpt_mgr, ckpt, epoch)
+            save_checkpoint(ckpt_mgr, ckpt, int(state.step))
+            if is_main_process:
+                print(f"[Checkpoint] Epoch-end save: epoch={epoch}, global_step={int(state.step)}")
         except (OSError, ValueError) as e:
             print(f"\n[FATAL] Checkpoint save failed at epoch {epoch}: {e}")
             print("[FATAL] Likely disk quota or serialization issue. Exiting.")

@@ -621,6 +621,13 @@ def train_epoch(
         log_ce_tables,
         mesh=None,
         jit_train_step_fn=None,
+        # ── Mid-epoch checkpoint parameters ──
+        checkpoint_callback=None,
+        checkpoint_every_n_steps="auto",
+        job_start_time=None,
+        max_job_hours=24.0,
+        save_before_timeout_minutes=30,
+        resume_from_step=None,
     ):
 
     """
@@ -641,8 +648,27 @@ def train_epoch(
 
     epoch_start = time.monotonic()
     watchdog = StepWatchdog()
+
+    # ── Mid-epoch checkpoint: auto vs manual mode ──
+    _ckpt_every_str = str(checkpoint_every_n_steps)
+    auto_checkpoint_mode = (_ckpt_every_str == "auto")
+    if auto_checkpoint_mode:
+        _ckpt_every = 0
+        last_checkpoint_time = time.monotonic()
+        last_wandb_log_time = time.monotonic()
+        AUTO_CKPT_INTERVAL = 1800   # 30 min
+        AUTO_WANDB_INTERVAL = 600   # 10 min
+    else:
+        _ckpt_every = int(_ckpt_every_str) if _ckpt_every_str != "0" else 0
+
+    if resume_from_step is not None:
+        print(f"[Resume] Skipping batches 0..{resume_from_step-1}, starting from batch_idx={resume_from_step}")
+
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     for batch_idx, batch in enumerate(tqdm(trainloader)):
+        # Skip batches when resuming mid-epoch
+        if resume_from_step is not None and batch_idx < resume_from_step:
+            continue
         watchdog.kick(epoch, batch_idx)
         # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
         # print(f"train_epoch: Batch input shape: {batch[0].shape}, batch target shape: {batch[1].shape}")
@@ -719,6 +745,51 @@ def train_epoch(
                 avg_step_time = (time.monotonic() - epoch_start) / (batch_idx + 1)
                 print(f"[Timing] Epoch {epoch} step {batch_idx+1}/{len(trainloader)}: "
                       f"avg {avg_step_time:.2f} s/step")
+
+            # ── Mid-epoch checkpoint ──
+            if checkpoint_callback is not None:
+                should_ckpt = False
+                should_wandb = False
+                timeout_imminent = False
+
+                # Manual mode: every N steps
+                if _ckpt_every > 0 and (batch_idx + 1) % _ckpt_every == 0:
+                    should_ckpt = True
+                    should_wandb = True
+
+                # Auto mode: time-based
+                if auto_checkpoint_mode:
+                    now = time.monotonic()
+                    if now - last_wandb_log_time >= AUTO_WANDB_INTERVAL:
+                        should_wandb = True
+                    if now - last_checkpoint_time >= AUTO_CKPT_INTERVAL:
+                        should_ckpt = True
+                        should_wandb = True
+
+                # Timeout: approaching job time limit
+                if job_start_time is not None:
+                    elapsed_h = (time.monotonic() - job_start_time) / 3600.0
+                    remaining_min = (max_job_hours - elapsed_h) * 60
+                    if remaining_min <= save_before_timeout_minutes:
+                        should_ckpt = True
+                        timeout_imminent = True
+
+                if should_wandb or should_ckpt:
+                    watchdog.kick(epoch, batch_idx)  # prevent watchdog kill during save
+                    checkpoint_callback(state, epoch, batch_idx, loss, should_ckpt)
+                    if auto_checkpoint_mode:
+                        if should_wandb:
+                            last_wandb_log_time = time.monotonic()
+                        if should_ckpt:
+                            last_checkpoint_time = time.monotonic()
+
+                if timeout_imminent:
+                    print(f"[Checkpoint] Timeout imminent! Saved at epoch={epoch}, step={batch_idx}")
+                    print(f"[Checkpoint] Resume: RESTORE_STEP={step} RESUME_FROM_STEP={batch_idx+1}")
+                    watchdog.stop()
+                    loss_mean = np.mean(np.array(batch_losses)) if batch_losses else float('nan')
+                    return state, loss_mean, None, batch_idx + 1
+
         else:
             continue
 
@@ -731,7 +802,7 @@ def train_epoch(
         ce_means=None
     # jax.debug.print("CE of epoch by token: {}",ce_means.shape)
     loss_mean=np.mean(np.array(batch_losses))
-    return state,loss_mean , ce_means,step
+    return state, loss_mean, ce_means, None
 
 
 @partial(jax.vmap,in_axes=(0,0,None),out_axes=(0,0))

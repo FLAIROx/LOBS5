@@ -137,6 +137,20 @@ if [ -n "$CURTAIL_EPOCHS" ]; then
     export CURTAIL_EPOCHS
 fi
 
+# Mid-epoch checkpoint: save every N steps or "auto" (30min time-based)
+CHECKPOINT_EVERY=${CHECKPOINT_EVERY:-"auto"}
+MAX_JOB_HOURS=${MAX_JOB_HOURS:-"24.0"}
+export CHECKPOINT_EVERY MAX_JOB_HOURS
+echo "[*] Mid-epoch checkpoint: every=$CHECKPOINT_EVERY, max_job_hours=$MAX_JOB_HOURS"
+
+# Restore from mid-epoch checkpoint
+if [ -n "$RESTORE_PATH" ]; then
+    echo "[*] Restore from: $RESTORE_PATH (step=${RESTORE_STEP:-latest})"
+fi
+if [ -n "$RESUME_FROM_STEP" ]; then
+    echo "[*] Resume from batch_idx=$RESUME_FROM_STEP within epoch"
+fi
+
 # Create logs directory
 mkdir -p logs_lobs5
 
@@ -386,7 +400,10 @@ python -u -B run_train.py \
     ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS} \
     ${RESTORE_PATH:+--restore=$RESTORE_PATH} \
     ${RESTORE_STEP:+--restore_step=$RESTORE_STEP} \
-    ${HIERARCHICAL:+--hierarchical=$HIERARCHICAL}
+    ${RESUME_FROM_STEP:+--resume_from_step=$RESUME_FROM_STEP} \
+    ${HIERARCHICAL:+--hierarchical=$HIERARCHICAL} \
+    --checkpoint_every_n_steps='"$CHECKPOINT_EVERY"' \
+    --max_job_hours='"$MAX_JOB_HOURS"'
 '
 
 echo "============================================"

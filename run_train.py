@@ -70,7 +70,18 @@ if __name__ == "__main__":
 		     			help="number of tick levels to use in book data [if book_transform=True]")
 	parser.add_argument("--restore", type=str,
 		     			help="if given restore from given checkpoint dir")
-	parser.add_argument("--restore_step", type=int)
+	parser.add_argument("--restore_step", type=int,
+						help="global step number to restore from (used as CheckpointManager key)")
+	parser.add_argument("--resume_from_step", type=int, default=None,
+						help="resume from this batch_idx within the start epoch (skip earlier batches)")
+	parser.add_argument("--partial_restore", action='store_true', default=False,
+						help="allow partial restore when model structure changed (strict=False)")
+	parser.add_argument("--checkpoint_every_n_steps", type=str, default="auto",
+						help="'auto' (30min), integer N, or '0' to disable mid-epoch checkpoints")
+	parser.add_argument("--max_job_hours", type=float, default=24.0,
+						help="max job duration in hours (for timeout checkpoint)")
+	parser.add_argument("--save_before_timeout_minutes", type=int, default=30,
+						help="save checkpoint this many minutes before job timeout")
 	parser.add_argument("--msg_seq_len", type=int, default=500,  # 500
 						help="How many past messages to include in each sample")
 	parser.add_argument("--n_data_workers", type=int, default=0,

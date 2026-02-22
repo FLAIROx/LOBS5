@@ -59,12 +59,11 @@ def load_args_from_checkpoint(
 def save_checkpoint(
         ckpt_mgr: ocp.CheckpointManager,
         ckpt: dict,
-        epoch: int,
+        step: int,
     ) -> bool:
-    """
-    """
+    """Save checkpoint keyed by step (global_step for mid-epoch, or epoch for epoch-end)."""
     return ckpt_mgr.save(
-        epoch,
+        step,
         # args=ocp.args.PyTreeSave(ckpt)
         args=ocp.args.Composite(
             # train state
@@ -122,6 +121,7 @@ def load_checkpoint(
         step: Optional[int] = None,
         train: bool = True,
         mesh=None,
+        partial_restore: bool = False,
     ) -> dict[str, Any]:
 
     mngr = ocp.CheckpointManager(
@@ -134,12 +134,16 @@ def load_checkpoint(
     if step is None:
         step = mngr.latest_step()
 
+    print(f"[Checkpoint] Loading step={step} from {path} "
+          f"(partial_restore={partial_restore})")
+
     loaded = mngr.restore(
         step,
         args=ocp.args.Composite(
             state=ocp.args.StandardRestore(
                 # only stored trainstate from a single device (as they are all the same)
-                deduplicate_trainstate(state)
+                deduplicate_trainstate(state),
+                strict=(not partial_restore),
             ),
             metadata=ocp.args.JsonRestore()
         )
