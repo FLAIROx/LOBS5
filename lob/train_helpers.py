@@ -729,7 +729,7 @@ def train_epoch(
                 loss.block_until_ready()
 
             # jit+sharding: loss is already a scalar (no device dimension)
-            batch_losses.append(loss)
+            batch_losses.append(float(loss))
             if log_ce_tables:
                 cross_entropies.append(ce)
 
@@ -810,7 +810,7 @@ def train_epoch(
                     print(f"[Checkpoint] Timeout imminent! Saved at epoch={epoch}, step={batch_idx}")
                     print(f"[Checkpoint] Resume: RESTORE_STEP={step} RESUME_FROM_STEP={batch_idx+1}")
                     watchdog.stop()
-                    loss_mean = np.mean(np.array(batch_losses)) if batch_losses else float('nan')
+                    loss_mean = sum(batch_losses) / len(batch_losses) if batch_losses else float('nan')
                     return state, loss_mean, None, batch_idx + 1
 
         else:
@@ -824,7 +824,7 @@ def train_epoch(
     else:
         ce_means=None
     # jax.debug.print("CE of epoch by token: {}",ce_means.shape)
-    loss_mean=np.mean(np.array(batch_losses))
+    loss_mean = sum(batch_losses) / len(batch_losses)
     return state, loss_mean, ce_means, None
 
 
@@ -1183,7 +1183,7 @@ def eval_step(
         ce=ce.reshape(ce.shape[0],-1)
         accs=ce
 
-    return losses, accs, logits
+    return losses, accs, np.float32(0.0)  # dummy: logits not used, saves ~6 GiB eval buffer
 
 
 def eval_rnn_scan(apply_fn,hiddens,state,batch_inputs,batch_dones,batch_inttimes,batchnorm):

@@ -269,6 +269,10 @@ def train(args):
     job_start_time = time.monotonic()
     resume_from_step = getattr(args, 'resume_from_step', None)
 
+    # Pre-compiled reshard function for checkpoints (reuses single JIT cache entry)
+    if is_distributed:
+        _reshard_for_ckpt = jax.jit(lambda s: s, out_shardings=state_shardings)
+
     def step_checkpoint_callback(cb_state, cb_epoch, cb_batch_idx, cb_loss, save_flag=True):
         """Mid-epoch: log to wandb and optionally save checkpoint."""
         global_step = int(cb_state.step)
@@ -281,7 +285,7 @@ def train(args):
             }, step=global_step)
         if save_flag:
             if is_distributed:
-                ckpt_st = jax.jit(lambda s: s, out_shardings=state_shardings)(cb_state)
+                ckpt_st = _reshard_for_ckpt(cb_state)
             else:
                 ckpt_st = deduplicate_trainstate(cb_state)
             ckpt = {
@@ -433,7 +437,7 @@ def train(args):
         # Multi-host: re-shard state to ensure consistent NamedSharding for Orbax.
         # Single-host: deduplicate to single device first.
         if is_distributed:
-            ckpt_state = jax.jit(lambda s: s, out_shardings=state_shardings)(state)
+            ckpt_state = _reshard_for_ckpt(state)
         else:
             ckpt_state = deduplicate_trainstate(state)
         ckpt = {
@@ -461,6 +465,7 @@ def train(args):
                     pass
             sys.exit(1)
         del ckpt  # Free GPU memory held by state copy
+        del ckpt_state  # Free re-sharded state copy (~1.5 GiB)
 
         # For early stopping purposes
         if val_loss < best_val_loss:
