@@ -13,7 +13,8 @@ from lob.init_train import init_train_state, load_checkpoint, save_checkpoint, d
 from lob.dataloading import create_lobster_prediction_dataset#, Datasets
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import reduce_lr_on_plateau, train_epoch, validate, \
-    create_jit_train_step, create_jit_eval_step, create_lobs5_learning_rate_schedule
+    create_jit_train_step, create_jit_eval_step, create_lobs5_learning_rate_schedule, \
+    StepWatchdog
 from lob.sharding_utils import initialize_mesh, create_state_shardings
 
 
@@ -362,6 +363,11 @@ def train(args):
         print(f"val model apply hash: {val_model.__hash__()}")
 
         if valloader is not None:
+            # Eval watchdog: kill process if val/test eval hangs (e.g. NCCL deadlock).
+            # 600s timeout covers JIT compilation (~50s) + eval batches (~100s) with margin.
+            eval_watchdog = StepWatchdog(timeout=600)
+            eval_watchdog.kick(epoch, 0)
+
             print(f"[*] Running Epoch {epoch + 1} Validation ") #on train set (With call)...
             (val_loss,
               val_acc,
@@ -381,6 +387,7 @@ def train(args):
                                         mesh=mesh,
                                         jit_eval_step_fn=jit_eval_step)
 
+            eval_watchdog.kick(epoch, 1)  # reset timer before test eval
             print(f"[*] Running Epoch {epoch + 1} Test ")
             (test_loss, test_acc,
               test_ce_means,test_acc_means) = validate(state,
@@ -398,6 +405,8 @@ def train(args):
                                            mesh=mesh,
                                            jit_eval_step_fn=jit_eval_step)
 
+            eval_watchdog.stop()
+
             print(f"\n=>> Epoch {epoch + 1} Metrics ===")
             print(
                 f"\tTrain Loss: {train_loss:.5f} -- Val Loss (AR): {val_loss:.5f} --Test Loss (RNN): {test_loss:.5f} --"
@@ -407,6 +416,8 @@ def train(args):
 
         else:
             # else use test set as validation set (e.g. IMDB)
+            eval_watchdog = StepWatchdog(timeout=600)
+            eval_watchdog.kick(epoch, 0)
             print(f"[*] Running Epoch {epoch + 1} Test...")
             # print("Testing on train data (diff offset) for debugging purposes")
             (test_loss, test_acc,
@@ -423,6 +434,7 @@ def train(args):
                                          log_ce_tables=args.log_ce_tables,
                                          mesh=mesh,
                                          jit_eval_step_fn=jit_eval_step)
+            eval_watchdog.stop()
             val_loss=test_loss
             val_acc=test_acc
 
