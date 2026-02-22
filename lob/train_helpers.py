@@ -21,8 +21,15 @@ import os
 # Normal step ~1s; if D2H transfer exceeds this, likely NCCL deadlock.
 STEP_TIMEOUT = int(os.environ.get('STEP_TIMEOUT', '300'))
 
-# Watchdog timeout per training step (seconds). Daemon thread fires SIGTERM if exceeded.
+# Watchdog timeout per training step (seconds). Daemon thread fires os._exit if exceeded.
 WATCHDOG_TIMEOUT = int(os.environ.get('WATCHDOG_TIMEOUT', '120'))
+
+# Grace period: first N steps use WATCHDOG_WARMUP_TIMEOUT instead of WATCHDOG_TIMEOUT.
+# XLA autotuning + NCCL channel init are one-time costs that make early steps 100x slower.
+# 32N: step 0-1 can take >120s each (JIT compile + autotune), causing false watchdog kills.
+# After ~50 steps the autotune cache is warm and steps drop to ~1s.
+WATCHDOG_WARMUP_STEPS = int(os.environ.get('WATCHDOG_WARMUP_STEPS', '50'))
+WATCHDOG_WARMUP_TIMEOUT = int(os.environ.get('WATCHDOG_WARMUP_TIMEOUT', '900'))  # 15 min
 
 
 class StepWatchdog:
@@ -30,21 +37,34 @@ class StepWatchdog:
 
     Call kick() at the start of each step and stop() at the end of each epoch.
     If kick() is not called again within `timeout` seconds, the process is
-    killed with SIGTERM so SLURM can clean up and the job can be restarted
+    killed with os._exit(1) so SLURM can clean up and the job can be restarted
     from the last checkpoint.
 
     Unlike the D2H-based watchdog (which itself hangs when NCCL is stuck),
     this runs on a daemon thread that is independent of GPU operations.
+
+    Warmup: the first WATCHDOG_WARMUP_STEPS steps use a longer timeout
+    (WATCHDOG_WARMUP_TIMEOUT) because XLA autotuning + NCCL channel init
+    make early steps 100x slower than steady state.
     """
-    def __init__(self, timeout=WATCHDOG_TIMEOUT):
+    def __init__(self, timeout=WATCHDOG_TIMEOUT,
+                 warmup_timeout=WATCHDOG_WARMUP_TIMEOUT,
+                 warmup_steps=WATCHDOG_WARMUP_STEPS):
         self.timeout = timeout
+        self.warmup_timeout = warmup_timeout
+        self.warmup_steps = warmup_steps
         self._timer = None
+        self._total_steps = 0
 
     def kick(self, epoch, batch_idx):
         if self._timer:
             self._timer.cancel()
+        effective_timeout = (self.warmup_timeout
+                             if self._total_steps < self.warmup_steps
+                             else self.timeout)
+        self._total_steps += 1
         self._timer = threading.Timer(
-            self.timeout, self._abort, args=(epoch, batch_idx))
+            effective_timeout, self._abort, args=(epoch, batch_idx))
         self._timer.daemon = True
         self._timer.start()
 
@@ -57,7 +77,10 @@ class StepWatchdog:
         msg = (f"FATAL: Step watchdog timeout ({self.timeout}s) "
                f"at epoch {epoch} batch {batch_idx}. Likely NCCL deadlock.")
         print(msg, flush=True)
-        os.kill(os.getpid(), signal.SIGTERM)
+        # CAVEAT: SIGTERM is caught by JAX's preemption_notifier (preemption_notifier.cc)
+        # which treats it as graceful shutdown — the process never actually exits.
+        # os._exit(1) bypasses all signal handlers and atexit hooks to guarantee termination.
+        os._exit(1)
 # from lob.lob_seq_model import LobPredModel
 
 

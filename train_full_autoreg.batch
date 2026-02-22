@@ -188,11 +188,14 @@ echo "[*] Train data: $DATA_DIR"
 echo "[*] Test data: $TEST_DIR"
 
 # Launch with srun (1 process per node, each managing GPUS_PER_NODE GPUs)
+# --kill-on-bad-exit=1: if ANY rank exits non-zero, srun kills ALL ranks immediately.
+# Without this, a watchdog-killed rank leaves 127 others stuck in NCCL wait forever.
 srun --nodes=$NNODES \
      --ntasks=$NNODES \
      --ntasks-per-node=1 \
      --gres=gpu:$GPUS_PER_NODE \
      --gpu-bind=map_gpu:0,1,2,3 \
+     --kill-on-bad-exit=1 \
      --output=logs_lobs5/training_${SLURM_JOB_ID}_node%n.log \
      --export=ALL \
      bash -c '
