@@ -1111,8 +1111,20 @@ def validate(state,
         ce_means=None
         acc_means=None
     aveloss, aveaccu = onp.mean(concat_loss), onp.mean(onp.asarray(accuracies))
+
+    # Last-order metrics: the final order in each 500-order sequence has the
+    # longest context (499 prior orders) and is most comparable to LOBS5's
+    # conditional generation setup.
+    tpm = (Message_Tokenizer.MSG_LEN - (TIME_END_I - TIME_START_I + 1)
+           if ignore_times else Message_Tokenizer.MSG_LEN)
+    last_order_losses = concat_loss[:, -tpm:]
+    last_order_accs = concat_acc[:, -tpm:]
+    last_order_loss = float(onp.mean(last_order_losses))
+    last_order_acc = float(onp.mean(last_order_accs))
+    last_order_ppl = float(onp.exp(last_order_loss))
+
     del losses, accuracies
-    return aveloss, aveaccu, ce_means,acc_means
+    return aveloss, aveaccu, ce_means, acc_means, last_order_loss, last_order_acc, last_order_ppl
 
 def eval_step(
         batch_inputs,
