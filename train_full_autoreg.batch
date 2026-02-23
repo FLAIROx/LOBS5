@@ -285,6 +285,7 @@ echo "[XLA] XLA_FLAGS=${XLA_FLAGS}"
 export NCCL_TIMEOUT=600                     # 10 min (NCCL 2.19+, seconds)
 export NCCL_BLOCKING_WAIT=0                 # Non-blocking wait mode (NCCL 2.x)
 export NCCL_ASYNC_ERROR_HANDLING=1           # Async error handling (NCCL 2.13+)
+export NCCL_LAUNCH_ORDER_IMPLICIT=1         # Implicit ordering for multi-communicator ops (NCCL 2.26+)
 
 # NCCL_BUFFSIZE=2MB — CRITICAL for multi-node shard_map performance
 # Experimentally verified (C5a, 2026-02-21):

@@ -1047,7 +1047,25 @@ def validate(state,
              log_ce_tables : bool =False,
              mesh=None,
              jit_eval_step_fn=None):
-    """Validation function that loops over batches"""
+    """Validation function — NCCL-deadlock-free for multi-host.
+
+    Instead of calling process_allgather per batch (which triggers 128-rank
+    NCCL AllGather and deadlocks at 32N scale), we read only local shards
+    via addressable_shards (zero NCCL communication).  Each host computes
+    metrics over its own 1/N_hosts subset; DistributedSampler guarantees
+    equal sample counts so local mean ≈ global mean.
+    """
+    import numpy as onp
+    is_multihost = (mesh is not None and jax.process_count() > 1)
+
+    # T5X pattern: assert all hosts have same number of eval batches.
+    # Mismatch → one host exits loop while others wait in collective → deadlock.
+    if is_multihost:
+        num_batches = len(testloader)
+        from jax.experimental.multihost_utils import assert_equal
+        assert_equal(np.array(num_batches),
+                     f"Eval batch count mismatch: rank {jax.process_index()}")
+
     losses, accuracies, preds = [], [], []
     for batch_idx, batch in enumerate(tqdm(testloader)):
         inputs, labels, integration_timesteps = prep_batch(batch, seq_len, num_devices)
@@ -1063,32 +1081,25 @@ def validate(state,
         eval_fn = jit_eval_step_fn if jit_eval_step_fn is not None else eval_step
         loss, acc, pred = eval_fn(
             inputs, labels, integration_timesteps, state, apply_fn, batchnorm,apply_method,init_hiddens,ignore_times)
-        # losses = np.append(losses, loss)
-        # accuracies = np.append(accuracies, acc)
 
-        # if (batch_idx==0) & (epoch%100==0): 
-        #     np.set_printoptions(threshold=sys.maxsize)
-        #     with open(f'/data1/sascha/data/losses/losses_batch_{batch_idx}_testing_applying_{apply_method}.txt', 'w') as f:
-        #         print(loss, file=f)
-        #     print("Printing logits of shape ", pred.shape, " to file")
-        #     with open(f'/data1/sascha/data/losses/logits_batch_{batch_idx}_testing_applying_{apply_method}.txt', 'w') as f:
-        #         print(pred[0,0,0:44,:], file=f)
-        #     np.set_printoptions()
-        #     print("Done Printing")
+        # Read loss/acc to numpy — zero NCCL communication path for multi-host.
+        # OLD (deadlocks at 32N): process_allgather(loss) triggers 128-rank AllGather per batch.
+        # NEW: addressable_shards reads only this host's local GPU data (no collective).
+        if is_multihost:
+            local_loss = onp.concatenate(
+                [onp.asarray(s.data) for s in loss.addressable_shards], axis=0)
+            local_acc = onp.concatenate(
+                [onp.asarray(s.data) for s in acc.addressable_shards], axis=0)
+            losses.append(local_loss)
+            accuracies.append(local_acc)
+        else:
+            losses.append(onp.asarray(loss))
+            accuracies.append(onp.asarray(acc))
 
-
-        # Multi-host: loss/acc are global arrays spanning non-local devices.
-        # jax.device_get() fails on these. Use process_allgather first,
-        # then convert to numpy to avoid XLA trace explosion on 2D mesh concat.
-        from jax.experimental.multihost_utils import process_allgather
-        import numpy as onp
-        losses.append(onp.asarray(process_allgather(loss, tiled=True)))
-        accuracies.append(onp.asarray(process_allgather(acc, tiled=True)))
         if curtail_epoch is not None and batch_idx>=curtail_epoch:
             print(f"Ending epoch early at step {batch_idx} due to curtail_epoch arg.")
             break
 
-    import numpy as onp
     concat_loss=onp.concatenate(losses,axis=0)
     concat_acc=onp.concatenate(accuracies,axis=0)
     print(f"Concat Loss is {concat_loss.shape}")

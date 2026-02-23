@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import math
 import jax
 from jax import random
 from jax.experimental.multihost_utils import sync_global_devices
@@ -419,16 +418,16 @@ def train(args):
                                            jit_eval_step_fn=jit_eval_step)
 
             eval_watchdog.stop()
-            val_msg_ppl = math.exp(val_loss * tokens_per_msg)
-            test_msg_ppl = math.exp(test_loss * tokens_per_msg)
+            val_log_msg_ppl = val_loss * tokens_per_msg
+            test_log_msg_ppl = test_loss * tokens_per_msg
 
             print(f"\n=>> Epoch {epoch + 1} Metrics ===")
             print(
                 f"\tTrain Loss: {train_loss:.5f} -- Val Loss (AR): {val_loss:.5f} --Test Loss (RNN): {test_loss:.5f} --"
                 f" Val Accuracy: {val_acc:.4f}"
                 f" Test Accuracy: {test_acc:.4f}"
-                f" Val Msg PPL: {val_msg_ppl:.2e}"
-                f" Test Msg PPL: {test_msg_ppl:.2e}"
+                f" Val Log Msg PPL: {val_log_msg_ppl:.4f}"
+                f" Test Log Msg PPL: {test_log_msg_ppl:.4f}"
             )
 
         else:
@@ -454,14 +453,14 @@ def train(args):
             eval_watchdog.stop()
             val_loss=test_loss
             val_acc=test_acc
-            test_msg_ppl = math.exp(test_loss * tokens_per_msg)
-            val_msg_ppl = test_msg_ppl
+            test_log_msg_ppl = test_loss * tokens_per_msg
+            val_log_msg_ppl = test_log_msg_ppl
 
             print(f"\n=>> Epoch {epoch + 1} Metrics ===")
             print(
                 f"\tTrain Loss: {train_loss:.5f}  --Test Loss: {val_loss:.5f} --"
                 f" Test Accuracy: {val_acc:.4f}"
-                f" Test Msg PPL: {test_msg_ppl:.2e}"
+                f" Test Log Msg PPL: {test_log_msg_ppl:.4f}"
             )
 
         # Save checkpoint — ALL ranks must call save() for Orbax barrier sync.
@@ -522,12 +521,12 @@ def train(args):
         _, _, lr_count, opt_acc = reduce_lr_on_plateau(input, factor=args.reduce_factor, patience=args.lr_patience, lr_min=args.lr_min)
 
         # Print best accuracy & loss so far...
-        best_test_msg_ppl = math.exp(best_test_loss * tokens_per_msg)
+        best_test_log_msg_ppl = best_test_loss * tokens_per_msg
         print(
             f"\tBest Val Loss: {best_loss:.5f} -- Best Val Accuracy:"
             f" {best_acc:.4f} at Epoch {best_epoch + 1}\n"
             f"\tBest Test Loss: {best_test_loss:.5f} -- Best Test Accuracy:"
-            f" {best_test_acc:.4f} -- Best Test Msg PPL: {best_test_msg_ppl:.2e}"
+            f" {best_test_acc:.4f} -- Best Test Log Msg PPL: {best_test_log_msg_ppl:.4f}"
             f" at Epoch {best_epoch + 1}\n"
         )
 
@@ -552,8 +551,8 @@ def train(args):
                     "Val Accuracy": val_acc,
                     "Test Loss": test_loss,
                     "Test Accuracy": test_acc,
-                    "Val Msg PPL": val_msg_ppl,
-                    "Test Msg PPL": test_msg_ppl,
+                    "Val Log Msg PPL": val_log_msg_ppl,
+                    "Test Log Msg PPL": test_log_msg_ppl,
                     "count": count,
                     "Learning rate count": lr_count,
                     "Opt acc": opt_acc,
@@ -567,7 +566,7 @@ def train(args):
                     "Training Loss": train_loss,
                     "Val loss": val_loss,
                     "Val Accuracy": val_acc,
-                    "Val Msg PPL": val_msg_ppl,
+                    "Val Log Msg PPL": val_log_msg_ppl,
                     "count": count,
                     "Learning rate count": lr_count,
                     "Opt acc": opt_acc,
@@ -583,7 +582,7 @@ def train(args):
         wandb.run.summary["Best Epoch"] = best_epoch
         wandb.run.summary["Best Test Loss"] = best_test_loss
         wandb.run.summary["Best Test Accuracy"] = best_test_acc
-        wandb.run.summary["Best Test Msg PPL"] = best_test_msg_ppl
+        wandb.run.summary["Best Test Log Msg PPL"] = best_test_log_msg_ppl
         # print("IGNORING EARLY STOPPING FOR TINY EPOCH SIZE ")
         # After each epoch: clear_caches causes JIT recompilation (~193s/epoch) and
         # accumulates NCCL cliques, leading to epoch-3+ OOM. Remove it.
