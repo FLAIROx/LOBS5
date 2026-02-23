@@ -269,7 +269,10 @@ export TF_GPU_ALLOCATOR=cuda_malloc_async
 export XLA_FLAGS="${XLA_FLAGS} \
   --xla_gpu_all_reduce_combine_threshold_bytes=134217728 \
   --xla_gpu_enable_latency_hiding_scheduler=true \
-  --xla_gpu_enable_highest_priority_async_stream=true"
+  --xla_gpu_enable_highest_priority_async_stream=true \
+  --xla_gpu_nccl_terminate_on_error=true \
+  --xla_gpu_nccl_termination_timeout_seconds=600 \
+  --xla_gpu_all_reduce_blueconnect_num_devices_per_host=4"
 
 # 8+ nodes with shard_map: disable shard_autotuning
 # The old CAVEAT (job 2421931: JIT >30min at 16N) was for 1D DDP without shard_map.
@@ -323,27 +326,49 @@ export NCCL_NCHANNELS_PER_NET_PEER=4
 # Root cause is XLA AllReduce combine threshold (see XLA_FLAGS above), not NCCL algo.
 #export NCCL_ALGO="allreduce:tree"
 
-# Slingshot/CXI optimization (ref: CSCS Alps + ALCF standard)
+# Slingshot/CXI optimization — PERFORMANCE tuning
 # TESTED job 2382150: 13.36 s/step — 37% WORSE than baseline (9.78).
-# These configs hurt on our Slingshot version. Do not re-enable without benchmarking.
-#export NCCL_CROSS_NIC=1
-#export NCCL_NET_GDR_LEVEL=PHB
-#export NCCL_PROTO=^LL128
-#export FI_CXI_DEFAULT_CQ_SIZE=131072
-#export FI_CXI_DEFAULT_TX_SIZE=16384
-#export FI_CXI_DISABLE_HOST_REGISTER=1
-#export FI_CXI_RX_MATCH_MODE=software
-#export FI_MR_CACHE_MONITOR=userfaultfd
+# Root cause of regression: NCCL_CROSS_NIC=1 + NCCL_NET_GDR_LEVEL=PHB, NOT the CXI hang-prevention vars.
+# These two are harmful on our Slingshot topology. Do not re-enable without single-variable benchmarking.
+#export NCCL_CROSS_NIC=1                   # CAVEAT: tested harmful (job 2382150)
+#export NCCL_NET_GDR_LEVEL=PHB             # CAVEAT: tested harmful (job 2382150)
+#export NCCL_PROTO=^LL128                  # TODO: test separately (CSCS says LL128 worse on Slingshot)
+#export FI_CXI_DEFAULT_CQ_SIZE=131072      # TODO: test separately
+#export FI_CXI_DEFAULT_TX_SIZE=16384       # TODO: test separately
+#export FI_CXI_RX_MATCH_MODE=software      # TODO: test separately (may affect small message perf)
 
-# Slingshot CXI resilience — prevent transient fabric errors from becoming permanent deadlocks
-# NOTE: The commented-out FI_CXI_* above are PERFORMANCE tuning (37% slower, harmful).
+# Slingshot CXI resilience — prevent NCCL deadlocks at 8+ nodes
 # These are RESILIENCE tuning — no normal-path performance impact, only fault recovery.
-# Root cause of job 2426449 hang: CXI rendezvous default retries=5, exhausted on transient error.
+# Root cause analysis (2026-02-23, HLO profiling + deep research):
+#   - eval_step has ZERO NCCL collectives (HLO verified, Job 2440089)
+#   - train_step has 336 AllReduce/step (169 intra-node + 167 inter-node)
+#   - 32N × 336 × 549 steps/epoch × 6 epochs = ~1.1M collectives before hang
+#   - NCCL 2.29.3 fixes ARM CAS weak failure (exactly our GH200 ARM platform)
+#   - CXI eager message race condition is CSCS+Isambard+ALCF consensus workaround
 if [ "${SLURM_NNODES:-1}" -ge 8 ]; then
+  # --- Existing resilience ---
   export FI_CXI_RDZV_RETRIES=100           # default=5, survive transient Slingshot fabric errors
   export FI_CXI_OFLOW_BUF_SIZE=8388608     # 8MB overflow buffer (prevent CXI ENOMEM under bursty traffic)
   export FI_CXI_REQ_BUF_SIZE=8388608       # 8MB request buffer (reduce flow control stalls)
-  echo "[CXI] ${SLURM_NNODES}N: FI_CXI resilience enabled (RDZV_RETRIES=100, bufs=8MB)"
+
+  # --- NEW: CXI hang prevention (CSCS + Isambard + ALCF consensus) ---
+  # Disable eager messages to prevent CXI race condition under high concurrency.
+  # CXI eager path buffer management has race condition at 128 GPU bursty traffic.
+  # Setting all three to 0 forces rendezvous-only path for all message sizes.
+  export FI_CXI_RDZV_GET_MIN=0             # Disable eager GET minimum size
+  export FI_CXI_RDZV_THRESHOLD=0           # Force all messages through rendezvous
+  export FI_CXI_RDZV_EAGER_SIZE=0          # No eager data in rendezvous
+  export FI_CXI_RDZV_PROTO=alt_read        # Alternate read protocol (ALCF verified up to 540 nodes)
+
+  # --- NEW: Host register deadlock prevention (Isambard docs) ---
+  # Multi-process per GPU → page locking competition → deadlock
+  export FI_CXI_DISABLE_HOST_REGISTER=1    # Prevent host buffer GPU registration deadlock
+  export FI_MR_CACHE_MONITOR=userfaultfd   # Memory registration cache monitor
+
+  # --- NEW: Prevent GPU-aware MPI + NCCL collision (CSCS docs) ---
+  export MPICH_GPU_SUPPORT_ENABLED=0       # "easily leads to deadlocks" - CSCS
+
+  echo "[CXI] ${SLURM_NNODES}N: Full CXI resilience (RDZV_RETRIES=100, eager=off, alt_read, host_reg=off)"
 fi
 
 # Multi-node JAX distributed info
@@ -414,9 +439,50 @@ python -u -B run_train.py \
     --max_job_hours='"$MAX_JOB_HOURS"'
 '
 
+SRUN_EXIT=$?
 echo "============================================"
-echo "Training completed at: $(date)"
+echo "Training finished at: $(date)"
+echo "srun exit code: $SRUN_EXIT"
 echo "============================================"
+
+# Auto-resume on watchdog kill or NCCL deadlock
+# Exit codes: 0=success, 1=watchdog kill, 126=NCCL error, 137=SIGKILL
+# Only auto-resume for full training runs (no CURTAIL_EPOCHS) to avoid infinite loops
+if [ "$SRUN_EXIT" -ne 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RESUME:-}" ]; then
+  # Find latest checkpoint directory
+  CKPT_BASE="$WORKDIR/checkpoints"
+  if [ -d "$CKPT_BASE" ]; then
+    LATEST_CKPT=$(ls -1d "$CKPT_BASE"/epoch_* 2>/dev/null | sort -V | tail -1)
+    if [ -n "$LATEST_CKPT" ]; then
+      RESUME_EPOCH=$(basename "$LATEST_CKPT" | sed 's/epoch_//')
+      echo "[Auto-Resume] srun failed (exit=$SRUN_EXIT). Latest checkpoint: $LATEST_CKPT (epoch $RESUME_EPOCH)"
+      echo "[Auto-Resume] Resubmitting with RESTORE_PATH=$LATEST_CKPT"
+
+      # Resubmit the same job with RESTORE_PATH, inheriting all current env vars
+      # --dependency=afterany ensures it starts after this job fully finishes
+      RESTORE_PATH="$LATEST_CKPT" NO_AUTO_RESUME_DEPTH=$((${NO_AUTO_RESUME_DEPTH:-0} + 1)) \
+        sbatch --nodes=${SLURM_NNODES} --time=${SBATCH_TIMELIMIT:-24:00:00} \
+               --dependency=afterany:${SLURM_JOB_ID} \
+               "$0"
+      echo "[Auto-Resume] Submitted. Max resume depth: ${NO_AUTO_RESUME_DEPTH:-0}/3"
+
+      # Safety: stop after 3 consecutive auto-resumes
+      if [ "${NO_AUTO_RESUME_DEPTH:-0}" -ge 3 ]; then
+        echo "[Auto-Resume] WARNING: Reached 3 consecutive auto-resumes. Stopping to prevent infinite loop."
+      fi
+    else
+      echo "[Auto-Resume] No checkpoint found in $CKPT_BASE. Cannot resume."
+    fi
+  else
+    echo "[Auto-Resume] Checkpoint directory $CKPT_BASE not found."
+  fi
+else
+  if [ "$SRUN_EXIT" -eq 0 ]; then
+    echo "[*] Training completed successfully."
+  elif [ -n "${CURTAIL_EPOCHS:-}" ]; then
+    echo "[*] Test run (CURTAIL_EPOCHS=$CURTAIL_EPOCHS) finished with exit=$SRUN_EXIT"
+  fi
+fi
 
 
 
