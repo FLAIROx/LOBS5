@@ -106,6 +106,12 @@ if [ "${SLURM_NNODES:-1}" -ge 2 ]; then
   export HIERARCHICAL=${HIERARCHICAL:-True}
 fi
 
+# Local SGD: sync params every K steps instead of grads every step.
+# K=0 (default): standard AllReduce every step.
+# K>0: each node trains independently with BSZ=PER_GPU_BSZ*4, params averaged every K steps.
+# Effective per-step BSZ = PER_GPU_BSZ * GPUS_PER_NODE (not * total_GPUs).
+export LOCAL_SGD_K=${LOCAL_SGD_K:-0}
+
 echo "============================================"
 echo "Job started at: $(date)"
 echo "Job ID: $SLURM_JOB_ID"
@@ -218,7 +224,11 @@ conda activate ${CONDA_ENV:-lob}
 module load cuda/12.6
 
 # Set LD_LIBRARY_PATH
-export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+# NCCL override: use base env's NCCL 2.29.3 (fixes ARM CAS weak failure hang, NCCL release 2025-02-03)
+# The lob env has NCCL 2.28.9 which has the ARM CAS bug. Base env was upgraded via pip.
+# Prepend base env's nccl/lib so it loads BEFORE the conda env's 2.28.9 version.
+NCCL_LIB_OVERRIDE=~/miniforge3/lib/python3.12/site-packages/nvidia/nccl/lib
+export LD_LIBRARY_PATH=$NCCL_LIB_OVERRIDE:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
 # NCCL OFI plugin for cross-node communication via Slingshot/libfabric
 export LD_LIBRARY_PATH=/tools/brics/apps/linux-sles15-neoverse_v2/gcc-12.3.0/aws-ofi-nccl-1.8.1-c47cd5ivrugm3jzlyqyis4igyflnydmo/lib:/opt/cray/libfabric/1.22.0/lib64:$LD_LIBRARY_PATH
@@ -435,6 +445,7 @@ python -u -B run_train.py \
     ${RESTORE_STEP:+--restore_step=$RESTORE_STEP} \
     ${RESUME_FROM_STEP:+--resume_from_step=$RESUME_FROM_STEP} \
     ${HIERARCHICAL:+--hierarchical=$HIERARCHICAL} \
+    ${LOCAL_SGD_K:+--local_sgd_k=$LOCAL_SGD_K} \
     --checkpoint_every_n_steps='"$CHECKPOINT_EVERY"' \
     --max_job_hours='"$MAX_JOB_HOURS"'
 '
