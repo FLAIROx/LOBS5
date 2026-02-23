@@ -180,16 +180,10 @@ def train(args):
         total_devices = jax.device_count() if jax.process_count() > 1 else args.num_devices
         print(f"[*] State distributed via sharding (replicated across {total_devices} devices)")
 
-        local_sgd_k = getattr(args, 'local_sgd_k', 0)
-        if local_sgd_k > 0:
-            print(f"[*] Local SGD enabled: sync params every {local_sgd_k} steps "
-                  f"(effective BSZ/step = {args.micro_bsz * args.num_devices})")
-
         jit_train_step = create_jit_train_step(
             mesh, state, has_book_data=args.use_book_data,
             hierarchical=use_hierarchical,
-            batchnorm=args.batchnorm, ignore_times=args.ignore_times,
-            local_sgd_k=local_sgd_k)
+            batchnorm=args.batchnorm, ignore_times=args.ignore_times)
         jit_eval_step = create_jit_eval_step(mesh, state, has_book_data=args.use_book_data)
 
     # Training Loop over epochs
