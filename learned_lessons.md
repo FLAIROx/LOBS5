@@ -223,3 +223,169 @@ warning `Allowed device set contains 8 devices, but platform only sees 4`。
 - 2N: 1.28x faster (460→360 ms/step), 22% GPU-hrs 节省
 - 2N 加速低于 1N 因为 allreduce 通信不受 BF16 影响（Amdahl 定律）
 - 精度完全无损: Val Loss 2.056 (BF16) vs 2.06 (FP32), Test Acc 62.50% (完全一致)
+
+## Git Worktree 目录布局与分支安全 (2026-02-22)
+
+### 目录结构
+
+| 目录 | 用途 | 分支示例 |
+|------|------|----------|
+| `/projects/s5e/quant/AlphaTrade/LOBS5` | 主 repo | `ignore-times-shard-map` (主开发) |
+| `/projects/s5e/quant/AlphaTrade/experiments/exp_*` | 实验 worktree | `exp/D2-*`, `exp/B1-*`, `exp/A1-*` 等 |
+| `LOBS5/.claude/worktrees/C5*` | Claude worktree | `exp/C5-shard-map`, `exp/C5a1-32N-optimize` |
+
+### 事故 (2026-02-22): eval watchdog commit 到错误分支
+
+**经过**: 在主 repo 目录 (`LOBS5/`) 下编写 eval watchdog 代码并 commit。当时主 repo 的 `HEAD` 指向 `exp/D2-correct-inference-with-pipeline-fixes`（上个 session 切过去后没切回来），而非目标 `ignore-times-shard-map`。导致 commit `0ae7e6d` 提交到了 D2 分支。
+
+**修复**: 切回 `ignore-times-shard-map` 后 `git cherry-pick 0ae7e6d` → `6c2fade`。D2 分支需 `git reset HEAD~1` 清理。
+
+### 操作规则
+
+1. **编码前必检查分支**: 任何 `git commit` 前必须 `git branch --show-current` 确认在正确分支
+2. **不要在主 repo 切分支**: 如果改动属于实验分支（如 D2、B2），必须 `cd` 到对应 worktree 目录操作
+3. **Session 开始时验证**: 新 session 的第一步应确认 `pwd` + `git branch` 状态
+4. **跨分支共享改动**: 对多个分支都有意义的改动（如 watchdog），需分别到各 worktree 路径下 cherry-pick
+
+## 2026-02-23: A1 vs A2 Scale-Up 分支对比分析
+
+### 模型规模（两分支相同）
+
+| 维度 | Baseline (main) | A1/A2 Scale-Up | 倍数 |
+|------|-----------------|----------------|------|
+| d_model | 1024 | 2048 | 2x |
+| n_layers | 12 | 24 | 2x |
+| ssm_size | 1024 | 2048 | 2x |
+| blocks | 16 | 32 | 2x |
+| 参数量 | ~55M | **~360M** | ~6.5x |
+
+### 训练数据差异
+
+| 分支 | 数据 | 交易日数 | 路径 |
+|------|------|----------|------|
+| A1-kang | GOOG 2018-2022 合并 | ~1254天 (5年) | `GOOG_2018_2022_combined/` ⚠️ 有 test 泄漏 |
+| A2-ssm | GOOG 2022 单年 | ~249天 | `GOOG_2022/` (干净 split) |
+
+### 核心基础设施差异
+
+| 功能 | A1 (scaleup-kang) | A2 (scaleup-ssm) |
+|------|-------------------|-------------------|
+| 梯度同步 | `pmap` + `pmean` (1D flat) | `shard_map` + `psum` (2D mesh) |
+| 多节点初始化 | 无 `jax.distributed.initialize()` | ✅ 完整 JAX 多进程初始化 |
+| 数据采样 | 所有 rank 加载相同数据 | `DistributedSampler` 分片 |
+| WandB | 所有 rank 写 (重复) | rank 0 only |
+| 模型预设 | 固定 360M | 55M-2.5B 可配置 (11 种) |
+| 训练模式 | Full AR only | AR / TBPTT / SWR 三选一 |
+| Checkpoint | 完整恢复 | 支持部分恢复 (结构变化) |
+| A1 独有 | Triton 订单簿匹配测试 | - |
+| A2 独有 | - | SWR 算法 (`s5/swr.py`, 367行) |
+
+### 关键 Insights
+
+1. **A2 是 A1 的超集** — A2 `TRAIN_VERSION=v2` 等价 A1 的 Full AR，但额外提供 TBPTT 和 SWR
+2. **pmap→shard_map 决定扩展天花板** — A2 的 2D mesh 是后续 C5 达到 16N 83% 效率的基础
+3. **A1 的 `GOOG_2018_2022_combined` 有 test 泄漏风险** — CLAUDE.md 标注为错误数据集
+4. **GOOG 完整数据路径**: `/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/` 下有 2016-2022 共 7 个年份目录
+
+---
+
+## 2026-02-23: Eval NCCL Deadlock at 32N — process_allgather is the killer
+
+### ★ Insight: process_allgather 在大规模 eval 中会死锁
+- `process_allgather` 每次调用触发 128-rank NCCL AllGather，**无内置 timeout**
+- 在 eval 循环内每 batch 调用 2 次 → 28 batch = 56 次全局同步 → 死锁概率极高
+- **MaxText（Google 官方）完全不用 process_allgather** — 改用 addressable_shards（零 NCCL）
+
+### ★ Insight: 训练 collective 稳定但 eval collective 不稳定的原因
+- 训练用 shard_map + pmean（XLA 编译图内，确定性执行）
+- eval 用 process_allgather（Python 层面，依赖 rank 同步时序）
+- XLA 内的 collective 由编译器调度，比 Python 层面的 collective 可靠得多
+
+### ★ Insight: T5X 的 assert_equal(num_batches) 防御模式
+- eval 循环前断言所有 host 的 batch 数一致
+- 如果 DataLoader 分配不均 → 立即报错（而非死锁 20 分钟）
+- 这是 Google 在生产中验证过的标准防御
+
+---
+
+## 2026-02-23: LR Sweep 32N — lr=5e-3 梯度爆炸
+
+### 实验配置
+- 32N (128 GPU), PER_GPU_BSZ=10, Global BSZ=1280, 40 epochs
+- 分支: `ignore-times-shard-map`, ignore_times=True
+- 对比 LR: 1e-3 / 3e-3 / 5e-3
+
+### lr=5e-3 灾难性失败 (Job 2439703, W&B: qqz17itg)
+
+| Epoch | Train Loss | Test Loss | Test Acc | Test PPL |
+|-------|-----------|-----------|----------|----------|
+| 1     | 2.16      | 1.72      | 67.3%    | 29.2     |
+| 2     | **910.39**| 6.83      | 54.7%    | 116.0    |
+| 3     | 24.67     | **136.46**| 55.2%    | 2319.8   |
+| 4     | 18.31     | 3.71      | 53.7%    | 63.0     |
+| 5     | 3.49      | 2.48      | 59.7%    | 42.2     |
+| 6     | 2.35      | 2.15      | 60.7%    | 36.5     |
+
+- **Epoch 2 梯度爆炸**: Train Loss 2.16 → 910 (420x spike)
+- Warmup 结束后 (Epoch 1) 切入 cosine decay，LR 峰值 5e-3 太高
+- 6 个 epoch 后仍远未恢复到 Epoch 1 水平 (Test Loss 2.15 vs 1.72)
+
+### lr=1e-3 稳定收敛 (Job 2439704, W&B: r0ily8fd)
+
+| Epoch | Train Loss | Test Loss | Test Acc | Test PPL |
+|-------|-----------|-----------|----------|----------|
+| 1     | 2.54      | 1.80      | 66.0%    | 30.5     |
+| 2     | 1.68      | 1.68      | 67.7%    | 28.6     |
+| 3     | 1.57      | 1.62      | 68.7%    | 27.6     |
+| 4     | 1.56      | 1.62      | 68.7%    | 27.5     |
+| 5     | 1.48      | 1.55      | **69.7%**| 26.4     |
+
+- 持续改善，每 epoch 稳定下降，Epoch 5 时仍在改善
+
+### 关键教训
+
+1. **128 GPU (BSZ=1280) 的 LR 上界 < 5e-3**: Adam 的 v̂ 追踪梯度二阶矩有滞后，一次 gradient spike 就能引发连锁发散
+2. **√κ scaling 法则的安全边界**: baseline LR=5e-4, κ=45.7 (BSZ 28→1280), √κ=6.76 → 理论 LR≈3.4e-3。5e-3 超过理论值 1.5x，直接爆炸
+3. **Warmup 掩盖高 LR 风险**: Epoch 1 (warmup 阶段) LR 从 0 线性爬到 5e-3，loss 正常下降。Epoch 2 LR 在峰值开始 cosine decay 才暴露问题
+4. **大 batch 训练的 LR sweet spot**: 对于 75M S5 SSM + BSZ=1280, 安全范围大约 1e-3 ~ 3e-3。需要等 3e-3 (Job 2439874) 结果确认上界
+
+## 2026-02-23: G1 360M BSZ Sweep — XLA 内存非单调
+
+### BSZ Sweep 结果 (401M params, GH200 85.5GB, MEM_FRACTION=0.90)
+
+| BSZ | 结果 | 内存需求 | 稳态速度 (1N) | Job ID |
+|-----|------|---------|--------------|--------|
+| 2 | ✅ OK | < 71.6 GiB | 0.70 s/step | 2440057 |
+| 3 | ❌ OOM | 76.28 GiB | — | 2440151 |
+| 4 | ✅ OK | < 71.6 GiB | 1.36 s/step | 2440150 |
+| 5 | ❌ OOM | 77.08 GiB | — | 2440158 |
+| 6 | ❌ OOM | 89.09 GiB | — | 2440159 |
+| 7 | ❌ OOM | 108.95 GiB | — | 2440160 |
+| 8 | ❌ OOM | 210.15 GiB | — | 2439975 |
+
+### ★ Key Insight: XLA 内存分配不是 BSZ 的单调函数
+- BSZ=3 OOM (76.28 GiB) 但 BSZ=4 OK — XLA 编译器对不同 BSZ 选择不同的 memory layout/fusion 策略
+- BSZ=3 和 BSZ=5 的 OOM 边界都在 ~76-77 GiB，刚好卡在 MEM_FRACTION=0.90 × 85.5GB ≈ 76.95 GB
+- 代码库无 remat/gradient checkpointing，BSZ=4 是当前 401M 模型的实际上限
+
+### G1 生产配置
+- BSZ=4, Global BSZ=512 (32N), LR=7e-4, 分支 exp/G1-scale-up, commit f2b39ce3
+
+## 2026-02-23: G6 Prodigy (Learning-Rate-Free Optimizer) 结论
+
+### 实验配置
+- Prodigy (optax.contrib.prodigy) vs AdamW, 11 个 job, 2N/32N, BSZ=8/10/12
+- 分支: `exp/G6-auto-lr` (基于 `ignore-times-shard-map`), 代码改动仅 42 行
+- 详细数据: `tasks/G6-auto-lr/findings.md`
+
+### 核心发现
+1. **Prodigy estim_lr 准确**: 2N gBSZ=64 时 estim_lr≈8.4e-4, 精确落入 AdamW 最佳区间 [5e-4, 1e-3]
+2. **公平对比 Prodigy 略逊**: Tuned AdamW 74.41% Val Acc vs Prodigy 72.72% (差 1.7pp)
+3. **速度零影响**: 4x optimizer state 不影响吞吐 (<1% 差异)
+4. **稳定性风险**: Prodigy 有 loss spike (ep14: 1.39→5.48) 和结果方差高的问题
+5. **Batch size scaling 偏保守**: gBSZ 20x 增大, estim_lr 仅 2x 增大 (vs sqrt 理论 4.47x)
+
+### 最佳实践
+- 用 Prodigy 做探索性实验, 读取 estim_lr 作为 AdamW LR 起点
+- Production 训练用 AdamW + cosine decay, LR 参考 Prodigy 估计值
+- 75M S5 SSM 最佳 LR: 2N→5e-4~1e-3, 32N→1e-3
