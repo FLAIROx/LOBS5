@@ -96,7 +96,7 @@
 # ============================================
 
 # Default per-GPU batch size (can be overridden via environment variable)
-export PER_GPU_BSZ=${PER_GPU_BSZ:-12}
+export PER_GPU_BSZ=${PER_GPU_BSZ:-10}
 
 # Multi-node: default to hierarchical shard_map (2D mesh)
 # Hierarchical splits allreduce into NVLink (intra-node) + Slingshot (inter-node)
@@ -123,7 +123,7 @@ D_MODEL=1024
 N_LAYERS=12
 BLOCKS=16
 SSM_SIZE_BASE=1024
-SSM_LR_BASE=${SSM_LR_BASE:-0.003}
+SSM_LR_BASE=${SSM_LR_BASE:-5e-4}
 LR_FACTOR=${LR_FACTOR:-1}
 WARMUP_END=${WARMUP_END:-1}
 
