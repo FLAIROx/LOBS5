@@ -226,14 +226,15 @@ export LD_LIBRARY_PATH=/tools/brics/apps/linux-sles15-neoverse_v2/gcc-12.3.0/aws
 # JAX environment
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
 # 2D mesh (hierarchical) creates two NCCL communicators (gpus+nodes), more buffer needed
-# 32+ nodes: 0.85 — was 0.80 but BSZ=12 needs 73.5/76 GB (96.7%), OOM at epoch 11 (job 2439132)
-#   Raising to 0.85 → 81.6 GB pool → 73.5 GiB = 90.1%, leaving ~8 GB headroom for fragmentation
-#   NCCL 2 communicators need ~4-8 GB, remaining 14.4 GB (96-81.6) is sufficient
+# 32+ nodes: 0.80 (XLA HLO planner is greedy — 0.85 just makes it allocate MORE, not leave headroom)
+#   Job 2439132: MEM=0.80 → XLA requested 73.5 GiB (96.7% of 76 GB) → OOM epoch 11
+#   Job 2439639: MEM=0.85 → XLA requested 78.7 GiB (96.4% of 81.6 GB) → OOM step 0
+#   Fix: reduce PER_GPU_BSZ (12→10), not increase MEM_FRACTION
 # 8-16N: 0.85 (moderate overhead)
-# Override with MEM_FRACTION env var for BSZ tuning (e.g. MEM_FRACTION=0.90)
+# Override with MEM_FRACTION env var for BSZ tuning (e.g. MEM_FRACTION=0.85)
 if [ -z "${MEM_FRACTION}" ]; then
   if [ "${NNODES}" -ge 32 ] && [ "${HIERARCHICAL}" = "True" ]; then
-    export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
+    export XLA_PYTHON_CLIENT_MEM_FRACTION=0.80
   elif [ "${NNODES}" -ge 8 ] && [ "${HIERARCHICAL}" = "True" ]; then
     export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
   else
