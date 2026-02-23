@@ -1244,13 +1244,18 @@ def swap_leading(targetsize,x):
 # ============================================================================
 
 def create_jit_train_step(mesh, state, has_book_data=True, hierarchical=False,
-                          batchnorm=False, ignore_times=True):
+                          batchnorm=False, ignore_times=True, local_sgd_k=0):
     """Create JIT-compiled train_step with explicit sharding.
 
     hierarchical=True: uses shard_map + explicit pmean('gpus') + pmean('nodes')
     for hierarchical AllReduce on 2D mesh. Requires mesh with ('nodes','gpus') axes.
+
+    local_sgd_k > 0: Local SGD mode — skip cross-node gradient sync,
+    average params across nodes every K steps. Requires hierarchical=True.
     """
     if hierarchical:
+        if local_sgd_k > 0:
+            return _create_local_sgd_train_step(mesh, has_book_data, batchnorm, ignore_times, local_sgd_k)
         return _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times)
 
     from lob.sharding_utils import create_state_shardings, get_data_shardings_for_batch
@@ -1386,6 +1391,122 @@ def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times
 
     print(f"[JIT] Created hierarchical shard_map train_step "
           f"(2D mesh, pmean('gpus') + pmean('nodes'))")
+    return compatible_fn
+
+
+def _create_local_sgd_train_step(mesh, has_book_data, batchnorm, ignore_times, local_sgd_k):
+    """Create shard_map-based train_step with Local SGD.
+
+    Instead of pmean(grads, 'nodes') every step (standard hierarchical AllReduce):
+    - pmean(grads, 'gpus') every step  — NVLink within each node (fast, 478 GB/s)
+    - apply_gradients with node-local grads (no cross-node sync)
+    - Every K steps: pmean(params, 'nodes') — sync parameters across nodes
+
+    Effective per-step BSZ = PER_GPU_BSZ × gpus_per_node (not × total_gpus).
+    This preserves small-batch gradient noise (implicit regularization) while
+    using all GPUs in parallel for data throughput.
+
+    Safety: state.step is a replicated scalar (P() sharding). All shards have
+    identical step values, so jax.lax.cond branches are always taken uniformly
+    across all shards — no risk of collective deadlock.
+    """
+    from jax.experimental.shard_map import shard_map
+
+    batch_axis = ('nodes', 'gpus')
+
+    if has_book_data:
+        in_data = (P(batch_axis, None), P(batch_axis, None))
+        in_times = (P(batch_axis, None), P(batch_axis, None))
+    else:
+        in_data = (P(batch_axis, None),)
+        in_times = (P(batch_axis, None),)
+
+    in_specs = (
+        P(),            # state — replicated
+        P(),            # rng — replicated
+        in_data,        # batch_inputs — sharded tuple
+        P(batch_axis),  # batch_labels — sharded
+        in_times,       # batch_integration_timesteps — sharded tuple
+    )
+    out_specs = (P(), P(), P(), P())
+
+    def sharded_step(state, rng, batch_inputs, batch_labels,
+                     batch_integration_timesteps):
+        """Per-shard train step with Local SGD (no cross-node grad sync)."""
+        batch_inputs = repeat_book(*batch_inputs, True)
+
+        def loss_fn(params):
+            if batchnorm:
+                logits, mod_vars = state.apply_fn(
+                    {"params": params, "batch_stats": state.batch_stats},
+                    *batch_inputs, *batch_integration_timesteps,
+                    rngs={"dropout": rng},
+                    mutable=["intermediates", "batch_stats"],
+                    method='__call_ar__'
+                )
+            else:
+                logits, mod_vars = state.apply_fn(
+                    {"params": params},
+                    *batch_inputs, *batch_integration_timesteps,
+                    rngs={"dropout": rng},
+                    mutable=["intermediates"],
+                    method='__call_ar__'
+                )
+
+            ce = cross_entropy_loss(logits, batch_labels)
+            if ignore_times:
+                ce = ce.reshape(ce.shape[0], -1, Message_Tokenizer.MSG_LEN)
+                ce_1 = ce[:, :, :TIME_START_I]
+                ce_2 = ce[:, :, (TIME_END_I + 1):]
+                ce = np.concatenate([ce_1, ce_2], axis=2)
+                ce = ce.reshape(ce.shape[0], -1)
+
+            ce = np.mean(ce, axis=0)
+            loss = np.mean(ce)
+            return loss, (mod_vars, logits, ce)
+
+        (loss, (mod_vars, logits, ce)), grads = jax.value_and_grad(
+            loss_fn, has_aux=True)(state.params)
+
+        # Level 1: NVLink within each node (4 GPUs) — every step
+        grads = jax.lax.pmean(grads, axis_name='gpus')
+        loss = jax.lax.pmean(loss, axis_name='gpus')
+        ce = jax.lax.pmean(ce, axis_name='gpus')
+
+        # NO pmean(grads, 'nodes') — each node updates independently
+        if batchnorm:
+            state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
+        else:
+            state = state.apply_gradients(grads=grads)
+
+        # Every K steps: average params across nodes via Slingshot
+        # state.step is now old_step+1 (incremented by apply_gradients).
+        # All shards have identical state.step → cond takes same branch everywhere.
+        def sync_params(st):
+            new_params = jax.lax.pmean(st.params, axis_name='nodes')
+            return st.replace(params=new_params)
+
+        def no_sync(st):
+            return st
+
+        should_sync = (state.step % local_sgd_k) == 0
+        state = jax.lax.cond(should_sync, sync_params, no_sync, state)
+
+        return state, loss, ce, np.float32(0.0)
+
+    mapped_fn = shard_map(sharded_step, mesh=mesh,
+                          in_specs=in_specs, out_specs=out_specs,
+                          check_rep=False)
+    jitted_fn = jax.jit(mapped_fn, donate_argnums=(0,))
+
+    # API-compatible wrapper: train_epoch passes batchnorm, ignore_times as args 6-7
+    def compatible_fn(state, rng, batch_inputs, batch_labels,
+                      batch_integration_timesteps, _batchnorm, _ignore_times):
+        return jitted_fn(state, rng, batch_inputs, batch_labels,
+                         batch_integration_timesteps)
+
+    print(f"[JIT] Created Local SGD shard_map train_step "
+          f"(2D mesh, pmean('gpus') every step, pmean(params,'nodes') every {local_sgd_k} steps)")
     return compatible_fn
 
 

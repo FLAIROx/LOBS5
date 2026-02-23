@@ -196,6 +196,10 @@ if __name__ == "__main__":
 	parser.add_argument("--hierarchical", type=str2bool, default=False,
 				help="Use hierarchical AllReduce via shard_map with 2D mesh (nodes, gpus). "
 				     "Decomposes flat AllReduce(N*4) into pmean(gpus)+pmean(nodes).")
+	parser.add_argument("--local_sgd_k", type=int, default=0,
+				help="Local SGD: sync params every K steps instead of grads every step. "
+				     "0=disabled (standard AllReduce). K>0: each node trains independently, "
+				     "params averaged across nodes every K steps. Requires --hierarchical=True.")
 
 	args = parser.parse_args()
 
