@@ -2,14 +2,14 @@
 #SBATCH --job-name=lobs5_75m_B1
 #SBATCH --output=logs_lobs5/lobs5_%j.out
 #SBATCH --error=logs_lobs5/lobs5_%j.err
-# === 16-node config (scale test) ===
-#SBATCH --nodes=16
+# === 32-node production config ===
+#SBATCH --nodes=32
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
-#SBATCH --time=00:30:00
-#SBATCH --contiguous
-#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
+#SBATCH --time=24:00:00
+
+
 # --- 32-node 24h production submit command ---
 # sbatch --nodes=32 --time=24:00:00 train_full_autoreg.batch
 #
@@ -96,7 +96,7 @@
 # ============================================
 
 # Default per-GPU batch size (can be overridden via environment variable)
-export PER_GPU_BSZ=${PER_GPU_BSZ:-8}
+export PER_GPU_BSZ=${PER_GPU_BSZ:-12}
 
 # Multi-node: default to hierarchical shard_map (2D mesh)
 # Hierarchical splits allreduce into NVLink (intra-node) + Slingshot (inter-node)
@@ -123,7 +123,7 @@ D_MODEL=1024
 N_LAYERS=12
 BLOCKS=16
 SSM_SIZE_BASE=1024
-SSM_LR_BASE=${SSM_LR_BASE:-0.0005}
+SSM_LR_BASE=${SSM_LR_BASE:-0.003}
 LR_FACTOR=${LR_FACTOR:-1}
 WARMUP_END=${WARMUP_END:-1}
 
@@ -1004,5 +1004,9 @@ this branch from train_full_autoreg.batch (32N).  **Bold** = differs from argpar
 | encode_msg                     | `lob/encoding.py`              | 94-132    | Message encoding function            |
 | decode_msg                     | `lob/encoding.py`              | 158-186   | Message decoding function            |
 | TIME_START_I / TIME_END_I      | `lob/train_helpers.py`         | 19-20     | Constants: 9, 13                     |
+
+
+#SBATCH --contiguous
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
 
 '''
