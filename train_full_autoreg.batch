@@ -224,9 +224,7 @@ conda activate ${CONDA_ENV:-lob}
 module load cuda/12.6
 
 # Set LD_LIBRARY_PATH
-# NCCL override: use base env's NCCL 2.29.3 (fixes ARM CAS weak failure hang, NCCL release 2025-02-03)
-# The lob env has NCCL 2.28.9 which has the ARM CAS bug. Base env was upgraded via pip.
-# Prepend base env's nccl/lib so it loads BEFORE the conda env's 2.28.9 version.
+# NCCL override: base env has 2.29.3, lob env has 2.28.9 with ARM CAS hang bug
 NCCL_LIB_OVERRIDE=~/miniforge3/lib/python3.12/site-packages/nvidia/nccl/lib
 export LD_LIBRARY_PATH=$NCCL_LIB_OVERRIDE:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
