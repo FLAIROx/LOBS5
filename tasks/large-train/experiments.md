@@ -32,6 +32,18 @@ All 32-node (128 GPU) experiments recorded here. Non-KTL (IGNORE_TIMES=True) and
 | G3-ignore-time | 2439536 | 75M | True | 300 | 32 | 12 | 3e-3 | 1536 | 3 (curtail) | Completed CURTAIL speed test | 69.41% | 67.59% | 1.611 | 1.704 | https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/kglo01io | ~8min | 1e0f0db4 | Speed benchmark: 1.31 s/step stable (step 200-300). Best@E2 |
 | G3-ignore-time | 2439868 | 75M | True | None | 32 | 10 | 3e-3 | 1280 | 4 | E5 train, CANCELLED by user (~53min) | 68.82% | 67.09% | 1.663 | 1.745 | https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/y76ftu6h | ~53min | 1e0f0db4 | Full 40ep attempt. Best stuck@E1 (loss worsened E2-4). Cancelled |
 
+## G2-22-24-tok (24tok encoding, vocab=2112, ~55M params)
+
+| Task | Job ID | Model Size | IGNORE_TIMES | Curtail | Nodes | Micro BSZ | LR | Global BSZ | Completed Epochs | Stopped At (Epoch/Step) | Best Val Acc | Best Test Acc | Best Val Loss | Best Test Loss | W&B | Time | Session ID | Description |
+|------|--------|-----------|-------------|---------|-------|-----------|-----|-----------|-----------------|------------------------|-------------|--------------|--------------|---------------|-----|------|-----------|-------------|
+| G2-24tok | 2440076 | 55M | True | None | 32 | 10 | 5e-4 | 1280 | 31 | FAILED exit 126 (~5h52m) | **78.87%** | **75.89%** | **1.058** | **1.190** | https://wandb.ai/kang-oxford/lobs5-75M-G2/runs/pmk5zbad | ~5h52m | 5c4fd67d | **24tok 32N contiguous. Best@E31. Gradient explosion E24 recovered. Still improving when crashed** |
+| G2-24tok | 2440112 | 55M | True | None | 32 | 10 | 5e-4 | 1280 | **40** | **COMPLETED 40ep** (~7h06m) | **76.88%** | **73.95%** | **1.173** | **1.308** | https://wandb.ai/kang-oxford/lobs5-75M-G2/runs/i2n8qufp | ~7h06m | 5c4fd67d | **24tok 32N non-contiguous. Completed 40ep. Best@E40. Converged ~E8 then slow improvement** |
+| G2-bsz-sweep | 2439389 | 55M | True | 300 | 1 | 12 | 3e-3 | 48 | 1 | E2 (CURTAIL) | 69.16% | 68.02% | 1.659 | -- | https://wandb.ai/kang-oxford/lobs5-G2-24tok-bsz-sweep/runs/ojgnb5w1 | -- | 097a1028 | 1N BSZ=12 OK. 1 epoch speed test |
+| G2-bsz-sweep | 2439390 | 55M | True | 300 | 1 | 10 | 3e-3 | 40 | 2 | E2 loss diverged to 49.87 | 68.38% | 67.73% | 1.686 | -- | https://wandb.ai/kang-oxford/lobs5-G2-24tok-bsz-sweep/runs/x6pdaef1 | -- | 097a1028 | 1N BSZ=10 diverged E2 |
+| G2-loss-compare | 2439711 | 55M | True | 300 | 1 | 12 | 3e-3 | 48 | 1 | E2 (CURTAIL) | 65.63% | 65.94% | 1.932 | -- | https://wandb.ai/kang-oxford/lobs5-G2-loss-compare/runs/zsva3l3j | -- | 5c4fd67d | 24tok vs 22tok loss compare (1 epoch) |
+| A3-22tok | 2207381 | 75M | False | None | 1 | 8 | 5e-5 | 32 | 7 | TIMEOUT 24h | 71.27% | 39.42% | 1.299 | 6.453 | https://wandb.ai/kang-oxford/lobs5-A3-22vs24tok/runs/85ipv727 | ~24h | eb59c171 | 22tok baseline. Test loss diverged (OOD: GOOG 2022→JAN2023) |
+| A3-24tok | 2207382 | 55M | False | None | 1 | 8 | 5e-5 | 32 | 7 | TIMEOUT ~26h | 74.63% | 36.00% | 1.158 | 6.981 | https://wandb.ai/kang-oxford/lobs5-A3-22vs24tok/runs/wx0h3ih5 | ~26h | eb59c171 | 24tok. Better val loss but worse OOD test divergence |
+
 ## G4-rsmnorm_nobias (75M, RMSNorm + Dense no-bias)
 
 | Task | Job ID | Model Size | IGNORE_TIMES | Curtail | Nodes | Micro BSZ | LR | Global BSZ | Completed Epochs | Stopped At (Epoch/Step) | Best Val Acc | Best Test Acc | Best Val Loss | Best Test Loss | W&B | Time | Session ID | Description |
@@ -102,7 +114,12 @@ All 32-node (128 GPU) experiments recorded here. Non-KTL (IGNORE_TIMES=True) and
 
 | Task | Job ID | Model Size | IGNORE_TIMES | Curtail | Nodes | Micro BSZ | LR | Global BSZ | Completed Epochs | Stopped At (Epoch/Step) | Best Val Acc | Best Test Acc | Best Val Loss | Best Test Loss | W&B | Time | Session ID | Description |
 |------|--------|-----------|-------------|---------|-------|-----------|-----|-----------|-----------------|------------------------|-------------|--------------|--------------|---------------|-----|------|-----------|-------------|
-| KTL (keep-time) | 2458440 | 75M | **False** | None | 32 | 10 | 1e-3 | 1280 | 28+ | RUNNING E28+ (~4h elapsed) | **78.80%** | **76.25%** | **1.063** | **1.189** | https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/ew3af26l | >4h | -- | **Keep-time experiment. Best@E27. Still running & improving** |
+| KTL (keep-time) | 2458440 | 75M | **False** | None | 32 | 10 | 1e-3 | 1280 | 37 | CANCELLED by user E37 step 421 (~6h) | **80.28%** | **77.82%** | **1.017** | **1.140** | https://wandb.ai/kang-oxford/lobs5-75M-B1/runs/ew3af26l | ~6h | -- | **Keep-time experiment. Best@E37. Still improving when cancelled** |
+
+## G7-muon-optimizer (75M, Muon Newton-Schulz, 32N)
+
+| Task | Job ID | Model Size | IGNORE_TIMES | Curtail | Nodes | Micro BSZ | LR | Global BSZ | Completed Epochs | Stopped At (Epoch/Step) | Best Val Acc | Best Test Acc | Best Val Loss | Best Test Loss | W&B | Time | Session ID | Description | Who |
+|------|--------|-----------|-------------|---------|-------|-----------|-----|-----------|-----------------|------------------------|-------------|--------------|--------------|---------------|-----|------|-----------|-------------|-----|
 
 ---
 
