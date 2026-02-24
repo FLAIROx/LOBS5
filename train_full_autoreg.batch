@@ -455,28 +455,41 @@ echo "============================================"
 # Only auto-resume for full training runs (no CURTAIL_EPOCHS) to avoid infinite loops
 if [ "$SRUN_EXIT" -ne 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RESUME:-}" ]; then
   # Find latest checkpoint directory
+  # Checkpoint layout: $WORKDIR/checkpoints/j<JOBID>_<WANDB>_<JOBID>/<step>/
+  # Each step subdir contains the orbax checkpoint for that training step.
   CKPT_BASE="$WORKDIR/checkpoints"
   if [ -d "$CKPT_BASE" ]; then
-    LATEST_CKPT=$(ls -1d "$CKPT_BASE"/epoch_* 2>/dev/null | sort -V | tail -1)
-    if [ -n "$LATEST_CKPT" ]; then
-      RESUME_EPOCH=$(basename "$LATEST_CKPT" | sed 's/epoch_//')
-      echo "[Auto-Resume] srun failed (exit=$SRUN_EXIT). Latest checkpoint: $LATEST_CKPT (epoch $RESUME_EPOCH)"
-      echo "[Auto-Resume] Resubmitting with RESTORE_PATH=$LATEST_CKPT"
+    # Find this job's checkpoint dir (j<SLURM_JOB_ID>_*)
+    JOB_CKPT_DIR=$(ls -1d "$CKPT_BASE"/j${SLURM_JOB_ID}_* 2>/dev/null | head -1)
+    # Fallback: if no checkpoint for this job (e.g. resumed job), find the most recent dir
+    if [ -z "$JOB_CKPT_DIR" ]; then
+      JOB_CKPT_DIR=$(ls -1td "$CKPT_BASE"/j* 2>/dev/null | head -1)
+    fi
+    if [ -n "$JOB_CKPT_DIR" ] && [ -d "$JOB_CKPT_DIR" ]; then
+      # Find the highest step number (numeric dirs only, exclude 'metadata')
+      LATEST_STEP=$(ls -1 "$JOB_CKPT_DIR" | grep -E '^[0-9]+$' | sort -n | tail -1)
+      if [ -n "$LATEST_STEP" ]; then
+        echo "[Auto-Resume] srun failed (exit=$SRUN_EXIT). Latest checkpoint: $JOB_CKPT_DIR step $LATEST_STEP"
+        echo "[Auto-Resume] Resubmitting with RESTORE_PATH=$JOB_CKPT_DIR"
 
-      # Resubmit the same job with RESTORE_PATH, inheriting all current env vars
-      # --dependency=afterany ensures it starts after this job fully finishes
-      RESTORE_PATH="$LATEST_CKPT" NO_AUTO_RESUME_DEPTH=$((${NO_AUTO_RESUME_DEPTH:-0} + 1)) \
-        sbatch --nodes=${SLURM_NNODES} --time=${SBATCH_TIMELIMIT:-24:00:00} \
-               --dependency=afterany:${SLURM_JOB_ID} \
-               "$0"
-      echo "[Auto-Resume] Submitted. Max resume depth: ${NO_AUTO_RESUME_DEPTH:-0}/3"
-
-      # Safety: stop after 3 consecutive auto-resumes
-      if [ "${NO_AUTO_RESUME_DEPTH:-0}" -ge 3 ]; then
-        echo "[Auto-Resume] WARNING: Reached 3 consecutive auto-resumes. Stopping to prevent infinite loop."
+        NEXT_DEPTH=$((${NO_AUTO_RESUME_DEPTH:-0} + 1))
+        # Safety: stop after 3 consecutive auto-resumes
+        if [ "$NEXT_DEPTH" -gt 3 ]; then
+          echo "[Auto-Resume] WARNING: Reached 3 consecutive auto-resumes. Stopping to prevent infinite loop."
+        else
+          # Resubmit the same job with RESTORE_PATH, inheriting all current env vars
+          # --dependency=afterany ensures it starts after this job fully finishes
+          RESTORE_PATH="$JOB_CKPT_DIR" NO_AUTO_RESUME_DEPTH=$NEXT_DEPTH \
+            sbatch --nodes=${SLURM_NNODES} --time=${SBATCH_TIMELIMIT:-24:00:00} \
+                   --dependency=afterany:${SLURM_JOB_ID} \
+                   "$0"
+          echo "[Auto-Resume] Submitted (depth $NEXT_DEPTH/3)."
+        fi
+      else
+        echo "[Auto-Resume] No step checkpoints found in $JOB_CKPT_DIR. Cannot resume."
       fi
     else
-      echo "[Auto-Resume] No checkpoint found in $CKPT_BASE. Cannot resume."
+      echo "[Auto-Resume] No checkpoint directory found in $CKPT_BASE. Cannot resume."
     fi
   else
     echo "[Auto-Resume] Checkpoint directory $CKPT_BASE not found."
