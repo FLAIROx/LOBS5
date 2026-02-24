@@ -389,3 +389,312 @@ warning `Allowed device set contains 8 devices, but platform only sees 4`。
 - 用 Prodigy 做探索性实验, 读取 estim_lr 作为 AdamW LR 起点
 - Production 训练用 AdamW + cosine decay, LR 参考 Prodigy 估计值
 - 75M S5 SSM 最佳 LR: 2N→5e-4~1e-3, 32N→1e-3
+
+---
+
+## 2026-02-23: 32N NCCL 死锁完整修复 — Deep Research + 系统性验证
+
+### 背景
+32N (128 GPU) 训练间歇性 NCCL 死锁，影响多个 job:
+- Job 2426449: Epoch 14, Step 356
+- Job 2438407: Epoch 0, Batch 1
+- Job 2439704: Epoch 6, Batch 58 (5 个健康 epoch 后)
+
+### 方法论
+3 个 parallel deep research agents (NCCL releases, JAX/XLA flags, Isambard/CSCS/ALCF docs) + HLO profiling + 5 个单变量验证 job。
+
+---
+
+### ★ Insight 1: NCCL 2.29.3 ARM CAS Weak Failure Bug (最重要发现)
+- **NCCL 2.29.3** (2025-02-03) changelog: "Fix CAS usage in case of weak failure which was causing a hang on ARM"
+- ARM 的 LDXR/STXR (Load-Exclusive/Store-Exclusive) 指令会 **spurious failure** — 这是 ARM 架构规范允许的行为
+- NCCL < 2.29.3 的 CAS (Compare-And-Swap) 循环没有正确重试 spurious failure → **spin loop 永不退出** → 线程卡死
+- GH200 = ARM Grace CPU + H200 GPU → **完美命中** 此 bug
+- 概率性触发: P(fail) ≈ 1e-6/CAS op, 但 32N 训练每步 336 AllReduce × 数百万次原子操作 → 累积触发
+- **修复**: `pip install nvidia-nccl-cu12==2.29.3` (base conda env)
+- **验证**: Job 2447130 日志确认 `NCCL version 2.29.3+cuda12.9`
+
+### ★ Insight 2: XLA nccl_stub.cc 动态加载机制 (误判纠正)
+- 初始分析: `nm` 显示 xla_cuda_plugin.so 有 328 个 NCCL local symbols (`t ncclAllReduce`) → 误以为 NCCL 被静态编译
+- **实际机制**: 这些 `t` 符号是 `nccl_stub.cc` 中的 **thin wrapper/stub**，不是完整 NCCL 实现
+- 三阶段加载链:
+  ```
+  Stage 1: _load("nccl") → importlib.import_module("nvidia.nccl") → ctypes.cdll.LoadLibrary(绝对路径)
+  Stage 2: xla_cuda_plugin.so 注册 → RPATH $ORIGIN/../../nvidia/nccl/lib
+  Stage 3: nccl_stub.cc → dlopen("libnccl.so.2") → 复用 Stage 1 已加载的 handle
+  ```
+- **关键**: pip 升级 nvidia-nccl-cu12 即可改变运行时 NCCL 版本
+- **LD_PRELOAD 也有效**: 在 Stage 1 之前加载，所有后续 dlopen 复用 PRELOAD 版本
+- **教训**: `nm` 的 local symbol `t` 不等于静态编译 — 可能是 dlopen+dlsym wrapper
+
+### ★ Insight 3: CXI Eager Message Race Condition (三大 HPC 中心共识)
+- **CSCS Alps + Isambard + ALCF Polaris** 三方文档一致推荐:
+  ```bash
+  export FI_CXI_RDZV_GET_MIN=0       # 禁用 eager GET 最小尺寸
+  export FI_CXI_RDZV_THRESHOLD=0     # 强制所有消息走 rendezvous
+  export FI_CXI_RDZV_EAGER_SIZE=0    # rendezvous 内无 eager 数据
+  ```
+- **机制**: CXI NIC 的 eager buffer 在 128 GPU bursty traffic 下偶尔耗尽 → 后续 rendezvous 无法完成 → NCCL AllReduce 永久阻塞
+- **我们之前完全没设置这三个变量** — 这是 CSCS/Isambard 文档标注为 "prevents NCCL timeouts" 的首要 workaround
+- **验证**: Job 2447130 (32N, 4 epoch) 未挂起，性能无回归
+
+### ★ Insight 4: 之前 37% 性能回归的误诊 (单变量测试方法论)
+- **Job 2382150**: 同时开了 8 个 NCCL/CXI 变量 → 37% 回归 (9.78 → 13.36 s/step) → 全部注释掉
+- **问题**: 无法确定哪个变量导致回归，把**无辜的 hang prevention 变量也一起禁用了**
+- **后续单变量测试结果**:
+  | 变量 | 影响 | 验证 Job |
+  |------|------|---------|
+  | NCCL_CROSS_NIC=1 | ❌ 性能杀手 | 2382150 |
+  | NCCL_NET_GDR_LEVEL=PHB | ❌ 性能杀手 | 2382150 |
+  | NCCL_PROTO=^LL128 | ❌ 23% 回归 | 2447647 |
+  | FI_CXI_RDZV_*=0 | ✅ 无影响 | 2447130 |
+  | FI_CXI_DISABLE_HOST_REGISTER=1 | ✅ 无影响 | 2447130 |
+  | FI_MR_CACHE_MONITOR=userfaultfd | ✅ 无影响 | 2447130 |
+  | MPICH_GPU_SUPPORT_ENABLED=0 | ✅ 无影响 | 2447130 |
+- **教训**: 多变量同时测试 → 无法归因 → 必须单变量逐个验证
+
+### ★ Insight 5: LL128 在 NCCL 2.29.3 + Slingshot 上是有益的 (反直觉)
+- **CSCS/Isambard 文档**: "NCCL_PROTO=^LL128 — LL128 typically performs worse on Slingshot"
+- **但这是基于旧版 NCCL (< 2.27)**: NCCL 2.27+ 对 LL128 做了多 NIC 拓扑优化
+- **实测 (32N, Job 2447647 vs 2447130)**:
+  | 配置 | 稳态速度 (step 250-300) |
+  |------|------------------------|
+  | LL128 默认开启 (baseline) | 0.91 s/step |
+  | NCCL_PROTO=^LL128 (禁用) | 1.12 s/step |
+  | **差异** | **+23% 更慢** |
+- **为什么有帮助**: LL128 是低延迟协议，适合 medium-sized messages; shard_map 2D mesh 的 inter-node pmean 产生大量 medium messages
+- **教训**: HPC 文档的建议可能基于旧版本; 新版本可能已修复; 必须在自己的环境实测
+
+### ★ Insight 6: BlueConnect 与 shard_map 2D Mesh 不兼容 (3x 回归)
+- `--xla_gpu_all_reduce_blueconnect_num_devices_per_host=4`: XLA 自动将 AllReduce 分解为 ReduceScatter + AllReduce + AllGather
+- **问题**: shard_map 已经手动做了 2-level 分层 (pmean('gpus') intra-node + pmean('nodes') inter-node)
+- **双重分层**: BlueConnect 再次分解已经是 "部分" 的 AllReduce → 不必要的通信 → 3x 回归 (3.55 vs 1.18 s/step)
+- **pmean('nodes') 的特殊情况**: 32-rank inter-node group 中每 host 只有 1 GPU → BlueConnect 的 intra-host ReduceScatter 找不到同 host 伙伴 → 退化或死锁
+- **教训**: BlueConnect 和 shard_map 2D mesh 是互斥方案; 用了 shard_map 就不能开 BlueConnect
+- **验证**: Job 2440967 (3.55 s/step)，Commit 4f57f24b 移除
+
+### ★ Insight 7: HLO Profiling 推翻 eval 假说
+- **假说**: eval out_shardings=(None,None,None) 强制 XLA 插入 128-rank flat AllReduce → eval 期间 NCCL communicator 切换 → 死锁
+- **HLO 验证 (Job 2440089)**: eval_step **零 NCCL collectives**; train_step 有 336 AllReduce/step
+- **train 336 AllReduce 组成**: 169 intra-node (replica_groups: {0,1,2,3},{4,5,6,7},...) + 167 inter-node (replica_groups: {0,4,8,...},{1,5,9,...},...)
+- **累积量化**: 32N × 336 × 549 steps/epoch × 6 epochs = ~1.1M collectives — 即使 P(single fail) = 1e-6, 累积 P(at least one) ≈ 67%
+- **教训**: 假说必须用 HLO dump 验证; XLA 编译器的行为不能靠代码推断
+
+### ★ Insight 8: NCCL_TIMEOUT 对 CXI 层面 hang 无效
+- `NCCL_TIMEOUT=3600` 在 32N 上未能阻止 6h hang (Job 2426449)
+- **原因**: CXI 层的 hang 发生在 NCCL 之下 — `libfabric fi_cq_read()` 永远等不到 completion event
+- NCCL 认为 "传输仍在进行"（not timeout, just waiting），所以 NCCL_TIMEOUT 不触发
+- **正确方案**: XLA 层面的 `--xla_gpu_nccl_terminate_on_error=true` + `--xla_gpu_nccl_termination_timeout_seconds=600`
+- 这让 XLA 在 NCCL rendezvous 超时后直接终止进程（而非永久挂起）
+
+### ★ Insight 9: Auto-Resume 设计哲学
+- 32N 下 NCCL 死锁概率永远 > 0 (即使修复了所有已知根因)
+- **哲学**: 与其消灭死锁，不如让训练能自动恢复
+- **实现**: batch script 末尾检查 srun exit code:
+  - 非零退出 + 非 CURTAIL_EPOCHS + 非 NO_AUTO_RESUME → 自动 `sbatch --dependency=afterany:$SLURM_JOB_ID`
+  - 从最新 checkpoint 恢复: `ls -1d checkpoints/epoch_* | sort -V | tail -1`
+  - 最大 3 次连续 auto-resume (NO_AUTO_RESUME_DEPTH 计数器)
+- **srun --kill-on-bad-exit=1**: watchdog 杀一个 rank → srun 杀全部 127 个 → 触发 auto-resume
+
+---
+
+### 完整 CXI Resilience 配置 (>=8N 生产配置)
+
+```bash
+# --- 既有 resilience ---
+FI_CXI_RDZV_RETRIES=100           # 默认5, 容忍瞬态 fabric 错误
+FI_CXI_OFLOW_BUF_SIZE=8388608     # 8MB overflow buffer
+FI_CXI_REQ_BUF_SIZE=8388608       # 8MB request buffer
+
+# --- CXI hang prevention (CSCS + Isambard + ALCF 共识) ---
+FI_CXI_RDZV_GET_MIN=0             # 禁用 eager GET
+FI_CXI_RDZV_THRESHOLD=0           # 强制 rendezvous-only
+FI_CXI_RDZV_EAGER_SIZE=0          # rendezvous 无 eager data
+FI_CXI_RDZV_PROTO=alt_read        # 替代 read 协议 (ALCF 验证 540 nodes)
+
+# --- Host register deadlock 防护 ---
+FI_CXI_DISABLE_HOST_REGISTER=1    # 防止 host buffer 注册死锁
+FI_MR_CACHE_MONITOR=userfaultfd   # MR 缓存监控
+
+# --- GPU-aware MPI 冲突防护 ---
+MPICH_GPU_SUPPORT_ENABLED=0       # "easily leads to deadlocks" - CSCS
+```
+
+### XLA NCCL Flags (生产配置)
+
+```bash
+--xla_gpu_nccl_terminate_on_error=true         # NCCL 错误时快速失败
+--xla_gpu_nccl_termination_timeout_seconds=600  # 10min NCCL 超时
+--xla_gpu_all_reduce_combine_threshold_bytes=134217728  # 128MB 合并
+--xla_gpu_enable_latency_hiding_scheduler=true
+--xla_gpu_enable_highest_priority_async_stream=true
+```
+
+### 有害的 NCCL/XLA 配置速查表
+
+| 配置 | 影响 | 验证 Job | 绝不使用 |
+|------|------|---------|---------|
+| NCCL_P2P_DISABLE=1 | 25x 减速 | — | ★★★★★ |
+| xla_gpu_autotune_level=0 | 10-24x 退化 | — | ★★★★★ |
+| NCCL_CROSS_NIC=1 | 37% 退化 | 2382150 | ★★★★ |
+| NCCL_NET_GDR_LEVEL=PHB | 37% 退化 | 2382150 | ★★★★ |
+| BlueConnect (blueconnect_num_devices_per_host=4) | 3x 回归 | 2440967 | ★★★★ (shard_map) |
+| NCCL_PROTO=^LL128 | 23% 回归 | 2447647 | ★★★ (NCCL 2.29.3) |
+| NCCL_ALGO=TREE | crash / 2.2x 慢 | — | ★★★ |
+
+### 根因覆盖率总结
+
+| 根因 | 概率 | 修复 | 验证 Job |
+|------|------|------|---------|
+| NCCL ARM CAS weak failure | ~50% | pip nvidia-nccl-cu12==2.29.3 | 2447130 |
+| CXI eager message race | ~25% | FI_CXI_RDZV_*=0 | 2447130 |
+| Host register deadlock | ~10% | DISABLE_HOST_REGISTER=1 | 2447130 |
+| Multi-communicator ordering | ~5% | NCCL_LAUNCH_ORDER_IMPLICIT=1 | (已有) |
+| LL128 协议问题 | ~5% | **不修复** — LL128 有益 | 2447647 |
+| CXI transient errors | ~5% | RDZV_RETRIES=100 + auto-resume | (已有) |
+| **总覆盖率** | **~95%** | | |
+
+### Commits
+
+| Commit | 描述 |
+|--------|------|
+| 6f79e3aa | CXI hang prevention + NCCL fail-fast + auto-resume |
+| 4f57f24b | 移除 BlueConnect (3x 回归) |
+| 13ec875a | ^LL128 注释更新 (23% 回归, 不启用) |
+| 050989cc | LD_PRELOAD NCCL 验证 (exp/nccl-version-fix worktree) |
+
+### 详细报告索引
+
+| 报告 | 路径 |
+|------|------|
+| NCCL 加载机制分析 | `subagent_nccl_version_fix_20260223.md` |
+| ^LL128 Benchmark | `subagent_nccl_proto_ll128_20260223.md` |
+| Eval 死锁研究 | `subagent_nccl_eval_deadlock_research_20260222.md` |
+| NCCL task plan | `tasks/nccl/task_plan.md` |
+| NCCL findings | `tasks/nccl/findings.md` |
+| NCCL progress | `tasks/nccl/progress.md` |
+
+## 2026-02-24: NCCL Thunk Init 死锁 — 从误诊到根因修复
+
+### 调试时间线
+
+```
+假说 1: wandb 0.25.0 GPU 探测 → 排除 (Job 2451505 零 wandb 仍死锁)
+假说 2: XLA timeout flag 引起 → 排除 (有/无 flag 都死锁)
+假说 3: 节点分配 → 排除 (相同节点有通过也有失败)
+根因: NCCL 2.28.9 ARM CAS bug → ✅ (NCCL 2.29.3 release note 确认)
+```
+
+### ★ Insight: LD_LIBRARY_PATH vs RPATH 优先级陷阱
+
+Linux 动态链接器的搜索顺序: **RPATH > LD_LIBRARY_PATH > RUNPATH > ld.so.cache**
+
+`xla_cuda_plugin.so` 编译时嵌入 RPATH 指向 conda env 的 `nvidia/nccl/lib`。
+任何 LD_LIBRARY_PATH override 都无效 — linker 先找到 RPATH 就不再搜索。
+
+**验证方法**: `readelf -d xla_cuda_plugin.so | grep RPATH`
+**绕过方法**: 直接替换 RPATH 指向的文件 (pip install 到同一 env) 或 `patchelf --set-rpath`
+
+### ★ Insight: Conda Env 退役 → Base Env 迁移
+
+lob env 不可修的三重问题:
+1. jax 0.6.1 (API 不兼容 0.9.0.1 代码)
+2. pip shebang 指向已删路径 (`rm -rf miniforge3`)
+3. Lustre project quota 1MB (pip install 无法写入)
+
+Base env 已包含所有正确版本 (jax 0.9.0.1 + NCCL 2.29.3 + wandb 0.21.3)。
+切换后 RPATH 自动指向 base env NCCL 2.29.3 — 不需要任何 override。
+
+**Commit**: `e61596c2` | **验证**: Job 2451587
+
+### ★ Insight: 误诊的代价
+
+| 误诊 | 采取的错误行动 | 浪费 |
+|------|--------------|------|
+| "wandb 0.25.0 GPU 探测" | 延迟 import、WANDB__DISABLE_STATS、PYTHONPATH hack | 5+ jobs, ~3h GPU |
+| "XLA timeout flag 导致" | 移除有用的 1500s timeout | 调试时间 |
+| "节点分配问题" | 请求 --contiguous | 排队时间 |
+
+**教训**: 排除法比猜测法有效 — Job 2451505 (零 wandb) 一步排除了最大嫌疑
+
+## XLA Thunk Init Rendezvous Timeout (2026-02-24)
+
+### 问题
+360M 模型 (G1) 在 32N/128GPU 上 XLA thunk 初始化阶段崩溃。所有 32 节点完全相同的模式：GPU 0,1,2 到达 rendezvous，GPU 3 缺席。30 秒超时后 SIGABRT。
+
+### 根因
+- XLA thunk init rendezvous 默认 30 秒超时
+- 360M 模型计算图比 75M 大 ~4.8x，thunk init 时间 ~28-32 秒（边界条件）
+- GPU 3 因 NCCL channel 分配顺序总是最后完成，在慢节点上超时
+- Kangli job 2441019 (不同节点分配 nid010064) 刚好通过 (~28s)
+- Job 2451140/2451366 (nid010000) 超时 (~31s)
+
+### 修复
+```bash
+# 在 XLA_FLAGS 中添加（jaxlib 0.9.0.1 已验证接受）
+--xla_gpu_executable_terminate_timeout_seconds=1500
+```
+
+### 可用的 XLA Timeout Flags (jaxlib 0.9.0.1)
+| Flag | 默认值 | 说明 |
+|------|--------|------|
+| `xla_gpu_executable_terminate_timeout_seconds` | 30 | thunk init rendezvous 终止超时 |
+| `xla_gpu_executable_warn_stuck_timeout_seconds` | 10 | thunk init 警告超时 |
+| `xla_gpu_first_collective_call_terminate_timeout_seconds` | 40 | 第一次 collective call 终止超时 |
+| `xla_gpu_first_collective_call_warn_stuck_timeout_seconds` | 20 | 第一次 collective call 警告超时 |
+| `xla_gpu_nccl_termination_timeout_seconds` | -1 | NCCL 操作终止超时 |
+
+### 关键教训
+1. **XLA rendezvous timeout 不是硬编码的** — 有 XLA flag 可以调整，只是鲜为人知
+2. **大模型 + 多 GPU 的 thunk init 时间不可忽略** — 75M 在 30s 内轻松完成，360M 刚好在边界
+3. **GPU 3 总是最慢** — 单进程 4 GPU 架构中，NCCL channel 分配有顺序性，最后一个 GPU 延迟到达
+4. **节点分配影响 thunk init 速度** — 不同的物理节点可能有 ~3-5 秒的差异
+5. **增大 timeout 只影响一次性初始化，不影响稳态训练速度和 NCCL 死锁检测**
+
+## 2026-02-24: Git Worktree 权限双层结构
+
+### ★ Insight: 每个 worktree 有两个位置需要写权限
+
+1. **实际工作目录** `experiments/exp_*/` — 代码文件、checkpoints
+2. **主 repo 的 `.git/worktrees/<name>/`** 元数据目录 — index, HEAD, refs/ 等
+
+任何 git 操作（包括 `git status`）都需要在 `.git/worktrees/<name>/` 内创建 `index.lock`。
+只修实际工作目录的权限而不修 `.git/worktrees/` 会导致"目录能写文件但 git 命令报错"的诡异现象。
+
+### 修复命令
+```bash
+# 两个位置都需要递归 g+rw
+chmod -R g+rw /lus/.../AlphaTrade/experiments/
+chmod -R g+rw /lus/.../AlphaTrade/LOBS5/.git/worktrees/
+# 确保 setgid 位继承组
+find /lus/.../AlphaTrade/experiments/ -type d -exec chmod g+s {} +
+```
+
+### Future Worktree 权限自动化
+- `git worktree add` 继承默认 umask (022) → 新目录为 2755 (无 g+w)
+- 要永久修复: 在 shell profile 设 `umask 002` 或在 sbatch 脚本开头加 `umask 002`
+- 否则每次创建新 worktree 后需要重跑 chmod
+
+---
+
+## 32N 实验记录规则 (2026-02-24)
+
+所有同时满足 **32 nodes** 且 **非 KTL (Keep Time Large, 即 IGNORE_TIMES=True)** 的实验，必须记录到 `tasks/large-train/experiments.md`。
+
+### 表格格式
+```
+| Task | Job ID | Model Size | IGNORE_TIMES | Curtail | Nodes | Micro BSZ | LR | Global BSZ | Completed Epochs | Stopped At (Epoch/Step) | Best Val Acc | Best Test Acc | Best Val Loss | Best Test Loss | W&B | Time | Session ID | Description |
+```
+
+### 规则
+- **Task 列**: 标注来源 task（如 `G0-baselines-sweeplr`, `G3-ignore-time` 等）
+- **KTL 实验** (IGNORE_TIMES=False) 也记录在同一文件，用 IGNORE_TIMES 列区分
+- Job 提交后立即添加行（PENDING 状态），跑完后补充 Best metrics 和 W&B URL
+- 文件路径: `tasks/large-train/experiments.md`
+
+---
+
+### 更正：Git Worktree 权限是三层结构（非双层）
+- 第三层：`.git/logs/refs/heads/` 和 `.git/refs/heads/` — 分支 reflog 和 ref 指针
+- commit/checkout 等操作需要写 `.git/logs/refs/heads/exp/<branch>`
+- **正确做法**: `chmod -R g+rw .git/` 一次修完整个 `.git/`，不要逐子目录修

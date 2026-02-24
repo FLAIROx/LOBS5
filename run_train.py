@@ -193,7 +193,7 @@ if __name__ == "__main__":
 				help="Runs the training loop in overfit mode on a single batch of data. Validation and testing are from the same set. ")
 	parser.add_argument("--log_ce_tables", type=str2bool, default=False,
 				help="Logs the CE values on a per token level to wandb. Memory intensive.")
-	parser.add_argument("--hierarchical", type=str2bool, default=False,
+	parser.add_argument("--hierarchical", type=str2bool, default=True,
 				help="Use hierarchical AllReduce via shard_map with 2D mesh (nodes, gpus). "
 				     "Decomposes flat AllReduce(N*4) into pmean(gpus)+pmean(nodes).")
 
