@@ -31,8 +31,8 @@ def train(args):
     best_test_acc = -10000.0
     best_test_last_order_loss = 100000000
     best_test_last_order_acc = -10000.0
-    best_test_last_order_ppl = 100000000
-    best_test_all_orders_ppl = 100000000
+    best_test_last_order_nll = 100000000
+    best_test_all_orders_nll = 100000000
 
     #for parameter sweep: get args from wandb server
     is_main_process = getattr(args, 'process_index', 0) == 0
@@ -386,7 +386,7 @@ def train(args):
             (val_loss, val_acc,
                 val_ce_means, val_acc_means,
                 val_last_order_loss, val_last_order_acc,
-                val_last_order_ppl, val_all_orders_ppl) = validate(state,
+                val_last_order_nll, val_all_orders_nll) = validate(state,
                                         val_model.apply,
                                         valloader,
                                         seq_len,
@@ -406,7 +406,7 @@ def train(args):
             (test_loss, test_acc,
               test_ce_means, test_acc_means,
               test_last_order_loss, test_last_order_acc,
-              test_last_order_ppl, test_all_orders_ppl) = validate(state,
+              test_last_order_nll, test_all_orders_nll) = validate(state,
                                            val_model.apply,
                                            testloader,
                                            seq_len,
@@ -428,12 +428,12 @@ def train(args):
                 f"\tTrain Loss: {train_loss:.5f}"
             )
             print(
-                f"\tAll Orders -- Val Loss: {val_loss:.5f} Val Acc: {val_acc:.4f} Val PPL: {val_all_orders_ppl:.4f}"
-                f" | Test Loss: {test_loss:.5f} Test Acc: {test_acc:.4f} Test PPL: {test_all_orders_ppl:.4f}"
+                f"\tAll Orders -- Val Loss: {val_loss:.5f} Val Acc: {val_acc:.4f} Val NLL: {val_all_orders_nll:.4f}"
+                f" | Test Loss: {test_loss:.5f} Test Acc: {test_acc:.4f} Test NLL: {test_all_orders_nll:.4f}"
             )
             print(
-                f"\tLast Order -- Val Loss: {val_last_order_loss:.5f} Val Acc: {val_last_order_acc:.4f} Val PPL: {val_last_order_ppl:.4f}"
-                f" | Test Loss: {test_last_order_loss:.5f} Test Acc: {test_last_order_acc:.4f} Test PPL: {test_last_order_ppl:.4f}"
+                f"\tLast Order -- Val Loss: {val_last_order_loss:.5f} Val Acc: {val_last_order_acc:.4f} Val NLL: {val_last_order_nll:.4f}"
+                f" | Test Loss: {test_last_order_loss:.5f} Test Acc: {test_last_order_acc:.4f} Test NLL: {test_last_order_nll:.4f}"
             )
 
         else:
@@ -445,7 +445,7 @@ def train(args):
             (test_loss, test_acc,
               test_ce_means, test_acc_means,
               test_last_order_loss, test_last_order_acc,
-              test_last_order_ppl, test_all_orders_ppl) = validate(state,
+              test_last_order_nll, test_all_orders_nll) = validate(state,
                                          val_model.apply,
                                          valloader,
                                          seq_len,
@@ -463,8 +463,8 @@ def train(args):
             val_acc=test_acc
             val_last_order_loss = test_last_order_loss
             val_last_order_acc = test_last_order_acc
-            val_last_order_ppl = test_last_order_ppl
-            val_all_orders_ppl = test_all_orders_ppl
+            val_last_order_nll = test_last_order_nll
+            val_all_orders_nll = test_all_orders_nll
 
             print(f"\n=>> Epoch {epoch + 1} Metrics ===")
             print(
@@ -472,12 +472,12 @@ def train(args):
             )
             print(
                 f"\tAll Orders -- Test Loss: {test_loss:.5f} Test Acc: {test_acc:.4f}"
-                f" Test PPL: {test_all_orders_ppl:.4f}"
+                f" Test NLL: {test_all_orders_nll:.4f}"
             )
             print(
                 f"\tLast Order -- Test Loss: {test_last_order_loss:.5f}"
                 f" Test Acc: {test_last_order_acc:.4f}"
-                f" Test PPL: {test_last_order_ppl:.4f}"
+                f" Test NLL: {test_last_order_nll:.4f}"
             )
 
         # Save checkpoint — ALL ranks must call save() for Orbax barrier sync.
@@ -534,8 +534,8 @@ def train(args):
                 best_test_loss, best_test_acc = best_loss, best_acc
             best_test_last_order_loss = test_last_order_loss
             best_test_last_order_acc = test_last_order_acc
-            best_test_last_order_ppl = test_last_order_ppl
-            best_test_all_orders_ppl = test_all_orders_ppl
+            best_test_last_order_nll = test_last_order_nll
+            best_test_all_orders_nll = test_all_orders_nll
 
         # reduce_lr_on_plateau is informational only — LR managed by optax schedules
         input = lr, ssm_lr, lr_count, val_acc, opt_acc
@@ -547,11 +547,11 @@ def train(args):
             f" {best_acc:.4f} at Epoch {best_epoch + 1}\n"
             f"\tBest All Orders -- Loss: {best_test_loss:.5f}"
             f" Acc: {best_test_acc:.4f}"
-            f" PPL: {best_test_all_orders_ppl:.4f}"
+            f" NLL: {best_test_all_orders_nll:.4f}"
             f" at Epoch {best_epoch + 1}\n"
             f"\tBest Last Order -- Loss: {best_test_last_order_loss:.5f}"
             f" Acc: {best_test_last_order_acc:.4f}"
-            f" PPL: {best_test_last_order_ppl:.4f}\n"
+            f" NLL: {best_test_last_order_nll:.4f}\n"
         )
 
         if args.log_ce_tables:
@@ -575,14 +575,14 @@ def train(args):
                     "Val Accuracy": val_acc,
                     "Test Loss": test_loss,
                     "Test Accuracy": test_acc,
-                    "Val All Orders PPL": val_all_orders_ppl,
-                    "Test All Orders PPL": test_all_orders_ppl,
+                    "Val All Orders NLL": val_all_orders_nll,
+                    "Test All Orders NLL": test_all_orders_nll,
                     "Test Last Order Loss": test_last_order_loss,
                     "Test Last Order Accuracy": test_last_order_acc,
-                    "Test Last Order PPL": test_last_order_ppl,
+                    "Test Last Order NLL": test_last_order_nll,
                     "Val Last Order Loss": val_last_order_loss,
                     "Val Last Order Accuracy": val_last_order_acc,
-                    "Val Last Order PPL": val_last_order_ppl,
+                    "Val Last Order NLL": val_last_order_nll,
                     "count": count,
                     "Learning rate count": lr_count,
                     "Opt acc": opt_acc,
@@ -596,11 +596,11 @@ def train(args):
                     "Training Loss": train_loss,
                     "Val loss": val_loss,
                     "Val Accuracy": val_acc,
-                    "Val All Orders PPL": val_all_orders_ppl,
-                    "Test All Orders PPL": test_all_orders_ppl,
+                    "Val All Orders NLL": val_all_orders_nll,
+                    "Test All Orders NLL": test_all_orders_nll,
                     "Test Last Order Loss": test_last_order_loss,
                     "Test Last Order Accuracy": test_last_order_acc,
-                    "Test Last Order PPL": test_last_order_ppl,
+                    "Test Last Order NLL": test_last_order_nll,
                     "count": count,
                     "Learning rate count": lr_count,
                     "Opt acc": opt_acc,
@@ -616,10 +616,10 @@ def train(args):
         wandb.run.summary["Best Epoch"] = best_epoch
         wandb.run.summary["Best Test Loss"] = best_test_loss
         wandb.run.summary["Best Test Accuracy"] = best_test_acc
-        wandb.run.summary["Best Test All Orders PPL"] = best_test_all_orders_ppl
+        wandb.run.summary["Best Test All Orders NLL"] = best_test_all_orders_nll
         wandb.run.summary["Best Test Last Order Loss"] = best_test_last_order_loss
         wandb.run.summary["Best Test Last Order Accuracy"] = best_test_last_order_acc
-        wandb.run.summary["Best Test Last Order PPL"] = best_test_last_order_ppl
+        wandb.run.summary["Best Test Last Order NLL"] = best_test_last_order_nll
         # print("IGNORING EARLY STOPPING FOR TINY EPOCH SIZE ")
         # After each epoch: clear_caches causes JIT recompilation (~193s/epoch) and
         # accumulates NCCL cliques, leading to epoch-3+ OOM. Remove it.
