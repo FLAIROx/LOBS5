@@ -106,11 +106,6 @@ if [ "${SLURM_NNODES:-1}" -ge 2 ]; then
   export HIERARCHICAL=${HIERARCHICAL:-True}
 fi
 
-# Local SGD: sync params every K steps instead of grads every step.
-# K=0 (default): standard AllReduce every step.
-# K>0: each node trains independently with BSZ=PER_GPU_BSZ*4, params averaged every K steps.
-# Effective per-step BSZ = PER_GPU_BSZ * GPUS_PER_NODE (not * total_GPUs).
-export LOCAL_SGD_K=${LOCAL_SGD_K:-0}
 
 echo "============================================"
 echo "Job started at: $(date)"
@@ -445,7 +440,6 @@ python -u -B run_train.py \
     ${RESTORE_STEP:+--restore_step=$RESTORE_STEP} \
     ${RESUME_FROM_STEP:+--resume_from_step=$RESUME_FROM_STEP} \
     ${HIERARCHICAL:+--hierarchical=$HIERARCHICAL} \
-    ${LOCAL_SGD_K:+--local_sgd_k=$LOCAL_SGD_K} \
     --checkpoint_every_n_steps='"$CHECKPOINT_EVERY"' \
     --max_job_hours='"$MAX_JOB_HOURS"'
 '
