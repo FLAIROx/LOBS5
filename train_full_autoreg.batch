@@ -212,8 +212,8 @@ echo "[Wrapper] CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 echo "========================================"
 
 # Source conda
-source ~/miniforge3/etc/profile.d/conda.sh
-conda activate ${CONDA_ENV:-lob}
+source  /projects/s5e/quant/miniforge3/etc/profile.d/conda.sh
+conda activate ${CONDA_ENV:-base}
 
 # Load CUDA module
 module load cuda/12.6
