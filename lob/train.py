@@ -32,6 +32,7 @@ def train(args):
     best_test_last_order_loss = 100000000
     best_test_last_order_acc = -10000.0
     best_test_last_order_ppl = 100000000
+    best_test_all_orders_ppl = 100000000
 
     #for parameter sweep: get args from wandb server
     is_main_process = getattr(args, 'process_index', 0) == 0
@@ -264,8 +265,6 @@ def train(args):
 
     ignore_times=args.ignore_times
     batchnorm=args.batchnorm
-    tokens_per_msg = (Message_Tokenizer.MSG_LEN - (TIME_END_I - TIME_START_I + 1)
-                      if ignore_times else Message_Tokenizer.MSG_LEN)
 
     start_epoch = 0
     if args.restore is not None and args.restore != '':
@@ -387,7 +386,7 @@ def train(args):
             (val_loss, val_acc,
                 val_ce_means, val_acc_means,
                 val_last_order_loss, val_last_order_acc,
-                val_last_order_ppl) = validate(state,
+                val_last_order_ppl, val_all_orders_ppl) = validate(state,
                                         val_model.apply,
                                         valloader,
                                         seq_len,
@@ -407,7 +406,7 @@ def train(args):
             (test_loss, test_acc,
               test_ce_means, test_acc_means,
               test_last_order_loss, test_last_order_acc,
-              test_last_order_ppl) = validate(state,
+              test_last_order_ppl, test_all_orders_ppl) = validate(state,
                                            val_model.apply,
                                            testloader,
                                            seq_len,
@@ -423,21 +422,18 @@ def train(args):
                                            jit_eval_step_fn=jit_eval_step)
 
             eval_watchdog.stop()
-            val_log_msg_ppl = val_loss * tokens_per_msg
-            test_log_msg_ppl = test_loss * tokens_per_msg
 
             print(f"\n=>> Epoch {epoch + 1} Metrics ===")
             print(
-                f"\tTrain Loss: {train_loss:.5f} -- Val Loss (AR): {val_loss:.5f} --Test Loss (RNN): {test_loss:.5f} --"
-                f" Val Accuracy: {val_acc:.4f}"
-                f" Test Accuracy: {test_acc:.4f}"
-                f" Val Log Msg PPL: {val_log_msg_ppl:.4f}"
-                f" Test Log Msg PPL: {test_log_msg_ppl:.4f}"
+                f"\tTrain Loss: {train_loss:.5f}"
             )
             print(
-                f"\tLast Order -- Test Loss: {test_last_order_loss:.5f}"
-                f" Test Acc: {test_last_order_acc:.4f}"
-                f" Test PPL: {test_last_order_ppl:.4f}"
+                f"\tAll Orders -- Val Loss: {val_loss:.5f} Val Acc: {val_acc:.4f} Val PPL: {val_all_orders_ppl:.4f}"
+                f" | Test Loss: {test_loss:.5f} Test Acc: {test_acc:.4f} Test PPL: {test_all_orders_ppl:.4f}"
+            )
+            print(
+                f"\tLast Order -- Val Loss: {val_last_order_loss:.5f} Val Acc: {val_last_order_acc:.4f} Val PPL: {val_last_order_ppl:.4f}"
+                f" | Test Loss: {test_last_order_loss:.5f} Test Acc: {test_last_order_acc:.4f} Test PPL: {test_last_order_ppl:.4f}"
             )
 
         else:
@@ -449,7 +445,7 @@ def train(args):
             (test_loss, test_acc,
               test_ce_means, test_acc_means,
               test_last_order_loss, test_last_order_acc,
-              test_last_order_ppl) = validate(state,
+              test_last_order_ppl, test_all_orders_ppl) = validate(state,
                                          val_model.apply,
                                          valloader,
                                          seq_len,
@@ -468,14 +464,15 @@ def train(args):
             val_last_order_loss = test_last_order_loss
             val_last_order_acc = test_last_order_acc
             val_last_order_ppl = test_last_order_ppl
-            test_log_msg_ppl = test_loss * tokens_per_msg
-            val_log_msg_ppl = test_log_msg_ppl
+            val_all_orders_ppl = test_all_orders_ppl
 
             print(f"\n=>> Epoch {epoch + 1} Metrics ===")
             print(
-                f"\tTrain Loss: {train_loss:.5f}  --Test Loss: {val_loss:.5f} --"
-                f" Test Accuracy: {val_acc:.4f}"
-                f" Test Log Msg PPL: {test_log_msg_ppl:.4f}"
+                f"\tTrain Loss: {train_loss:.5f}"
+            )
+            print(
+                f"\tAll Orders -- Test Loss: {test_loss:.5f} Test Acc: {test_acc:.4f}"
+                f" Test PPL: {test_all_orders_ppl:.4f}"
             )
             print(
                 f"\tLast Order -- Test Loss: {test_last_order_loss:.5f}"
@@ -538,18 +535,19 @@ def train(args):
             best_test_last_order_loss = test_last_order_loss
             best_test_last_order_acc = test_last_order_acc
             best_test_last_order_ppl = test_last_order_ppl
+            best_test_all_orders_ppl = test_all_orders_ppl
 
         # reduce_lr_on_plateau is informational only — LR managed by optax schedules
         input = lr, ssm_lr, lr_count, val_acc, opt_acc
         _, _, lr_count, opt_acc = reduce_lr_on_plateau(input, factor=args.reduce_factor, patience=args.lr_patience, lr_min=args.lr_min)
 
         # Print best accuracy & loss so far...
-        best_test_log_msg_ppl = best_test_loss * tokens_per_msg
         print(
             f"\tBest Val Loss: {best_loss:.5f} -- Best Val Accuracy:"
             f" {best_acc:.4f} at Epoch {best_epoch + 1}\n"
-            f"\tBest Test Loss: {best_test_loss:.5f} -- Best Test Accuracy:"
-            f" {best_test_acc:.4f} -- Best Test Log Msg PPL: {best_test_log_msg_ppl:.4f}"
+            f"\tBest All Orders -- Loss: {best_test_loss:.5f}"
+            f" Acc: {best_test_acc:.4f}"
+            f" PPL: {best_test_all_orders_ppl:.4f}"
             f" at Epoch {best_epoch + 1}\n"
             f"\tBest Last Order -- Loss: {best_test_last_order_loss:.5f}"
             f" Acc: {best_test_last_order_acc:.4f}"
@@ -577,8 +575,8 @@ def train(args):
                     "Val Accuracy": val_acc,
                     "Test Loss": test_loss,
                     "Test Accuracy": test_acc,
-                    "Val Log Msg PPL": val_log_msg_ppl,
-                    "Test Log Msg PPL": test_log_msg_ppl,
+                    "Val All Orders PPL": val_all_orders_ppl,
+                    "Test All Orders PPL": test_all_orders_ppl,
                     "Test Last Order Loss": test_last_order_loss,
                     "Test Last Order Accuracy": test_last_order_acc,
                     "Test Last Order PPL": test_last_order_ppl,
@@ -598,7 +596,8 @@ def train(args):
                     "Training Loss": train_loss,
                     "Val loss": val_loss,
                     "Val Accuracy": val_acc,
-                    "Val Log Msg PPL": val_log_msg_ppl,
+                    "Val All Orders PPL": val_all_orders_ppl,
+                    "Test All Orders PPL": test_all_orders_ppl,
                     "Test Last Order Loss": test_last_order_loss,
                     "Test Last Order Accuracy": test_last_order_acc,
                     "Test Last Order PPL": test_last_order_ppl,
@@ -617,7 +616,7 @@ def train(args):
         wandb.run.summary["Best Epoch"] = best_epoch
         wandb.run.summary["Best Test Loss"] = best_test_loss
         wandb.run.summary["Best Test Accuracy"] = best_test_acc
-        wandb.run.summary["Best Test Log Msg PPL"] = best_test_log_msg_ppl
+        wandb.run.summary["Best Test All Orders PPL"] = best_test_all_orders_ppl
         wandb.run.summary["Best Test Last Order Loss"] = best_test_last_order_loss
         wandb.run.summary["Best Test Last Order Accuracy"] = best_test_last_order_acc
         wandb.run.summary["Best Test Last Order PPL"] = best_test_last_order_ppl

@@ -1121,10 +1121,11 @@ def validate(state,
     last_order_accs = concat_acc[:, -tpm:]
     last_order_loss = float(onp.mean(last_order_losses))
     last_order_acc = float(onp.mean(last_order_accs))
-    last_order_ppl = float(onp.exp(last_order_loss))
+    last_order_ppl = float(last_order_loss * tpm)
+    all_orders_ppl = float(aveloss * tpm)
 
     del losses, accuracies
-    return aveloss, aveaccu, ce_means, acc_means, last_order_loss, last_order_acc, last_order_ppl
+    return aveloss, aveaccu, ce_means, acc_means, last_order_loss, last_order_acc, last_order_ppl, all_orders_ppl
 
 def eval_step(
         batch_inputs,
