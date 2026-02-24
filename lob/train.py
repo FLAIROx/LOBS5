@@ -10,7 +10,7 @@ import orbax.checkpoint as ocp
 import wandb
 import gc
 
-from lob.init_train import init_train_state, load_checkpoint, save_checkpoint, deduplicate_trainstate
+from lob.init_train import init_train_state, load_checkpoint, save_checkpoint, deduplicate_trainstate, remap_train_state_step
 from lob.dataloading import create_lobster_prediction_dataset#, Datasets
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import reduce_lr_on_plateau, train_epoch, validate, \
@@ -163,6 +163,19 @@ def train(args):
             schedule_count = ssm_inner[1].count  # ScaleByScheduleState
             print(f"[Restore] Schedule count = {int(schedule_count)}")
             restored_metrics = ckpt.get('metrics', {})
+
+            # --- Elastic Resume: remap step when device count changes ---
+            ckpt_config = ckpt.get('config', {})
+            original_process_count = ckpt_config.get('process_count', process_count)
+            if original_process_count != process_count:
+                original_spe = train_size // (args.micro_bsz * args.num_devices * original_process_count)
+                new_spe = train_size // (args.micro_bsz * args.num_devices * process_count)
+                restored_epoch = int(state.step) // max(original_spe, 1)
+                remapped_step = restored_epoch * new_spe
+                print(f"[Elastic Resume] process_count changed: {original_process_count} → {process_count}")
+                print(f"[Elastic Resume] steps/epoch: {original_spe} → {new_spe}")
+                print(f"[Elastic Resume] state.step {int(state.step)} → {remapped_step} (epoch {restored_epoch})")
+                state = remap_train_state_step(state, remapped_step)
 
         val_model = model_cls(training=False, step_rescale=1)
         init_hidden=model_cls().initialize_carry(batch_size=args.micro_bsz,

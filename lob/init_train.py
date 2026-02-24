@@ -40,6 +40,33 @@ def deduplicate_trainstate(
     host_state = jax.device_get(state)
     return jax.device_put(host_state, device=jax.local_devices()[0])
 
+
+def remap_train_state_step(state: TrainState, new_step: int) -> TrainState:
+    """Remap state.step and optimizer schedule counts for elastic resume.
+
+    When resuming with a different number of nodes (different global BSZ),
+    state.step and optimizer counts must be remapped so the LR schedule
+    position matches the correct epoch in the new schedule.
+
+    All optimizer count fields (ScaleByAdamState.count, ScaleByScheduleState.count)
+    track the same global step. We replace all scalar int counts matching old_step
+    with new_step. Adam bias correction (1/(1-beta^count)) converges for count>100,
+    so remapping doesn't affect convergence — only schedule alignment matters.
+    """
+    import numpy as real_np  # init_train.py aliases jax.numpy as np
+    old_step = int(state.step)
+    new_step_val = real_np.int32(new_step)
+
+    def remap_leaf(leaf):
+        if hasattr(leaf, 'shape') and leaf.shape == () and hasattr(leaf, 'dtype'):
+            if leaf.dtype in (real_np.int32, real_np.int64) and int(leaf) == old_step:
+                return real_np.int32(new_step)
+        return leaf
+
+    new_opt_state = jax.tree_util.tree_map(remap_leaf, state.opt_state)
+    return state.replace(step=new_step_val, opt_state=new_opt_state)
+
+
 def load_args_from_checkpoint(
         checkpoint_path: str,
         step: Optional[int] = None,
