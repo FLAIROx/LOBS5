@@ -164,6 +164,8 @@ if __name__ == "__main__":
 						help="probability of dropout")
 	parser.add_argument("--weight_decay", type=float, default=0.05,
 						help="weight decay value")
+	parser.add_argument("--max_grad_norm", type=float, default=1.0,
+						help="max gradient norm for clipping (0 to disable)")
 	parser.add_argument("--opt_config", type=str, default="standard", choices=['standard',
 																			   'BandCdecay',
 																			   'BfastandCdecay',
