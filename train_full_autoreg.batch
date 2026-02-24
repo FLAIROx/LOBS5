@@ -393,6 +393,26 @@ nvidia-smi --list-gpus | head -4
 # Run training
 cd "$WORKDIR"
 
+# ============================================
+# IGNORE_TIMES default: False (all tokens in loss)
+# ============================================
+# IGNORE_TIMES=False means ALL tokens (event + time) enter loss computation.
+# IGNORE_TIMES=True skips time tokens in loss (only event tokens contribute).
+#
+# Changed to False (2026-02-24) based on KTL (Keep-Time-Large) experiment evidence:
+#
+#   | Config                    | Val Acc  | Test Acc | Val Loss | Job ID  | W&B       |
+#   |---------------------------|----------|----------|----------|---------|-----------|
+#   | IGNORE_TIMES=False (KTL)  | 80.28%   | 77.82%  | 1.017    | 2458440 | ew3af26l  |
+#   | IGNORE_TIMES=True  (G0)   | 76.61%   | 73.45%  | 1.177    | 2458353 | cgdexweb  |
+#   | Delta                     | +3.67pp  | +4.37pp | -0.160   |         |           |
+#
+# Both runs: 75M model, 32N (128 GPU), BSZ=10, lr=1e-3, 40 epochs.
+# KTL was still improving when cancelled at E37 — ceiling likely higher.
+# Conclusion: time prediction provides causal signal that improves event prediction.
+# Override: IGNORE_TIMES=True sbatch ... (to revert to old behavior)
+# ============================================
+
 python -u -B run_train.py \
     --USE_WANDB=True \
     --wandb_project="${WANDB_PROJECT:-lobs5-75M-B1}" \
@@ -426,7 +446,7 @@ python -u -B run_train.py \
     --random_offsets_train=True \
     --shuffle_train=True \
     --debug_overfit=False \
-    --ignore_times='"${IGNORE_TIMES:-True}"' \
+    --ignore_times='"${IGNORE_TIMES:-False}"' \
     --lr_patience=4 \
     --d_model='"$D_MODEL"' \
     --n_layers='"$N_LAYERS"' \
