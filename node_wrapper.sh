@@ -254,7 +254,7 @@ python -u -B run_train.py \
     --clip_eigs=True \
     --activation_fn=half_glu1 \
     --dt_global=False \
-    --epochs="${EPOCHS:-40}" \
+    --epochs="${EPOCHS:-1}" \
     --jax_seed=42 \
     --opt_config=standard \
     --p_dropout=0.0 \
