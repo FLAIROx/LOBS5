@@ -50,7 +50,12 @@ NCCL_LIB_OVERRIDE=/projects/s5e/quant/miniforge3/envs/lobmax/lib/python3.12/site
 export LD_LIBRARY_PATH=$NCCL_LIB_OVERRIDE:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
 # NCCL OFI plugin for cross-node communication via Slingshot/libfabric
-export LD_LIBRARY_PATH=/tools/brics/apps/linux-sles15-neoverse_v2/gcc-12.3.0/aws-ofi-nccl-1.8.1-c47cd5ivrugm3jzlyqyis4igyflnydmo/lib:/opt/cray/libfabric/1.22.0/lib64:$LD_LIBRARY_PATH
+# Upgraded from system aws-ofi-nccl 1.8.1 → 1.18.0 (2026-02-25)
+# 1.8.1 was 10 versions behind, caused 512N (2048 GPU) NCCL comm init hang.
+# Fallback: AWS_OFI_NCCL_LIB=/tools/brics/apps/.../aws-ofi-nccl-1.8.1-.../lib
+AWS_OFI_NCCL_LIB=${AWS_OFI_NCCL_LIB:-/projects/s5e/quant/aws-ofi-nccl-1.18.0/lib}
+export LD_LIBRARY_PATH=$AWS_OFI_NCCL_LIB:/opt/cray/libfabric/1.22.0/lib64:$LD_LIBRARY_PATH
+echo "[OFI] aws-ofi-nccl: $AWS_OFI_NCCL_LIB"
 
 # Verify NCCL version (must be 2.29.x, NOT 2.28.x)
 echo "[NCCL] Override lib path: $NCCL_LIB_OVERRIDE"
