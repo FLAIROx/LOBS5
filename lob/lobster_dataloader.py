@@ -753,7 +753,7 @@ class LOBSTER(SequenceDataset):
         return {
             #"permute": False,
             #"k_val_segments": 5,  # train/val split is done by picking 5 contiguous folds
-            "val_split": 0.1,
+            "val_split": 0.01,
             "test_split": 0.1,
             "seed": 42,  # For train/val split
             "mask_fn": LOBSTER_Dataset.random_mask,
