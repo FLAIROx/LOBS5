@@ -7,7 +7,7 @@
 #SBATCH --mem=0
 #SBATCH --time=00:30:00
 #SBATCH --exclusive
-#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564]
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid010655,nid010052,nid010442
 
 # ============================================
 # NCCL 2.29.3 Validation: ARM CAS Fix

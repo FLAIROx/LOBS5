@@ -649,7 +649,7 @@ def train(args):
             # Handle trailing steps: if epoch didn't end exactly on a mini-epoch
             # boundary, run one final evaluation for the remaining steps.
             actual_steps = steps_per_epoch  # curtail already baked into steps_per_epoch
-            if actual_steps % validate_every_n_steps != 0:
+            if validate_every_n_steps > 0 and actual_steps % validate_every_n_steps != 0:
                 last_batch_idx = actual_steps - 1
                 print(f"[Mini-epoch] Trailing {actual_steps % validate_every_n_steps} steps — "
                       f"running final eval at step {actual_steps}")
