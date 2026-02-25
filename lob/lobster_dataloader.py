@@ -49,8 +49,8 @@ def discover_ticker_files(data_root, tickers, date_range=None):
         ticker_dir = Path(data_root) / ticker
         assert ticker_dir.is_dir(), f"Ticker directory not found: {ticker_dir}"
 
-        msg_files = sorted(glob(str(ticker_dir / '*message*.npy')))
-        book_files = sorted(glob(str(ticker_dir / '*book*.npy')))
+        msg_files = sorted(glob(str(ticker_dir / '**' / '*message*.npy'), recursive=True))
+        book_files = sorted(glob(str(ticker_dir / '**' / '*book*.npy'), recursive=True))
         assert len(msg_files) == len(book_files), (
             f"{ticker}: msg files ({len(msg_files)}) != book files ({len(book_files)})")
         assert len(msg_files) > 0, f"No message files found in {ticker_dir}"
