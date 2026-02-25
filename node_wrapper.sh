@@ -49,6 +49,13 @@ module load cuda/12.6
 NCCL_LIB_OVERRIDE=/projects/s5e/quant/nccl-2.29.3/lib
 export LD_LIBRARY_PATH=$NCCL_LIB_OVERRIDE:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
+# CRITICAL: xla_cuda_plugin.so has DT_RPATH (not RUNPATH) pointing to conda's nvidia/nccl/lib.
+# DT_RPATH is searched BEFORE LD_LIBRARY_PATH, so our override above is silently bypassed.
+# LD_PRELOAD forces our NCCL to load first, overriding any RPATH resolution.
+# The base conda env ships NCCL 2.29.3+cuda12.9 (also fixed), but LD_PRELOAD guarantees
+# our GCC 12.3 source build loads regardless of which conda env is active.
+export LD_PRELOAD=$NCCL_LIB_OVERRIDE/libnccl.so.2${LD_PRELOAD:+:$LD_PRELOAD}
+
 # NCCL OFI plugin for cross-node communication via Slingshot/libfabric
 # Upgraded from system aws-ofi-nccl 1.8.1 → 1.18.0 (2026-02-25)
 # 1.8.1 was 10 versions behind, caused 512N (2048 GPU) NCCL comm init hang.
@@ -60,7 +67,15 @@ echo "[OFI] aws-ofi-nccl: $AWS_OFI_NCCL_LIB"
 # Verify NCCL version (must be 2.29.x, NOT 2.28.x)
 echo "[NCCL] Override lib path: $NCCL_LIB_OVERRIDE"
 echo "[NCCL] Library: $(ls -la $NCCL_LIB_OVERRIDE/libnccl.so.2 2>/dev/null || echo NOT_FOUND)"
-strings $NCCL_LIB_OVERRIDE/libnccl.so.2 2>/dev/null | grep "^NCCL version" | head -1 || echo "[NCCL] WARNING: Could not determine NCCL version"
+NCCL_VER=$(strings $NCCL_LIB_OVERRIDE/libnccl.so.2 2>/dev/null | grep "^NCCL version.*compiled" | head -1)
+echo "[NCCL] Version: ${NCCL_VER:-UNKNOWN}"
+echo "[NCCL] LD_PRELOAD: $LD_PRELOAD"
+# Sanity: our build says "cuda12.6", conda's says "cuda12.9"
+if echo "$NCCL_VER" | grep -q "cuda12.6"; then
+    echo "[NCCL] OK: source-built NCCL confirmed (cuda12.6)"
+else
+    echo "[NCCL] WARNING: Expected cuda12.6 (source build), got: $NCCL_VER"
+fi
 
 # JAX environment
 export XLA_PYTHON_CLIENT_PREALLOCATE=true

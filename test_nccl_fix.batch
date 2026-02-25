@@ -58,7 +58,9 @@ else
     echo "[NCCL] Using NEW: 2.29.3 (source build, ARM CAS fix)"
 fi
 
-export LD_LIBRARY_PATH=$NCCL_PATH:/opt/cray/libfabric/1.22.0/lib64:${LD_LIBRARY_PATH:-}
+# OpenMPI module only prepends libfabric paths, NOT its own lib dir — add explicitly
+OPENMPI_LIB=/tools/brics/apps/linux-sles15-neoverse_v2/gcc-12.3.0/openmpi-4.1.7-gha3th46s7fr2ht3icsuhthmysvvlpgh/lib
+export LD_LIBRARY_PATH=$NCCL_PATH:$OPENMPI_LIB:/opt/cray/libfabric/1.22.0/lib64:${LD_LIBRARY_PATH:-}
 
 # Verify loaded version
 echo "[NCCL] Library: $(ls -la $NCCL_PATH/libnccl.so.2 2>/dev/null || echo NOT_FOUND)"
