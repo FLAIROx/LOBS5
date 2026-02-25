@@ -42,11 +42,11 @@ echo "[Wrapper] Python: $(which python) ($(python --version 2>&1))"
 module load cuda/12.6
 
 # Set LD_LIBRARY_PATH
-# NCCL override: use lobmax NCCL 2.29.2 (fixes ARM CAS weak failure hang, fixed in 2.29.x)
-# The lob env has NCCL 2.28.9 which has the ARM CAS bug on GH200 ARM platform.
-# CAVEAT: previous override pointed to ~/miniforge3/lib/... (base env) which DID NOT EXIST,
-#         so all 12+ failed jobs loaded 2.28.9 despite the "override". Fixed 2026-02-23 (E1).
-NCCL_LIB_OVERRIDE=/projects/s5e/quant/miniforge3/envs/lobmax/lib/python3.12/site-packages/nvidia/nccl/lib
+# NCCL override: use custom-built NCCL 2.29.3 (fixes ARM CAS weak failure in proxy.cc)
+# Built from source (commit 25368a7) with GCC 12.3 (strong CAS on aarch64) + CUDA 12.6, sm_90.
+# History: lobmax conda had 2.29.2 (still has weak CAS under GCC < 10 codepath),
+#          lob env has 2.28.9 (ARM CAS bug). Source build is the definitive fix.
+NCCL_LIB_OVERRIDE=/projects/s5e/quant/nccl-2.29.3/lib
 export LD_LIBRARY_PATH=$NCCL_LIB_OVERRIDE:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
 # NCCL OFI plugin for cross-node communication via Slingshot/libfabric

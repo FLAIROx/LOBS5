@@ -1,0 +1,164 @@
+#!/bin/bash
+#SBATCH --job-name=nccl_test
+#SBATCH --output=logs_nccl/nccl_test_%j.out
+#SBATCH --error=logs_nccl/nccl_test_%j.err
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --mem=0
+#SBATCH --time=00:30:00
+#SBATCH --exclusive
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564]
+
+# ============================================
+# NCCL 2.29.3 Validation: ARM CAS Fix
+# ============================================
+#
+# Tests NCCL 2.29.3 (commit 25368a7) built from source with GCC 12.3 + CUDA 12.6, sm_90.
+# Validates fix for ARM CAS weak failure in proxy.cc that caused 512N (2048 GPU) hangs
+# during ncclTransportTreeConnect() ("Connected all trees" phase).
+#
+# Usage:
+#   sbatch --nodes=4  test_nccl_fix.batch                   # smoke test (16 GPU)
+#   sbatch --nodes=32 test_nccl_fix.batch                   # scale stress (128 GPU)
+#   sbatch --nodes=64 test_nccl_fix.batch                   # 4x CSCS threshold (256 GPU)
+#   sbatch --nodes=512 test_nccl_fix.batch                  # definitive test (2048 GPU)
+#
+#   NCCL_LIB=old sbatch --nodes=32 test_nccl_fix.batch      # A/B test with old 2.29.2
+#
+# ============================================
+
+set -euo pipefail
+
+WORKDIR="$(cd "$(dirname "$0")" && pwd)"
+mkdir -p "$WORKDIR/logs_nccl" 2>/dev/null || true
+
+NNODES=${SLURM_NNODES:-1}
+NGPUS=$((NNODES * 4))
+
+echo "========================================"
+echo "[NCCL Test] Job ${SLURM_JOB_ID} — ${NNODES}N / ${NGPUS} GPU"
+echo "[NCCL Test] Nodes: ${SLURM_NODELIST}"
+echo "[NCCL Test] Start: $(date -Iseconds)"
+echo "========================================"
+
+# --- Module setup ---
+module load gcc-native/12.3
+module load cuda/12.6
+module load brics/openmpi/4.1.7
+
+# --- NCCL library selection (A/B testing) ---
+NCCL_293=/lus/lfs1aip2/projects/s5e/quant/nccl-2.29.3/lib
+NCCL_292=/lus/lfs1aip2/projects/s5e/quant/miniforge3/envs/lobmax/lib/python3.12/site-packages/nvidia/nccl/lib
+
+if [ "${NCCL_LIB:-new}" = "old" ]; then
+    NCCL_PATH="$NCCL_292"
+    echo "[NCCL] Using OLD: 2.29.2 (lobmax conda)"
+else
+    NCCL_PATH="$NCCL_293"
+    echo "[NCCL] Using NEW: 2.29.3 (source build, ARM CAS fix)"
+fi
+
+export LD_LIBRARY_PATH=$NCCL_PATH:/opt/cray/libfabric/1.22.0/lib64:${LD_LIBRARY_PATH:-}
+
+# Verify loaded version
+echo "[NCCL] Library: $(ls -la $NCCL_PATH/libnccl.so.2 2>/dev/null || echo NOT_FOUND)"
+strings $NCCL_PATH/libnccl.so.2 2>/dev/null | grep "^NCCL version" | head -1
+
+# --- aws-ofi-nccl plugin ---
+AWS_OFI_NCCL_LIB=${AWS_OFI_NCCL_LIB:-/lus/lfs1aip2/projects/s5e/quant/aws-ofi-nccl-1.18.0/lib}
+export LD_LIBRARY_PATH=$AWS_OFI_NCCL_LIB:$LD_LIBRARY_PATH
+echo "[OFI] aws-ofi-nccl: $AWS_OFI_NCCL_LIB"
+
+# --- NCCL debug ---
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=INIT,ENV
+
+# --- CXI resilience (same as node_wrapper.sh) ---
+if [ "$NNODES" -ge 8 ]; then
+    export FI_CXI_RDZV_RETRIES=100
+    export FI_CXI_OFLOW_BUF_SIZE=8388608
+    export FI_CXI_REQ_BUF_SIZE=8388608
+    export FI_CXI_RDZV_GET_MIN=0
+    export FI_CXI_RDZV_THRESHOLD=0
+    export FI_CXI_RDZV_EAGER_SIZE=0
+    export FI_CXI_RDZV_PROTO=alt_read
+    export FI_CXI_DISABLE_HOST_REGISTER=1
+    export FI_MR_CACHE_MONITOR=userfaultfd
+    export MPICH_GPU_SUPPORT_ENABLED=0
+    echo "[CXI] ${NNODES}N: Full CXI resilience enabled"
+fi
+
+if [ "$NNODES" -ge 128 ]; then
+    export FI_CXI_DEFAULT_CQ_SIZE=262144
+    export FI_CXI_DEFAULT_TX_SIZE=32768
+    export FI_CXI_RX_MATCH_MODE=software
+    export NCCL_SOCKET_RETRY_CNT=100
+    export NCCL_SOCKET_RETRY_SLEEP_MSEC=200
+    export NCCL_MAX_NCHANNELS=16
+    ulimit -s 16384
+    echo "[CXI] ${NNODES}N: 2048-GPU scaling limits"
+fi
+
+NCCL_TESTS=/lus/lfs1aip2/projects/s5e/quant/nccl-tests/build
+
+# --- Test 1: all_reduce_perf (primary diagnostic) ---
+echo ""
+echo "========================================"
+echo "[Test 1] all_reduce_perf — ${NNODES}N (${NGPUS} GPU)"
+echo "========================================"
+
+T_START=$(date +%s)
+
+srun --mpi=pmix \
+    "$NCCL_TESTS/all_reduce_perf" \
+    -b 1M -e 256M -f 2 -n 50 -w 10 -c 1 -G 1
+
+T_END=$(date +%s)
+T_INIT=$((T_END - T_START))
+
+echo "[Test 1] Wall time: ${T_INIT}s"
+
+# --- Test 2: Force TREE algorithm (exercises tree P2P setup — the bug path) ---
+echo ""
+echo "========================================"
+echo "[Test 2] all_reduce_perf TREE — ${NNODES}N (${NGPUS} GPU)"
+echo "========================================"
+
+export NCCL_ALGO="allreduce:tree"
+export NCCL_MIN_NCHANNELS=8
+
+T_START=$(date +%s)
+
+srun --mpi=pmix \
+    "$NCCL_TESTS/all_reduce_perf" \
+    -b 8M -e 512M -f 2 -n 100 -w 10 -c 1 -G 1
+
+T_END=$(date +%s)
+echo "[Test 2] TREE wall time: $((T_END - T_START))s"
+
+unset NCCL_ALGO
+unset NCCL_MIN_NCHANNELS
+
+# --- Test 3: reduce_scatter + all_gather (shard_map pattern) ---
+echo ""
+echo "========================================"
+echo "[Test 3] reduce_scatter + all_gather — ${NNODES}N (${NGPUS} GPU)"
+echo "========================================"
+
+srun --mpi=pmix \
+    "$NCCL_TESTS/reduce_scatter_perf" \
+    -b 1M -e 128M -f 2 -n 50 -w 10 -c 1 -G 1
+
+srun --mpi=pmix \
+    "$NCCL_TESTS/all_gather_perf" \
+    -b 1M -e 128M -f 2 -n 50 -w 10 -c 1 -G 1
+
+# --- Summary ---
+echo ""
+echo "========================================"
+echo "[SUMMARY]"
+echo "  Job:       ${SLURM_JOB_ID}"
+echo "  Scale:     ${NNODES}N / ${NGPUS} GPU"
+echo "  NCCL:      $(strings $NCCL_PATH/libnccl.so.2 2>/dev/null | grep '^NCCL version.*compiled' | head -1)"
+echo "  End:       $(date -Iseconds)"
+echo "========================================"
