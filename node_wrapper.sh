@@ -3,6 +3,12 @@
 # Called by srun with --export=ALL: all env vars from batch script are available.
 # 1 process per node, all GPUs visible.
 
+# TMPDIR: must be set BEFORE any Python import (wandb creates tempdir at import time)
+export TMPDIR=/tmp
+
+# Force wandb online mode (directory-level "offline" setting overrides USE_WANDB=True)
+export WANDB_MODE=online
+
 echo "========================================"
 echo "[Wrapper] Running on node: $(hostname)"
 echo "[Wrapper] SLURM_NODEID: ${SLURM_NODEID:-N/A}"
@@ -11,20 +17,35 @@ echo "[Wrapper] SLURM_LOCALID: ${SLURM_LOCALID:-N/A}"
 echo "[Wrapper] CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 echo "========================================"
 
-# Source conda
-source  /projects/s5e/quant/miniforge3/etc/profile.d/conda.sh
-conda activate ${CONDA_ENV:-base}
+# Activate conda env directly (conda.sh has hardcoded broken paths to kangli's home)
+CONDA_ENV=${CONDA_ENV:-base}
+if [ "$CONDA_ENV" = "base" ]; then
+  export CONDA_PREFIX=/projects/s5e/quant/miniforge3
+else
+  export CONDA_PREFIX=/projects/s5e/quant/miniforge3/envs/$CONDA_ENV
+fi
+export PATH=$CONDA_PREFIX/bin:$PATH
+echo "[Wrapper] Conda env: $CONDA_ENV ($CONDA_PREFIX)"
+echo "[Wrapper] Python: $(which python) ($(python --version 2>&1))"
 
 # Load CUDA module
 module load cuda/12.6
 
 # Set LD_LIBRARY_PATH
-# NCCL override: base env has 2.29.3, lob env has 2.28.9 with ARM CAS hang bug
-NCCL_LIB_OVERRIDE=~/miniforge3/lib/python3.12/site-packages/nvidia/nccl/lib
+# NCCL override: use lobmax NCCL 2.29.2 (fixes ARM CAS weak failure hang, fixed in 2.29.x)
+# The lob env has NCCL 2.28.9 which has the ARM CAS bug on GH200 ARM platform.
+# CAVEAT: previous override pointed to ~/miniforge3/lib/... (base env) which DID NOT EXIST,
+#         so all 12+ failed jobs loaded 2.28.9 despite the "override". Fixed 2026-02-23 (E1).
+NCCL_LIB_OVERRIDE=/projects/s5e/quant/miniforge3/envs/lobmax/lib/python3.12/site-packages/nvidia/nccl/lib
 export LD_LIBRARY_PATH=$NCCL_LIB_OVERRIDE:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
 # NCCL OFI plugin for cross-node communication via Slingshot/libfabric
 export LD_LIBRARY_PATH=/tools/brics/apps/linux-sles15-neoverse_v2/gcc-12.3.0/aws-ofi-nccl-1.8.1-c47cd5ivrugm3jzlyqyis4igyflnydmo/lib:/opt/cray/libfabric/1.22.0/lib64:$LD_LIBRARY_PATH
+
+# Verify NCCL version (must be 2.29.x, NOT 2.28.x)
+echo "[NCCL] Override lib path: $NCCL_LIB_OVERRIDE"
+echo "[NCCL] Library: $(ls -la $NCCL_LIB_OVERRIDE/libnccl.so.2 2>/dev/null || echo NOT_FOUND)"
+strings $NCCL_LIB_OVERRIDE/libnccl.so.2 2>/dev/null | grep "^NCCL version" | head -1 || echo "[NCCL] WARNING: Could not determine NCCL version"
 
 # JAX environment
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
@@ -192,6 +213,7 @@ nvidia-smi --list-gpus | head -4
 
 # Run training
 cd "$WORKDIR"
+export PYTHONPATH="$WORKDIR:$PYTHONPATH"
 
 # ============================================
 # IGNORE_TIMES default: False (all tokens in loss)
@@ -215,7 +237,7 @@ cd "$WORKDIR"
 
 python -u -B run_train.py \
     --USE_WANDB=True \
-    --wandb_project="${WANDB_PROJECT:-lobs5-75M-B1}" \
+    --wandb_project="${WANDB_PROJECT:-lobs5-360M-G30}" \
     --wandb_entity=kang-oxford \
     --C_init=trunc_standard_normal \
     --prenorm=True \

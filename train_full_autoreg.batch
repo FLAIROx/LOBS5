@@ -153,6 +153,13 @@ echo "    d_model=$D_MODEL, n_layers=$N_LAYERS, blocks=$BLOCKS"
 echo "    ssm_size_base=$SSM_SIZE_BASE, ssm_lr_base=$SSM_LR_BASE"
 echo "    per_gpu_bsz=$PER_GPU_BSZ"
 
+# XLA thunk init timeout for large models (360M+)
+# 128 GPUs: thunk initialization can exceed default 30s, GPU 3 (last NCCL channel) gets SIGABRT
+if [ "${D_MODEL}" -ge 2048 ]; then
+    export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_executable_terminate_timeout_seconds=1500"
+    echo "[XLA] Large model (d=$D_MODEL): thunk init timeout set to 1500s"
+fi
+
 # CURTAIL_EPOCHS: Optional - end each epoch early after N steps (for quick testing)
 if [ -n "$CURTAIL_EPOCHS" ]; then
     echo "[*] Curtail epochs: $CURTAIL_EPOCHS steps (quick test mode)"
@@ -185,12 +192,12 @@ fi
 mkdir -p logs_lobs5
 
 # Change to working directory (WORKDIR allows git worktree experiments)
-WORKDIR="${WORKDIR:-/lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5}"
+WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-/lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5}}"
 export WORKDIR
 cd "$WORKDIR"
 
 # Configuration
-GPUS_PER_NODE=${GPUS_PER_NODE:-4}
+export GPUS_PER_NODE=${GPUS_PER_NODE:-4}
 NNODES=$SLURM_NNODES
 export NNODES  # Must export for bash -c wrapper to see it
 TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
@@ -240,17 +247,16 @@ fi
 # Launch with srun (1 process per node, each managing GPUS_PER_NODE GPUs)
 # --kill-on-bad-exit=1: if ANY rank exits non-zero, srun kills ALL ranks immediately.
 # Without this, a watchdog-killed rank leaves 127 others stuck in NCCL wait forever.
-# NOTE: External wrapper script instead of inline bash -c to avoid srun IO buffer
-# overflow at 32+ nodes (the inline ~13KB payload overflows per-task argument buffers).
-# All env vars are passed via --export=ALL.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# External wrapper: inline bash -c overflows srun IO buffer at 32N (13KB * 32 tasks).
+# NOTE: no --output flag — per-node srun output also causes "Slurmd could not connect IO".
+# All training output goes to wandb + main sbatch log.
+export SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
 srun --nodes=$NNODES \
      --ntasks=$NNODES \
      --ntasks-per-node=1 \
      --gres=gpu:$GPUS_PER_NODE \
      --gpu-bind=map_gpu:0,1,2,3 \
      --kill-on-bad-exit=1 \
-     --output=logs_lobs5/training_${SLURM_JOB_ID}_node%n.log \
      --export=ALL \
      bash "$SCRIPT_DIR/node_wrapper.sh"
 
