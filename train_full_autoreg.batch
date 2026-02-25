@@ -139,14 +139,14 @@ echo "============================================"
 # ============================================
 # Scaled from 75M: all dimensions doubled
 # 75M was: D_MODEL=1024, N_LAYERS=12, BLOCKS=16, SSM_SIZE=1024, PER_GPU_BSZ=10
-D_MODEL=${D_MODEL:-2048}
-N_LAYERS=${N_LAYERS:-24}
-BLOCKS=${BLOCKS:-32}
-SSM_SIZE_BASE=${SSM_SIZE_BASE:-2048}
+export D_MODEL=${D_MODEL:-2048}
+export N_LAYERS=${N_LAYERS:-24}
+export BLOCKS=${BLOCKS:-32}
+export SSM_SIZE_BASE=${SSM_SIZE_BASE:-2048}
 export PER_GPU_BSZ=${PER_GPU_BSZ:-2}
-SSM_LR_BASE=${SSM_LR_BASE:-5e-4}
-LR_FACTOR=${LR_FACTOR:-1}
-WARMUP_END=${WARMUP_END:-0.01}
+export SSM_LR_BASE=${SSM_LR_BASE:-5e-4}
+export LR_FACTOR=${LR_FACTOR:-1}
+export WARMUP_END=${WARMUP_END:-0.01}
 
 echo "[*] Model config: 360M (24tok, padded_large)"
 echo "    d_model=$D_MODEL, n_layers=$N_LAYERS, blocks=$BLOCKS"
