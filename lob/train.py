@@ -168,8 +168,15 @@ def train(args):
             ckpt_config = ckpt.get('config', {})
             original_process_count = ckpt_config.get('process_count', process_count)
             if original_process_count != process_count:
-                original_spe = train_size // (args.micro_bsz * args.num_devices * original_process_count)
-                new_spe = train_size // (args.micro_bsz * args.num_devices * process_count)
+                # Compute original steps_per_epoch (respecting curtail if checkpoint used it)
+                original_curtail = ckpt_config.get('curtail_epochs', None)
+                raw_original_spe = train_size // (args.micro_bsz * args.num_devices * original_process_count)
+                original_spe = min(raw_original_spe, original_curtail + 1) if original_curtail is not None else raw_original_spe
+
+                # Compute new steps_per_epoch (respecting current curtail setting)
+                raw_new_spe = train_size // (args.micro_bsz * args.num_devices * process_count)
+                new_spe = min(raw_new_spe, args.curtail_epochs + 1) if args.curtail_epochs is not None else raw_new_spe
+
                 restored_epoch = int(state.step) // max(original_spe, 1)
                 remapped_step = restored_epoch * new_spe
                 print(f"[Elastic Resume] process_count changed: {original_process_count} → {process_count}")
