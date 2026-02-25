@@ -204,19 +204,21 @@ export JAX_COORDINATOR_TIMEOUT_MS=600000
 echo "[*] Multi-node DDP: $NNODES nodes, coordinator=$JAX_COORDINATOR_ADDRESS"
 
 # Data paths
-# Multi-ticker mode: set TICKERS=GOOG,AAPL,NVDA etc. and DATA_ROOT
-# Single-ticker mode (default): hardcoded GOOG 2022 train + Jan 2023 test
-if [ -n "${TICKERS:-}" ]; then
-  # Multi-ticker: DATA_ROOT contains per-ticker subdirectories
-  export DATA_ROOT="${DATA_ROOT:-/lus/lfs1aip2/projects/s5e/lob_preproc}"
-  export TRAIN_DATE_RANGE="${TRAIN_DATE_RANGE:-2022-01-01,2022-12-31}"
-  export TEST_DATE_RANGE="${TEST_DATE_RANGE:-2023-01-01,2023-01-31}"
+# Default: 8 tickers × 4 years (multi-ticker mode)
+# Override: TICKERS="" (empty) for single-ticker GOOG 2022 fallback
+export TICKERS="${TICKERS:-GOOG,AAPL,NVDA,AMZN,META,TSLA,MSFT,AMD}"
+export DATA_ROOT="${DATA_ROOT:-/lus/lfs1aip2/projects/s5e/lob_preproc}"
+export TRAIN_DATE_RANGE="${TRAIN_DATE_RANGE:-2022-01-01,2025-12-31}"
+export TEST_DATE_RANGE="${TEST_DATE_RANGE:-2026-01-01,2026-01-31}"
+
+if [ -n "${TICKERS}" ]; then
   export DATA_DIR="${DATA_ROOT}"  # dir_name still needed as base path
   echo "[*] Multi-ticker mode: TICKERS=$TICKERS"
   echo "[*] Data root: $DATA_ROOT"
   echo "[*] Train dates: $TRAIN_DATE_RANGE"
   echo "[*] Test dates: $TEST_DATE_RANGE"
 else
+  # Single-ticker fallback: GOOG 2022 train + Jan 2023 test
   export DATA_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022"
   export TEST_DIR="/projects/s5e/quant/JAN2023/GOOG_24tok_preproc"
   echo "[*] Single-ticker mode: GOOG 2022 train + Jan 2023 test"
