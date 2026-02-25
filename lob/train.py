@@ -107,7 +107,14 @@ def train(args):
             use_distributed_sampler=is_distributed,
             process_rank=process_rank,
             process_count=process_count,
+            tickers=getattr(args, 'tickers', None),
+            data_root=getattr(args, 'data_root', None),
+            train_date_range=getattr(args, 'train_date_range', None),
+            test_date_range=getattr(args, 'test_date_range', None),
         )
+
+    # Extract per-ticker test loaders if available
+    per_ticker_test_loaders = aux_dataloaders.get('per_ticker_test', {})
 
     
 
@@ -451,6 +458,23 @@ def train(args):
 
             eval_watchdog.stop()
 
+            # Per-ticker test eval (multi-ticker mode)
+            per_ticker_metrics = {}
+            if per_ticker_test_loaders:
+                for ticker, ticker_loader in per_ticker_test_loaders.items():
+                    print(f"[*] Running Epoch {epoch + 1} Test [{ticker}]")
+                    (t_loss, t_acc, _, _, _, _, _, _) = validate(
+                        state, val_model.apply, ticker_loader,
+                        seq_len, in_dim, batchnorm, args.num_devices, epoch,
+                        curtail_epoch=args.curtail_epochs,
+                        apply_method='__call_ar__',
+                        ignore_times=ignore_times,
+                        log_ce_tables=False,
+                        mesh=mesh,
+                        jit_eval_step_fn=jit_eval_step)
+                    per_ticker_metrics[ticker] = {'loss': float(t_loss), 'acc': float(t_acc)}
+                    print(f"  [{ticker}] Loss: {t_loss:.5f}  Acc: {t_acc:.4f}")
+
             print(f"\n=>> Epoch {epoch + 1} Metrics ===")
             print(
                 f"\tTrain Loss: {train_loss:.5f}"
@@ -487,6 +511,7 @@ def train(args):
                                          mesh=mesh,
                                          jit_eval_step_fn=jit_eval_step)
             eval_watchdog.stop()
+            per_ticker_metrics = {}
             val_loss=test_loss
             val_acc=test_acc
             val_last_order_loss = test_last_order_loss
@@ -595,6 +620,13 @@ def train(args):
         current_lr = float(lr_schedule_fn(step))
         current_ssm_lr = float(ssm_lr_schedule_fn(step))
 
+        # Per-ticker wandb metrics
+        ticker_wandb = {}
+        if per_ticker_metrics:
+            for ticker, tm in per_ticker_metrics.items():
+                ticker_wandb[f"test/{ticker}/loss"] = tm['loss']
+                ticker_wandb[f"test/{ticker}/accuracy"] = tm['acc']
+
         if valloader is not None:
             wandb.log(
                 {
@@ -616,6 +648,7 @@ def train(args):
                     "Opt acc": opt_acc,
                     "lr": current_lr,
                     "ssm_lr": current_ssm_lr,
+                    **ticker_wandb,
                 }
             )
         else:
@@ -634,6 +667,7 @@ def train(args):
                     "Opt acc": opt_acc,
                     "lr": current_lr,
                     "ssm_lr": current_ssm_lr,
+                    **ticker_wandb,
                 }
             )
 

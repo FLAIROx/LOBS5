@@ -191,6 +191,15 @@ if __name__ == "__main__":
                     help="Ignore the loss due to predicting the time.")
 	parser.add_argument("--test_dir_name", type=str, default=None,
 					help="directory for test data (optional, uses --dir_name if not specified)")
+	# Multi-ticker training support
+	parser.add_argument("--tickers", type=str, default=None,
+					help="Comma-separated ticker list for multi-asset training (e.g. GOOG,AAPL,NVDA)")
+	parser.add_argument("--data_root", type=str, default=None,
+					help="Root directory containing per-ticker subdirectories")
+	parser.add_argument("--train_date_range", type=str, default=None,
+					help="Inclusive date range for training data (YYYY-MM-DD,YYYY-MM-DD)")
+	parser.add_argument("--test_date_range", type=str, default=None,
+					help="Inclusive date range for test data (YYYY-MM-DD,YYYY-MM-DD)")
 	parser.add_argument("--debug_overfit", type=str2bool, default=False,
 				help="Runs the training loop in overfit mode on a single batch of data. Validation and testing are from the same set. ")
 	parser.add_argument("--log_ce_tables", type=str2bool, default=False,
@@ -204,6 +213,18 @@ if __name__ == "__main__":
 				     "K>0 requires --hierarchical=True. Inner optimizer (Adam/AdamW) is unchanged.")
 
 	args = parser.parse_args()
+
+	# Post-parse: multi-ticker string args → list/tuple
+	if args.tickers is not None:
+		args.tickers = [t.strip() for t in args.tickers.split(',')]
+	if args.train_date_range is not None:
+		parts = args.train_date_range.split(',')
+		assert len(parts) == 2, f"train_date_range must be YYYY-MM-DD,YYYY-MM-DD, got: {args.train_date_range}"
+		args.train_date_range = (parts[0].strip(), parts[1].strip())
+	if args.test_date_range is not None:
+		parts = args.test_date_range.split(',')
+		assert len(parts) == 2, f"test_date_range must be YYYY-MM-DD,YYYY-MM-DD, got: {args.test_date_range}"
+		args.test_date_range = (parts[0].strip(), parts[1].strip())
 
 	# === Multi-node distributed training ===
 	import jax

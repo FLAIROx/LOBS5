@@ -42,6 +42,11 @@ def create_lobster_prediction_dataset(
 		use_distributed_sampler: bool = False,
 		process_rank: int = 0,
 		process_count: int = 1,
+		# Multi-ticker support
+		tickers: Optional[List[str]] = None,
+		data_root: Optional[str] = None,
+		train_date_range: Optional[tuple] = None,
+		test_date_range: Optional[tuple] = None,
 	) -> ReturnType:
 	""" 
 	"""
@@ -70,6 +75,11 @@ def create_lobster_prediction_dataset(
 		val_split=val_split,
 		test_split=test_split,
 		test_data_dir=test_dir_name,
+		# Multi-ticker
+		tickers=tickers,
+		data_root=data_root,
+		train_date_range=train_date_range,
+		test_date_range=test_date_range,
 	)
 	dataset_obj.setup()
  
@@ -116,10 +126,27 @@ def create_lobster_prediction_dataset(
 	TRAIN_SIZE = len(dataset_obj.dataset_train)
 	aux_loaders = {}
 
+	# Per-ticker test loaders (multi-ticker mode)
+	if dataset_obj.per_ticker_test_datasets:
+		per_ticker_test = {}
+		for ticker, tk_dataset in dataset_obj.per_ticker_test_datasets.items():
+			tk_sampler = None
+			if use_distributed_sampler and process_count > 1:
+				from torch.utils.data import DistributedSampler
+				tk_sampler = DistributedSampler(
+					tk_dataset, num_replicas=process_count,
+					rank=process_rank, shuffle=False, drop_last=True)
+			per_ticker_test[ticker] = make_data_loader(
+				tk_dataset, dataset_obj, seed=seed, batch_size=per_process_bsz,
+				drop_last=True, shuffle=False, sampler=tk_sampler, num_workers=n_data_workers,
+				pin_memory=pin_memory, prefetch_factor=prefetch_factor, persistent_workers=persistent_workers)
+		aux_loaders['per_ticker_test'] = per_ticker_test
+		print(f"[*] Per-ticker test loaders: {list(per_ticker_test.keys())}")
+
 	BOOK_SEQ_LEN = dataset_obj.L_book
 	BOOK_DIM = dataset_obj.d_book
 
-	return (dataset_obj, trn_loader, val_loader, tst_loader, aux_loaders, 
+	return (dataset_obj, trn_loader, val_loader, tst_loader, aux_loaders,
 	 		N_CLASSES, SEQ_LENGTH, IN_DIM, BOOK_SEQ_LEN, BOOK_DIM, TRAIN_SIZE)
 
 def create_lobster_train_loader(dataset_obj, seed, per_process_bsz, num_workers, reset_train_offsets=False, shuffle=True,

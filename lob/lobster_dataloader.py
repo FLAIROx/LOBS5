@@ -30,6 +30,50 @@ default_data_path = default_data_path / "data"
 import time
 
 
+def discover_ticker_files(data_root, tickers, date_range=None):
+    """Discover .npy files across multiple ticker subdirectories with date filtering.
+
+    Args:
+        data_root: Parent directory containing per-ticker subdirs
+        tickers: List of ticker symbols
+        date_range: Optional (start_date, end_date) inclusive, 'YYYY-MM-DD' format
+
+    Returns:
+        dict[ticker -> list[msg_path]], dict[ticker -> list[book_path]]
+    """
+    date_re = re.compile(r'(\d{4}-\d{2}-\d{2})')
+    msg_by_ticker = {}
+    book_by_ticker = {}
+
+    for ticker in tickers:
+        ticker_dir = Path(data_root) / ticker
+        assert ticker_dir.is_dir(), f"Ticker directory not found: {ticker_dir}"
+
+        msg_files = sorted(glob(str(ticker_dir / '*message*.npy')))
+        book_files = sorted(glob(str(ticker_dir / '*book*.npy')))
+        assert len(msg_files) == len(book_files), (
+            f"{ticker}: msg files ({len(msg_files)}) != book files ({len(book_files)})")
+        assert len(msg_files) > 0, f"No message files found in {ticker_dir}"
+
+        if date_range is not None:
+            start_date, end_date = date_range
+            filtered_msg = []
+            filtered_book = []
+            for mf, bf in zip(msg_files, book_files):
+                m = date_re.search(Path(mf).name)
+                if m:
+                    file_date = m.group(1)
+                    if start_date <= file_date <= end_date:
+                        filtered_msg.append(mf)
+                        filtered_book.append(bf)
+            msg_files = filtered_msg
+            book_files = filtered_book
+
+        msg_by_ticker[ticker] = msg_files
+        book_by_ticker[ticker] = book_files
+
+    return msg_by_ticker, book_by_ticker
+
 
 class LOBSTER_Dataset(Dataset):
 
@@ -722,91 +766,155 @@ class LOBSTER(SequenceDataset):
             "return_raw_msgs": False,
             "rand_offset": True,
             "debug_overfit": False,
+            # Multi-ticker support
+            "tickers": None,
+            "data_root": None,
+            "train_date_range": None,
+            "test_date_range": None,
         }
 
     def setup(self):
         self.n_messages = self.msg_seq_len
-        message_files = sorted(glob(str(self.data_dir) + '/*message*.npy'))
-        assert len(message_files) > 0, f'no message files found in {self.data_dir}'
-        if self.use_book_data:
-            # TODO: why does this only work for validation?
-            #       can this be variable depending on the dataset?
-            book_files = sorted(glob(str(self.data_dir) + '/*book*.npy'))
-            assert len(message_files) == len(book_files)
-        else:
-            book_files = None
+        self.per_ticker_test_datasets = {}
+        self._test_files_by_ticker = {}
 
-        # Load test files from separate directory if specified
-        if self.test_data_dir is not None:
-            test_message_files = sorted(glob(str(self.test_data_dir) + '/*message*.npy'))
-            assert len(test_message_files) > 0, f'no test message files found in {self.test_data_dir}'
-            if self.use_book_data:
-                test_book_files = sorted(glob(str(self.test_data_dir) + '/*book*.npy'))
-                assert len(test_message_files) == len(test_book_files), \
-                    f'mismatch between test message files ({len(test_message_files)}) and book files ({len(test_book_files)})'
+        if getattr(self, 'tickers', None) is not None:
+            # ── Multi-ticker mode: discover files across ticker subdirectories ──
+            assert self.data_root is not None, \
+                "data_root required when tickers is set"
+            print(f"[*] Multi-ticker mode: {self.tickers}")
+
+            # Discover train files (all tickers, optionally date-filtered)
+            train_msg_by_tk, train_book_by_tk = discover_ticker_files(
+                self.data_root, self.tickers, self.train_date_range)
+
+            # Discover test files (same tickers, test date range)
+            if self.test_date_range is not None:
+                test_msg_by_tk, test_book_by_tk = discover_ticker_files(
+                    self.data_root, self.tickers, self.test_date_range)
             else:
-                test_book_files = None
-        else:
-            test_message_files = None
-            test_book_files = None
+                test_msg_by_tk = {}
+                test_book_by_tk = {}
 
-        # raw message files
+            self.rng = random.Random(self.seed)
 
-        if self.debug_overfit:
-            # use only one file for train, val, test
-            self.train_files = message_files[:1]
-            self.val_files = message_files[:1]
-            self.test_files = message_files[:1]
+            all_train_msg, all_train_book = [], []
+            all_val_msg, all_val_book = [], []
+            all_test_msg, all_test_book = [], []
 
-            if book_files:
-                self.train_book_files = book_files[:1]
-                self.val_book_files = book_files[:1]
-                self.test_book_files = book_files[:1]
+            for ticker in self.tickers:
+                t_msg = train_msg_by_tk[ticker]
+                t_book = train_book_by_tk[ticker]
+                n_val = max(1, int(len(t_msg) * self.val_split)) if self.val_split > 0 else 0
+
+                # Stratified val split per ticker (random days)
+                paired = list(zip(t_msg, t_book))
+                val_paired = [paired.pop(self.rng.randrange(0, len(paired)))
+                              for _ in range(n_val)]
+                train_paired = paired
+
+                tr_m, tr_b = zip(*train_paired) if train_paired else ([], [])
+                vl_m, vl_b = zip(*val_paired) if val_paired else ([], [])
+                all_train_msg.extend(tr_m)
+                all_train_book.extend(tr_b)
+                all_val_msg.extend(vl_m)
+                all_val_book.extend(vl_b)
+
+                # Test files from test date range
+                if ticker in test_msg_by_tk:
+                    te_msg = test_msg_by_tk[ticker]
+                    te_book = test_book_by_tk[ticker]
+                    all_test_msg.extend(te_msg)
+                    all_test_book.extend(te_book)
+                    self._test_files_by_ticker[ticker] = (te_msg, te_book)
+
+                total = len(list(tr_m)) + len(list(vl_m)) + len(test_msg_by_tk.get(ticker, []))
+                print(f"  {ticker}: {len(list(tr_m))} train, {len(list(vl_m))} val, "
+                      f"{len(test_msg_by_tk.get(ticker, []))} test days")
+
+            self.train_files = list(all_train_msg)
+            self.val_files = list(all_val_msg)
+            self.test_files = list(all_test_msg) if all_test_msg else list(all_val_msg)
+            if self.use_book_data:
+                self.train_book_files = list(all_train_book)
+                self.val_book_files = list(all_val_book)
+                self.test_book_files = list(all_test_book) if all_test_book else list(all_val_book)
             else:
                 self.train_book_files = None
                 self.val_book_files = None
                 self.test_book_files = None
+
         else:
-            if test_message_files is not None:
-                # Separate test directory: all main dir files go to train/val
-                self.test_files = test_message_files
-                self.test_book_files = test_book_files
-                self.train_files = message_files
-                self.train_book_files = book_files
+            # ── Single-asset mode: original logic (file discovery + val split) ──
+            message_files = sorted(glob(str(self.data_dir) + '/*message*.npy'))
+            assert len(message_files) > 0, f'no message files found in {self.data_dir}'
+            if self.use_book_data:
+                book_files = sorted(glob(str(self.data_dir) + '/*book*.npy'))
+                assert len(message_files) == len(book_files)
             else:
-                # Original logic: split from single directory
-                n_test_files = max(1, int(len(message_files) * self.test_split)) if self.test_split > 0 else 0
-                self.train_files = message_files[:len(message_files) - n_test_files]
-                self.test_files = message_files[len(self.train_files):]
+                book_files = None
+
+            # Load test files from separate directory if specified
+            if self.test_data_dir is not None:
+                test_message_files = sorted(glob(str(self.test_data_dir) + '/*message*.npy'))
+                assert len(test_message_files) > 0, f'no test message files found in {self.test_data_dir}'
+                if self.use_book_data:
+                    test_book_files = sorted(glob(str(self.test_data_dir) + '/*book*.npy'))
+                    assert len(test_message_files) == len(test_book_files), \
+                        f'mismatch between test message files ({len(test_message_files)}) and book files ({len(test_book_files)})'
+                else:
+                    test_book_files = None
+            else:
+                test_message_files = None
+                test_book_files = None
+
+            if self.debug_overfit:
+                self.train_files = message_files[:1]
+                self.val_files = message_files[:1]
+                self.test_files = message_files[:1]
                 if book_files:
-                    self.train_book_files = book_files[:len(book_files) - n_test_files]
-                    self.test_book_files = book_files[len(self.train_book_files):]
+                    self.train_book_files = book_files[:1]
+                    self.val_book_files = book_files[:1]
+                    self.test_book_files = book_files[:1]
                 else:
                     self.train_book_files = None
+                    self.val_book_files = None
                     self.test_book_files = None
-
-            self.rng = random.Random(self.seed)
-
-            # Zip message and book files for val split sampling
-            if book_files or (test_book_files is not None and self.train_book_files is not None):
-                self.train_files = list(zip(self.train_files, self.train_book_files))
             else:
-                self.val_book_files = None
+                if test_message_files is not None:
+                    self.test_files = test_message_files
+                    self.test_book_files = test_book_files
+                    self.train_files = message_files
+                    self.train_book_files = book_files
+                else:
+                    n_test_files = max(1, int(len(message_files) * self.test_split)) if self.test_split > 0 else 0
+                    self.train_files = message_files[:len(message_files) - n_test_files]
+                    self.test_files = message_files[len(self.train_files):]
+                    if book_files:
+                        self.train_book_files = book_files[:len(book_files) - n_test_files]
+                        self.test_book_files = book_files[len(self.train_book_files):]
+                    else:
+                        self.train_book_files = None
+                        self.test_book_files = None
 
-            # Select validation days randomly from train
-            n_val_files = max(1, int(len(message_files) * self.val_split)) if self.val_split > 0 else 0
-            self.val_files = [
-                self.train_files.pop(
-                    self.rng.randrange(0, len(self.train_files))
-                ) for _ in range(n_val_files)]
-            if book_files or (test_book_files is not None and self.train_book_files is not None):
-                self.train_files, self.train_book_files = zip(*self.train_files)
-                if self.val_files:
-                    self.val_files, self.val_book_files = zip(*self.val_files)
-        
+                self.rng = random.Random(self.seed)
 
+                if book_files or (test_book_files is not None and self.train_book_files is not None):
+                    self.train_files = list(zip(self.train_files, self.train_book_files))
+                else:
+                    self.val_book_files = None
 
-        #n_cache_files = 0
+                n_val_files = max(1, int(len(message_files) * self.val_split)) if self.val_split > 0 else 0
+                self.val_files = [
+                    self.train_files.pop(
+                        self.rng.randrange(0, len(self.train_files))
+                    ) for _ in range(n_val_files)]
+                if book_files or (test_book_files is not None and self.train_book_files is not None):
+                    self.train_files, self.train_book_files = zip(*self.train_files)
+                    if self.val_files:
+                        self.val_files, self.val_book_files = zip(*self.val_files)
+
+        # ── Shared: create Dataset objects from file lists ──
         self.dataset_train = LOBSTER_Dataset(
             self.train_files,
             n_messages=self.n_messages,
@@ -865,6 +973,25 @@ class LOBSTER(SequenceDataset):
                 )
         else:
             self.dataset_test = None
+
+        # Per-ticker test datasets (multi-ticker mode only)
+        if self._test_files_by_ticker:
+            for ticker, (tk_msg, tk_book) in self._test_files_by_ticker.items():
+                bk = tk_book if self.use_book_data else None
+                self.per_ticker_test_datasets[ticker] = LOBSTER_Dataset(
+                    tk_msg,
+                    n_messages=self.n_messages,
+                    mask_fn=self.mask_fn,
+                    seed=self.seed if self.debug_overfit else self.rng.randint(0, sys.maxsize),
+                    n_cache_files=self.n_cache_files,
+                    randomize_offset=False,
+                    book_files=bk,
+                    use_simple_book=self.use_simple_book,
+                    book_transform=self.book_transform,
+                    book_depth=self.book_depth,
+                    return_raw_msgs=self.return_raw_msgs,
+                )
+            print(f"[*] Per-ticker test datasets: {list(self.per_ticker_test_datasets.keys())}")
 
     def reset_train_offsets(self):
         """ reset the train dataset to a new random offset
