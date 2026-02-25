@@ -344,9 +344,9 @@ def init_train_state(
         total_steps = steps_per_epoch * args.epochs
         warmup_end_step = int(steps_per_epoch * args.warmup_end)
 
-        # lr_min = 1% of base LR (Llama 3 recipe) unless explicitly overridden
-        effective_lr_min = args.lr_min if args.lr_min > 0 else lr * 0.01
-        effective_ssm_lr_min = args.lr_min if args.lr_min > 0 else ssm_lr * 0.01
+        # lr_min = 5% of base LR unless explicitly overridden
+        effective_lr_min = args.lr_min if args.lr_min > 0 else lr * 0.05
+        effective_ssm_lr_min = args.lr_min if args.lr_min > 0 else ssm_lr * 0.05
 
         if print_shapes:
             print(f"[Schedule] steps_per_epoch: {steps_per_epoch}")
