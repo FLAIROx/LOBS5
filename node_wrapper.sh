@@ -94,6 +94,11 @@ export TF_GPU_ALLOCATOR=cuda_malloc_async
 # Why EAGER: in multi-node training, lazy loading causes non-deterministic load timing
 # across nodes → NCCL collective timeouts and XLA autotuner device-binding races.
 # Trade-off: slightly slower startup, but eliminates mid-training CUDA load stalls.
+# 128N+: NCCL comm init + first collective can take 10-30 min at 2048 GPU scale
+if [ "${NNODES}" -ge 128 ]; then
+  FIRST_COLLECTIVE_TIMEOUT=1800  # 30 min (default 600s = 10 min)
+fi
+
 # XLA AllReduce fusion for multi-node scaling (ref: MaxText GPU config)
 # Without this, XLA creates 101 independent AllReduce ops (one per param tensor).
 # 16-rank ring on 4N has 91ms/op launch latency → 101*91ms = 9.2s per step.
@@ -106,7 +111,7 @@ export XLA_FLAGS="${XLA_FLAGS} \
   --xla_gpu_enable_highest_priority_async_stream=true \
   --xla_gpu_nccl_terminate_on_error=true \
   --xla_gpu_nccl_termination_timeout_seconds=600 \
-  --xla_gpu_first_collective_call_terminate_timeout_seconds=600"
+  --xla_gpu_first_collective_call_terminate_timeout_seconds=${FIRST_COLLECTIVE_TIMEOUT:-600}"
 # NOTE (G11): xla_gpu_first_collective_call_terminate_timeout_seconds is the correct flag
 # for thunk init rendezvous timeout. xla_gpu_executable_terminate_timeout_seconds does NOT
 # exist in JAX 0.9.0.1 (FATAL: Unknown flag, Job 2476156).
@@ -174,9 +179,7 @@ export NCCL_NCHANNELS_PER_NET_PEER=4
 #export NCCL_CROSS_NIC=1                   # CAVEAT: tested harmful (job 2382150)
 #export NCCL_NET_GDR_LEVEL=PHB             # CAVEAT: tested harmful (job 2382150)
 #export NCCL_PROTO=^LL128                  # CAVEAT: tested harmful — 23% regression (1.12 vs 0.91 s/step, job 2447647 vs 2447130)
-#export FI_CXI_DEFAULT_CQ_SIZE=131072      # TODO: test separately
-#export FI_CXI_DEFAULT_TX_SIZE=16384       # TODO: test separately
-#export FI_CXI_RX_MATCH_MODE=software      # TODO: test separately (may affect small message perf)
+# FI_CXI_DEFAULT_CQ_SIZE, TX_SIZE, RX_MATCH_MODE: moved to ≥128N block below (was TODO)
 
 # Slingshot CXI resilience — prevent NCCL deadlocks at 8+ nodes
 # These are RESILIENCE tuning — no normal-path performance impact, only fault recovery.
@@ -210,6 +213,29 @@ if [ "${SLURM_NNODES:-1}" -ge 8 ]; then
   export MPICH_GPU_SUPPORT_ENABLED=0       # "easily leads to deadlocks" - CSCS
 
   echo "[CXI] ${SLURM_NNODES}N: Full CXI resilience (RDZV_RETRIES=100, eager=off, alt_read, host_reg=off)"
+fi
+
+# === 512-NODE (2048 GPU) SCALING: CXI resource limits ===
+# Job 2476315: 512N hangs after "Connected all rings" — never reaches first collective.
+# CSCS documented: "NCCL alltoall benchmarks stop at 256 GPUs...gets stuck on 512+"
+# Root cause: CXI completion queue (default=512 entries) overflows at ~256 peers.
+# Each rank needs ~N_peers entries in CQ; 2048 ranks → 400% overflow → silent hang.
+# 4N/64N work because CQ utilization stays under 100%.
+if [ "${SLURM_NNODES:-1}" -ge 128 ]; then
+  export FI_CXI_DEFAULT_CQ_SIZE=262144       # default=512, overflow at ~256 peers (CSCS uses 131072; 2x for dual-comm 2D mesh)
+  export FI_CXI_DEFAULT_TX_SIZE=32768         # default=256, insufficient for 512+ peer connections
+  export FI_CXI_RX_MATCH_MODE=software        # hardware match table exhausts at 500+ endpoints
+
+  # NCCL bootstrap: 2048 ranks → TCP all-to-one bottleneck on rank 0
+  export NCCL_SOCKET_RETRY_CNT=100            # default=34, more retries for congested accept()
+  export NCCL_SOCKET_RETRY_SLEEP_MSEC=200     # default=100ms, backoff to reduce stampede
+
+  # Limit NCCL channels to reduce CXI connection count (2 comms × N_channels × N_peers)
+  export NCCL_MAX_NCHANNELS=16                # default auto (up to 32), cap at 16 for 512N
+
+  ulimit -s 16384                              # 16MB stack (NCCL graph search at 2048 ranks)
+
+  echo "[CXI] ${SLURM_NNODES}N: 2048-GPU scaling (CQ=262144, TX=32768, RX=software, channels≤16)"
 fi
 
 # Multi-node JAX distributed info

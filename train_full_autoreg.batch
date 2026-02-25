@@ -214,8 +214,13 @@ echo "[*] Global batch size: $GLOBAL_BSZ (per-process: $PER_PROCESS_BSZ)"
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
 MASTER_PORT=29500
 export JAX_COORDINATOR_ADDRESS="$MASTER_ADDR:$MASTER_PORT"
-export JAX_COORDINATOR_TIMEOUT_MS=600000
-echo "[*] Multi-node DDP: $NNODES nodes, coordinator=$JAX_COORDINATOR_ADDRESS"
+# 64N+: coordinator must wait longer for 256-2048 processes to join
+if [ "${SLURM_NNODES:-1}" -ge 64 ]; then
+  export JAX_COORDINATOR_TIMEOUT_MS=1800000   # 30 min (NCCL comm init at 2048 GPUs can take 10-30 min)
+else
+  export JAX_COORDINATOR_TIMEOUT_MS=600000    # 10 min (sufficient for ≤64N)
+fi
+echo "[*] Multi-node DDP: $NNODES nodes, coordinator=$JAX_COORDINATOR_ADDRESS, timeout=${JAX_COORDINATOR_TIMEOUT_MS}ms"
 
 # Data paths
 # Default: 8 tickers × 4 years (multi-ticker mode)
