@@ -845,7 +845,7 @@ class LOBSTER(SequenceDataset):
                 book_transform=self.book_transform,
                 book_depth=self.book_depth,
                 return_raw_msgs=self.return_raw_msgs,
-            )
+                )
         else:
             self.dataset_val = None
 
@@ -862,7 +862,7 @@ class LOBSTER(SequenceDataset):
                 book_transform=self.book_transform,
                 book_depth=self.book_depth,
                 return_raw_msgs=self.return_raw_msgs,
-            )
+                )
         else:
             self.dataset_test = None
 

@@ -85,8 +85,12 @@ class StepWatchdog:
 # from lob.lob_seq_model import LobPredModel
 
 
-TIME_START_I=9
-TIME_END_I =13
+# 24-token encoding: TIME_START_I / TIME_END_I hardcoded to 24tok values
+# 24tok: [evt:0, dir:1, price:2-3, size:4-5, dt_s:6, dt_ns:7-9, time_s:10-11, time_ns:12-14, ...]
+# (22tok was: TIME_START_I=9, TIME_END_I=13 — before size field grew from 1→2 tokens)
+# JIT functions use Message_Tokenizer.TIME_START_I directly for the same values.
+TIME_START_I = 10  # 24tok: time_s starts at position 10
+TIME_END_I = 14    # 24tok: time_ns ends at position 14 (inclusive)
 
 # num_devices_global = 2
 # global_devices = jax.local_devices()[0: num_devices_global]
@@ -896,8 +900,8 @@ def train_step(
         ce=cross_entropy_loss(logits, batch_labels)
         if ignore_times:
             ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
-            ce_1=ce[:,:,:TIME_START_I]
-            ce_2=ce[:,:,(TIME_END_I+1):]
+            ce_1=ce[:,:,:Message_Tokenizer.TIME_START_I]
+            ce_2=ce[:,:,(Message_Tokenizer.TIME_END_I+1):]
             ce=np.concatenate([ce_1,ce_2],axis=2)
             ce=ce.reshape(ce.shape[0],-1)
 
@@ -976,7 +980,7 @@ def train_step_rnn(
             # jax.debug.print("Shape of CE: {}", ce.shape)
             # average cross-ent loss
             ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
-            ce=ce.at[:,:,TIME_START_I:TIME_END_I].set(0)
+            ce=ce.at[:,:,Message_Tokenizer.TIME_START_I:Message_Tokenizer.TIME_END_I].set(0)
             ce=ce.reshape(ce.shape[0],-1)
             loss = np.mean(ce)
             return (hiddens),(loss,mod_vars)
@@ -1201,8 +1205,8 @@ def eval_step(
     if ignore_times:
         ce=losses
         ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
-        ce_1=ce[:,:,:TIME_START_I]
-        ce_2=ce[:,:,(TIME_END_I+1):]
+        ce_1=ce[:,:,:Message_Tokenizer.TIME_START_I]
+        ce_2=ce[:,:,(Message_Tokenizer.TIME_END_I+1):]
         ce=np.concatenate([ce_1,ce_2],axis=2)
         ce=ce.reshape(ce.shape[0],-1)
         losses=ce
@@ -1210,8 +1214,8 @@ def eval_step(
     if ignore_times:
         ce=accs
         ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
-        ce_1=ce[:,:,:TIME_START_I]
-        ce_2=ce[:,:,(TIME_END_I+1):]
+        ce_1=ce[:,:,:Message_Tokenizer.TIME_START_I]
+        ce_2=ce[:,:,(Message_Tokenizer.TIME_END_I+1):]
         ce=np.concatenate([ce_1,ce_2],axis=2)
         ce=ce.reshape(ce.shape[0],-1)
         accs=ce
@@ -1363,8 +1367,8 @@ def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times
             ce = cross_entropy_loss(logits, batch_labels)
             if ignore_times:
                 ce = ce.reshape(ce.shape[0], -1, Message_Tokenizer.MSG_LEN)
-                ce_1 = ce[:, :, :TIME_START_I]
-                ce_2 = ce[:, :, (TIME_END_I + 1):]
+                ce_1 = ce[:, :, :Message_Tokenizer.TIME_START_I]
+                ce_2 = ce[:, :, (Message_Tokenizer.TIME_END_I + 1):]
                 ce = np.concatenate([ce_1, ce_2], axis=2)
                 ce = ce.reshape(ce.shape[0], -1)
 

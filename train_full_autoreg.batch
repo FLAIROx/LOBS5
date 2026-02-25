@@ -98,6 +98,18 @@
 # Default per-GPU batch size (can be overridden via environment variable)
 export PER_GPU_BSZ=${PER_GPU_BSZ:-10}
 
+# 24-token encoding (hardcoded): base-100 size encoding, vocab=2112
+# (22tok used base-10000, vocab=12012 — removed 2026-02-25)
+#
+# Token layout:
+#   24tok: [evt:0, dir:1, price:2-3, size:4-5, dt_s:6, dt_ns:7-9, time_s:10-11, time_ns:12-14,
+#           price_ref_sign:15, price_ref:16, size_ref:17-18, time_ref:19-23]
+#   (22tok was: size=4, dt_s=5, time_s=9-10, time_ns=11-13 — indices shifted +1 by size 1→2 tokens)
+#
+# G2 experiment evidence (32N, 40ep):
+#   24tok: Val Acc 78.87%, Test Acc 75.89% (Job 2440076, W&B pmk5zbad)
+#   22tok: Val Acc 76.61%, Test Acc 73.45% (Job 2458353, W&B cgdexweb)
+
 # Multi-node: default to hierarchical shard_map (2D mesh)
 # Hierarchical splits allreduce into NVLink (intra-node) + Slingshot (inter-node)
 # Without it, 32N is 2.18x slower (2.05 vs 0.94 s/step) due to flat 128-GPU ring
@@ -117,7 +129,7 @@ echo "Total GPUs: $((SLURM_NNODES * 4))"
 echo "============================================"
 
 # ============================================
-# 75M Model Configuration (22tok, padded_large)
+# 75M Model Configuration (24tok, padded_large)
 # ============================================
 # Based on run_lobster_padded_large.sh from baseline_full_autoreg
 D_MODEL=1024
@@ -128,7 +140,7 @@ SSM_LR_BASE=${SSM_LR_BASE:-5e-4}
 LR_FACTOR=${LR_FACTOR:-1}
 WARMUP_END=${WARMUP_END:-1}
 
-echo "[*] Model config: 75M (22tok, padded_large)"
+echo "[*] Model config: 75M (24tok, padded_large)"
 echo "    d_model=$D_MODEL, n_layers=$N_LAYERS, blocks=$BLOCKS"
 echo "    ssm_size_base=$SSM_SIZE_BASE, ssm_lr_base=$SSM_LR_BASE"
 
