@@ -480,7 +480,7 @@ def create_train_state(model_cls,
     # Wrap optimizer with gradient clipping to prevent catastrophic divergence.
     # Without clipping, a single outlier batch can cause loss spikes of 67-122x
     # (observed in Jobs 2439364/FP32, 2439874/BF16 at LR=3e-3).
-    max_grad_norm = float(os.environ.get('MAX_GRAD_NORM', str(args.max_grad_norm)))
+    max_grad_norm = float(os.environ.get('MAX_GRAD_NORM', '1.0'))
     if max_grad_norm > 0:
         tx = optax.chain(optax.clip_by_global_norm(max_grad_norm), tx)
         print(f"[*] Gradient clipping enabled: max_norm={max_grad_norm}")
