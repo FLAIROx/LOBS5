@@ -95,8 +95,10 @@
 #   PER_GPU_BSZ=<optimal> sbatch train_full_autoreg.batch
 # ============================================
 
-# Default per-GPU batch size (can be overridden via environment variable)
-export PER_GPU_BSZ=${PER_GPU_BSZ:-10}
+# Default per-GPU batch size — set in model config section below
+# (can be overridden via environment variable: PER_GPU_BSZ=N sbatch ...)
+# NOTE: do NOT set a default here — model config section handles it
+# (75M: BSZ=10, 360M: BSZ=2)
 
 # 24-token encoding (hardcoded): base-100 size encoding, vocab=2112
 # (22tok used base-10000, vocab=12012 — removed 2026-02-25)
@@ -141,7 +143,7 @@ D_MODEL=${D_MODEL:-2048}
 N_LAYERS=${N_LAYERS:-24}
 BLOCKS=${BLOCKS:-32}
 SSM_SIZE_BASE=${SSM_SIZE_BASE:-2048}
-PER_GPU_BSZ=${PER_GPU_BSZ:-2}
+export PER_GPU_BSZ=${PER_GPU_BSZ:-2}
 SSM_LR_BASE=${SSM_LR_BASE:-5e-4}
 LR_FACTOR=${LR_FACTOR:-1}
 WARMUP_END=${WARMUP_END:-1}
@@ -206,7 +208,7 @@ echo "[*] Multi-node DDP: $NNODES nodes, coordinator=$JAX_COORDINATOR_ADDRESS"
 # Single-ticker mode (default): hardcoded GOOG 2022 train + Jan 2023 test
 if [ -n "${TICKERS:-}" ]; then
   # Multi-ticker: DATA_ROOT contains per-ticker subdirectories
-  export DATA_ROOT="${DATA_ROOT:-/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc}"
+  export DATA_ROOT="${DATA_ROOT:-/lus/lfs1aip2/projects/s5e/lob_preproc}"
   export TRAIN_DATE_RANGE="${TRAIN_DATE_RANGE:-2022-01-01,2022-12-31}"
   export TEST_DATE_RANGE="${TEST_DATE_RANGE:-2023-01-01,2023-01-31}"
   export DATA_DIR="${DATA_ROOT}"  # dir_name still needed as base path

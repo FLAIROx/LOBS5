@@ -828,7 +828,6 @@ class LOBSTER(SequenceDataset):
                     all_test_book.extend(te_book)
                     self._test_files_by_ticker[ticker] = (te_msg, te_book)
 
-                total = len(list(tr_m)) + len(list(vl_m)) + len(test_msg_by_tk.get(ticker, []))
                 print(f"  {ticker}: {len(list(tr_m))} train, {len(list(vl_m))} val, "
                       f"{len(test_msg_by_tk.get(ticker, []))} test days")
 
