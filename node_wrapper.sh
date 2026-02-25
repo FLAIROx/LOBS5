@@ -95,7 +95,11 @@ export XLA_FLAGS="${XLA_FLAGS} \
   --xla_gpu_enable_latency_hiding_scheduler=true \
   --xla_gpu_enable_highest_priority_async_stream=true \
   --xla_gpu_nccl_terminate_on_error=true \
-  --xla_gpu_nccl_termination_timeout_seconds=600"
+  --xla_gpu_nccl_termination_timeout_seconds=600 \
+  --xla_gpu_first_collective_call_terminate_timeout_seconds=600"
+# NOTE (G11): xla_gpu_first_collective_call_terminate_timeout_seconds is the correct flag
+# for thunk init rendezvous timeout. xla_gpu_executable_terminate_timeout_seconds does NOT
+# exist in JAX 0.9.0.1 (FATAL: Unknown flag, Job 2476156).
 # CAVEAT: do NOT use --xla_gpu_all_reduce_blueconnect_num_devices_per_host=4 with shard_map
 # BlueConnect decomposes AllReduce into RS+AR+AG, but shard_map already does 2-level decomposition.
 # Result: 3x slowdown (3.55 s/step vs baseline 1.18 s/step). Verified job 2440967.

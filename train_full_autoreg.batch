@@ -155,10 +155,9 @@ echo "    per_gpu_bsz=$PER_GPU_BSZ"
 
 # XLA thunk init timeout for large models (360M+)
 # 128 GPUs: thunk initialization can exceed default 30s, GPU 3 (last NCCL channel) gets SIGABRT
-if [ "${D_MODEL}" -ge 2048 ]; then
-    export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_executable_terminate_timeout_seconds=1500"
-    echo "[XLA] Large model (d=$D_MODEL): thunk init timeout set to 1500s"
-fi
+# CAVEAT: --xla_gpu_executable_terminate_timeout_seconds does NOT exist in JAX 0.9.0.1 (Job 2476156).
+# The correct flag is --xla_gpu_first_collective_call_terminate_timeout_seconds (from G11).
+# This is set in node_wrapper.sh XLA_FLAGS block (600s, applies to all models).
 
 # CURTAIL_EPOCHS: Optional - end each epoch early after N steps (for quick testing)
 if [ -n "$CURTAIL_EPOCHS" ]; then
