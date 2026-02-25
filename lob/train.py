@@ -194,10 +194,18 @@ def train(args):
         total_devices = jax.device_count() if jax.process_count() > 1 else args.num_devices
         print(f"[*] State distributed via sharding (replicated across {total_devices} devices)")
 
+        local_steps_k = getattr(args, 'local_steps_k', 0)
+        if local_steps_k > 0:
+            assert use_hierarchical, \
+                "Local Steps (--local_steps_k>0) requires --hierarchical=True"
+            print(f"[*] Local Steps enabled: sync params every {local_steps_k} steps "
+                  f"(inner optimizer unchanged, only intra-node grad sync per step)")
+
         jit_train_step = create_jit_train_step(
             mesh, state, has_book_data=args.use_book_data,
             hierarchical=use_hierarchical,
-            batchnorm=args.batchnorm, ignore_times=args.ignore_times)
+            batchnorm=args.batchnorm, ignore_times=args.ignore_times,
+            local_steps_k=local_steps_k)
         jit_eval_step = create_jit_eval_step(mesh, state, has_book_data=args.use_book_data)
 
     # Training Loop over epochs

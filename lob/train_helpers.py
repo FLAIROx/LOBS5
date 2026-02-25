@@ -1270,14 +1270,19 @@ def swap_leading(targetsize,x):
 # ============================================================================
 
 def create_jit_train_step(mesh, state, has_book_data=True, hierarchical=False,
-                          batchnorm=False, ignore_times=True):
+                          batchnorm=False, ignore_times=True, local_steps_k=0):
     """Create JIT-compiled train_step with explicit sharding.
 
     hierarchical=True: uses shard_map + explicit pmean('gpus') + pmean('nodes')
     for hierarchical AllReduce on 2D mesh. Requires mesh with ('nodes','gpus') axes.
+
+    local_steps_k>0: Local Steps mode — each node trains independently for K steps
+    (only intra-node pmean('gpus') per step), then params averaged via pmean('nodes')
+    every K steps. Requires hierarchical=True. K=0 disables (standard AllReduce).
     """
     if hierarchical:
-        return _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times)
+        return _create_hierarchical_train_step(mesh, has_book_data, batchnorm,
+                                               ignore_times, local_steps_k)
 
     from lob.sharding_utils import create_state_shardings, get_data_shardings_for_batch
 
@@ -1309,12 +1314,19 @@ def create_jit_train_step(mesh, state, has_book_data=True, hierarchical=False,
     return jit_train_step
 
 
-def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times):
+def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times,
+                                     local_steps_k=0):
     """Create shard_map-based train_step with hierarchical AllReduce.
 
     Uses 2D mesh ('nodes', 'gpus') to decompose gradient reduction:
     1. pmean('gpus')  — intra-node via NVLink (478 GB/s)
     2. pmean('nodes') — inter-node via Slingshot
+
+    When local_steps_k > 0: "Local Steps" mode (not "Local SGD" — inner optimizer
+    is Adam/AdamW, not SGD; the mechanism is optimizer-agnostic). Each node runs K
+    local optimizer steps with only intra-node pmean('gpus'), then syncs params
+    across nodes via pmean('nodes') every K steps. Optimizer state (Adam m, v)
+    is NOT synced — DiLoCo (Google 2023) validates this approach.
 
     XLA combine threshold merges each group's pmean ops independently,
     avoiding the BlueConnect + combine deadlock (C4 experiments).
@@ -1380,21 +1392,42 @@ def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times
             loss_fn, has_aux=True)(state.params)
 
         # ── Hierarchical AllReduce ──
-        # Level 1: NVLink within each node (4 GPUs, ~478 GB/s)
+        # Level 1: NVLink within each node (4 GPUs, ~478 GB/s) — always
         grads = jax.lax.pmean(grads, axis_name='gpus')
         loss = jax.lax.pmean(loss, axis_name='gpus')
         ce = jax.lax.pmean(ce, axis_name='gpus')
-        # Level 2: Slingshot across nodes — grads only
-        # loss/ce are logging-only (not used for gradient updates).
-        # Skipping their cross-node pmean reduces Slingshot AllReduces by ~40%,
-        # lowering the probability of transient fabric deadlocks (job 2426449).
-        # train_epoch aggregates per-step losses via np.mean(batch_losses) anyway.
-        grads = jax.lax.pmean(grads, axis_name='nodes')
 
-        if batchnorm:
-            state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
+        if local_steps_k > 0:
+            # ── Local Steps mode ──
+            # Skip cross-node grad sync. Each node applies its own grads.
+            if batchnorm:
+                state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
+            else:
+                state = state.apply_gradients(grads=grads)
+
+            # Every K steps, average params across nodes via Slingshot.
+            # state.step was incremented by apply_gradients above.
+            should_sync = (state.step % local_steps_k == 0)
+            synced_params = jax.lax.pmean(state.params, axis_name='nodes')
+            new_params = jax.lax.cond(
+                should_sync,
+                lambda: synced_params,
+                lambda: state.params,
+            )
+            state = state.replace(params=new_params)
         else:
-            state = state.apply_gradients(grads=grads)
+            # ── Standard hierarchical AllReduce ──
+            # Level 2: Slingshot across nodes — grads only
+            # loss/ce are logging-only (not used for gradient updates).
+            # Skipping their cross-node pmean reduces Slingshot AllReduces by ~40%,
+            # lowering the probability of transient fabric deadlocks (job 2426449).
+            # train_epoch aggregates per-step losses via np.mean(batch_losses) anyway.
+            grads = jax.lax.pmean(grads, axis_name='nodes')
+
+            if batchnorm:
+                state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
+            else:
+                state = state.apply_gradients(grads=grads)
 
         # Return dummy scalar for logits (not needed, avoids shipping per-shard data)
         return state, loss, ce, np.float32(0.0)
@@ -1410,8 +1443,12 @@ def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times
         return jitted_fn(state, rng, batch_inputs, batch_labels,
                          batch_integration_timesteps)
 
-    print(f"[JIT] Created hierarchical shard_map train_step "
-          f"(2D mesh, pmean('gpus') + pmean('nodes'))")
+    if local_steps_k > 0:
+        print(f"[JIT] Created hierarchical shard_map train_step — Local Steps mode "
+              f"(pmean('gpus') every step, pmean(params, 'nodes') every {local_steps_k} steps)")
+    else:
+        print(f"[JIT] Created hierarchical shard_map train_step "
+              f"(2D mesh, pmean('gpus') + pmean('nodes'))")
     return compatible_fn
 
 

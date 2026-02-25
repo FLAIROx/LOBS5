@@ -476,6 +476,7 @@ python -u -B run_train.py \
     ${RESTORE_STEP:+--restore_step=$RESTORE_STEP} \
     ${RESUME_FROM_STEP:+--resume_from_step=$RESUME_FROM_STEP} \
     ${HIERARCHICAL:+--hierarchical=$HIERARCHICAL} \
+    ${LOCAL_STEPS_K:+--local_steps_k=$LOCAL_STEPS_K} \
     --checkpoint_every_n_steps='"$CHECKPOINT_EVERY"' \
     --max_job_hours='"$MAX_JOB_HOURS"'
 '

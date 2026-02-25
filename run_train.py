@@ -198,6 +198,10 @@ if __name__ == "__main__":
 	parser.add_argument("--hierarchical", type=str2bool, default=True,
 				help="Use hierarchical AllReduce via shard_map with 2D mesh (nodes, gpus). "
 				     "Decomposes flat AllReduce(N*4) into pmean(gpus)+pmean(nodes).")
+	parser.add_argument("--local_steps_k", type=int, default=0,
+				help="Local Steps: each node trains independently for K steps, "
+				     "then params averaged via pmean('nodes'). 0=disabled (standard AllReduce). "
+				     "K>0 requires --hierarchical=True. Inner optimizer (Adam/AdamW) is unchanged.")
 
 	args = parser.parse_args()
 
