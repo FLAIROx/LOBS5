@@ -217,10 +217,14 @@ export JAX_COORDINATOR_ADDRESS="$MASTER_ADDR:$MASTER_PORT"
 # 64N+: coordinator must wait longer for 256-2048 processes to join
 if [ "${SLURM_NNODES:-1}" -ge 64 ]; then
   export JAX_COORDINATOR_TIMEOUT_MS=1800000   # 30 min (NCCL comm init at 2048 GPUs can take 10-30 min)
+  # KV timeout: per-key exchange during topology discovery (default 2min)
+  # Job 2477345 (512N): "GetKeyValue() timed out with key: cuda:local_topology/cuda/196 and duration: 2m"
+  # 512 processes hammering the KV store + staggered SLURM launch → 2min too tight
+  export JAX_COORDINATOR_KV_TIMEOUT=600       # 10 min (default 120s)
 else
   export JAX_COORDINATOR_TIMEOUT_MS=600000    # 10 min (sufficient for ≤64N)
 fi
-echo "[*] Multi-node DDP: $NNODES nodes, coordinator=$JAX_COORDINATOR_ADDRESS, timeout=${JAX_COORDINATOR_TIMEOUT_MS}ms"
+echo "[*] Multi-node DDP: $NNODES nodes, coordinator=$JAX_COORDINATOR_ADDRESS, timeout=${JAX_COORDINATOR_TIMEOUT_MS}ms, kv_timeout=${JAX_COORDINATOR_KV_TIMEOUT:-120}s"
 
 # Data paths
 # Default: 8 tickers × 4 years (multi-ticker mode)
