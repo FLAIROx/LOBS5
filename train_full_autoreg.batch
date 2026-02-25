@@ -213,10 +213,13 @@ export TEST_DATE_RANGE="${TEST_DATE_RANGE:-2026-01-01,2026-01-31}"
 
 if [ -n "${TICKERS}" ]; then
   export DATA_DIR="${DATA_ROOT}"  # dir_name still needed as base path
-  echo "[*] Multi-ticker mode: TICKERS=$TICKERS"
-  echo "[*] Data root: $DATA_ROOT"
-  echo "[*] Train dates: $TRAIN_DATE_RANGE"
-  echo "[*] Test dates: $TEST_DATE_RANGE"
+  # Count tickers
+  N_TICKERS=$(echo "$TICKERS" | tr ',' '\n' | wc -l)
+  echo "[*] Multi-ticker mode: ${N_TICKERS} tickers × 4 years"
+  echo "    TICKERS=$TICKERS"
+  echo "    DATA_ROOT=$DATA_ROOT"
+  echo "    TRAIN_DATE_RANGE=$TRAIN_DATE_RANGE"
+  echo "    TEST_DATE_RANGE=$TEST_DATE_RANGE"
 else
   # Single-ticker fallback: GOOG 2022 train + Jan 2023 test
   export DATA_DIR="/lus/lfs1aip2/home/s5e/kangli.s5e/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022"
