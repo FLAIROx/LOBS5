@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=lobs5_75m_B1
+#SBATCH --job-name=lobs5_360m
 #SBATCH --output=logs_lobs5/lobs5_%j.out
 #SBATCH --error=logs_lobs5/lobs5_%j.err
 # === 32-node production config ===
@@ -133,20 +133,23 @@ echo "Total GPUs: $((SLURM_NNODES * 4))"
 echo "============================================"
 
 # ============================================
-# 75M Model Configuration (24tok, padded_large)
+# 360M Model Configuration (24tok, padded_large)
 # ============================================
-# Based on run_lobster_padded_large.sh from baseline_full_autoreg
-D_MODEL=1024
-N_LAYERS=12
-BLOCKS=16
-SSM_SIZE_BASE=1024
+# Scaled from 75M: all dimensions doubled
+# 75M was: D_MODEL=1024, N_LAYERS=12, BLOCKS=16, SSM_SIZE=1024, PER_GPU_BSZ=10
+D_MODEL=${D_MODEL:-2048}
+N_LAYERS=${N_LAYERS:-24}
+BLOCKS=${BLOCKS:-32}
+SSM_SIZE_BASE=${SSM_SIZE_BASE:-2048}
+PER_GPU_BSZ=${PER_GPU_BSZ:-2}
 SSM_LR_BASE=${SSM_LR_BASE:-5e-4}
 LR_FACTOR=${LR_FACTOR:-1}
 WARMUP_END=${WARMUP_END:-1}
 
-echo "[*] Model config: 75M (24tok, padded_large)"
+echo "[*] Model config: 360M (24tok, padded_large)"
 echo "    d_model=$D_MODEL, n_layers=$N_LAYERS, blocks=$BLOCKS"
 echo "    ssm_size_base=$SSM_SIZE_BASE, ssm_lr_base=$SSM_LR_BASE"
+echo "    per_gpu_bsz=$PER_GPU_BSZ"
 
 # CURTAIL_EPOCHS: Optional - end each epoch early after N steps (for quick testing)
 if [ -n "$CURTAIL_EPOCHS" ]; then
