@@ -114,13 +114,14 @@ export XLA_FLAGS="${XLA_FLAGS} \
 # BlueConnect decomposes AllReduce into RS+AR+AG, but shard_map already does 2-level decomposition.
 # Result: 3x slowdown (3.55 s/step vs baseline 1.18 s/step). Verified job 2440967.
 
-# 8+ nodes with shard_map: disable shard_autotuning
-# The old CAVEAT (job 2421931: JIT >30min at 16N) was for 1D DDP without shard_map.
-# With shard_map 2D mesh, shard_autotuning adds overhead: 16N 1.58→? s/step (testing).
-# 32N with autotuning off: 0.94 s/step (58.4% eff); 16N with autotuning on: 1.58 s/step (34.8% eff).
-if [ "${NNODES}" -ge 8 ] && [ "${HIERARCHICAL}" = "True" ]; then
+# Disable shard_autotuning for mini-epoch training:
+# XLA re-autotunes train_step after every eval, causing ~45s + 30-step ramp per mini-epoch boundary.
+# Evidence: Job 2476205 (2N, MINI_EPOCHS=3): step 99→100 drops from 6 it/s to 116s/it.
+# Also beneficial at 8+ nodes: 32N off=0.94 s/step (58.4% eff) vs 16N on=1.58 s/step (34.8% eff).
+# The old CAVEAT (JIT >30min at 16N) was for 1D DDP without shard_map; not applicable to 2D mesh.
+if [ "${HIERARCHICAL}" = "True" ]; then
   export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_shard_autotuning=false"
-  echo "[XLA] ${NNODES}N hierarchical: shard_autotuning disabled"
+  echo "[XLA] hierarchical + mini-epoch: shard_autotuning disabled"
 fi
 
 export CUDA_MODULE_LOADING=EAGER
@@ -252,7 +253,7 @@ export PYTHONPATH="$WORKDIR:$PYTHONPATH"
 python -u -B run_train.py \
     --USE_WANDB=True \
     --wandb_project="${WANDB_PROJECT:-lobs5-360M-G30}" \
-    --wandb_entity=kang-oxford \
+    --wandb_entity=oxford-lob \
     --C_init=trunc_standard_normal \
     --prenorm=True \
     --batchnorm=False \

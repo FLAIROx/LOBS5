@@ -1074,7 +1074,8 @@ def validate(state,
              init_hiddens=(np.array([0])),
              log_ce_tables : bool =False,
              mesh=None,
-             jit_eval_step_fn=None):
+             jit_eval_step_fn=None,
+             silent=False):
     """Validation function — NCCL-deadlock-free for multi-host.
 
     Instead of calling process_allgather per batch (which triggers 128-rank
@@ -1082,6 +1083,10 @@ def validate(state,
     via addressable_shards (zero NCCL communication).  Each host computes
     metrics over its own 1/N_hosts subset; DistributedSampler guarantees
     equal sample counts so local mean ≈ global mean.
+
+    Args:
+        silent: If True, suppress tqdm progress bar (used during mini-epoch
+                eval to avoid visual "step reset" noise in logs).
     """
     import numpy as onp
     is_multihost = (mesh is not None and jax.process_count() > 1)
@@ -1095,7 +1100,7 @@ def validate(state,
                      f"Eval batch count mismatch: rank {jax.process_index()}")
 
     losses, accuracies, preds = [], [], []
-    for batch_idx, batch in enumerate(tqdm(testloader)):
+    for batch_idx, batch in enumerate(tqdm(testloader, disable=silent)):
         inputs, labels, integration_timesteps = prep_batch(batch, seq_len, num_devices)
 
         # jit+sharding: place data on devices (multi-host compatible)

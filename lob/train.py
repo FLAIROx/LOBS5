@@ -436,7 +436,8 @@ def train(args):
                                         ignore_times=ignore_times,
                                         log_ce_tables=args.log_ce_tables,
                                         mesh=mesh,
-                                        jit_eval_step_fn=jit_eval_step)
+                                        jit_eval_step_fn=jit_eval_step,
+                                        silent=True)
 
         # === Test ===
         eval_watchdog.kick(cb_epoch, 1)
@@ -456,7 +457,8 @@ def train(args):
                                        ignore_times=ignore_times,
                                        log_ce_tables=args.log_ce_tables,
                                        mesh=mesh,
-                                       jit_eval_step_fn=jit_eval_step)
+                                       jit_eval_step_fn=jit_eval_step,
+                                       silent=True)
 
         eval_watchdog.stop()
 
@@ -473,7 +475,8 @@ def train(args):
                     ignore_times=ignore_times,
                     log_ce_tables=False,
                     mesh=mesh,
-                    jit_eval_step_fn=jit_eval_step)
+                    jit_eval_step_fn=jit_eval_step,
+                    silent=True)
                 per_ticker_metrics[ticker] = {'loss': float(t_loss), 'acc': float(t_acc)}
                 print(f"  [{ticker}] Loss: {t_loss:.5f}  Acc: {t_acc:.4f}")
 
@@ -575,6 +578,12 @@ def train(args):
         # === Barrier after eval ===
         if is_distributed:
             sync_global_devices(f"post_eval_mini_{cb_epoch}_{current_mini}")
+
+        # === Memory cleanup before returning to training ===
+        # Eval + checkpoint + per-ticker tests fragment GPU memory.
+        # Without cleanup, train_step can OOM trying to re-allocate its workspace.
+        del per_ticker_metrics, ticker_wandb
+        gc.collect()
 
         return count > args.early_stop_patience  # True → stop training
 
