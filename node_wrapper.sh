@@ -9,6 +9,16 @@ export TMPDIR=/tmp
 # Force wandb online mode (directory-level "offline" setting overrides USE_WANDB=True)
 export WANDB_MODE=online
 
+# Per-node logging: only rank 0 writes to log file, others silent
+# Uses exec (process-local redirect), NOT srun --output (which overflows at 32N+)
+LOG_DIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-.}}/logs_lobs5"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+if [ "${SLURM_PROCID:-0}" -eq 0 ]; then
+    exec > "$LOG_DIR/training_${SLURM_JOB_ID}_node0.log" 2>&1
+else
+    exec > /dev/null 2>&1
+fi
+
 echo "========================================"
 echo "[Wrapper] Running on node: $(hostname)"
 echo "[Wrapper] SLURM_NODEID: ${SLURM_NODEID:-N/A}"
