@@ -159,7 +159,11 @@ def train(args):
             print(f"[Restore] state.step = {int(state.step)}")
             print(f"[Restore] Restored metrics: {ckpt.get('metrics', {})}")
             # Check optimizer momentum is non-zero (proves Adam state restored)
-            ssm_inner = state.opt_state.inner_states['ssm'].inner_state
+            # Handle both plain multi_transform and chain(clip, multi_transform) structures
+            _opt = state.opt_state
+            if isinstance(_opt, tuple):
+                _opt = _opt[-1]  # unwrap chain → last element is MultiTransformState
+            ssm_inner = _opt.inner_states['ssm'].inner_state
             adam_state = ssm_inner[0]  # ScaleByAdamState (optax schedule mode)
             mu_leaves = jax.tree_util.tree_leaves(adam_state.mu)
             nu_leaves = jax.tree_util.tree_leaves(adam_state.nu)
