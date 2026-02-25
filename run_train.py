@@ -190,7 +190,7 @@ if __name__ == "__main__":
 				help="Whether or not the training data is offset randomly at each epoch.")
 	parser.add_argument("--shuffle_train", type=str2bool, default=True,
 				help="Whether or not the training data shuffled.")
-	parser.add_argument("--ignore_times", type=str2bool, default=False,
+	parser.add_argument("--ignore_times", type=str2bool, default=True,
                     help="Ignore the loss due to predicting the time.")
 	parser.add_argument("--test_dir_name", type=str, default=None,
 					help="directory for test data (optional, uses --dir_name if not specified)")
