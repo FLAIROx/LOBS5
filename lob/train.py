@@ -243,16 +243,31 @@ def train(args):
               f"test_loss={best_test_loss:.5f}, test_acc={best_test_acc:.4f}")
     steps_per_epoch = int(train_size / (args.micro_bsz * args.num_devices * process_count)) if args.curtail_epochs is None else args.curtail_epochs+1
 
+    # Mini-epoch: split each data epoch into K sub-epochs for frequent eval
+    mini_epochs = getattr(args, 'mini_epochs', 1)
+    if mini_epochs > 1:
+        steps_per_mini = steps_per_epoch // mini_epochs
+        validate_every_n_steps = steps_per_mini
+        print(f"[Schedule] mini_epochs={mini_epochs}, steps_per_mini={steps_per_mini}, "
+              f"steps_per_epoch={steps_per_epoch}")
+    else:
+        validate_every_n_steps = 0
+
     # Create LR schedule functions for wandb logging (optax manages LR inside JIT)
     total_steps = steps_per_epoch * args.epochs
-    warmup_end_step = steps_per_epoch * args.warmup_end
+    warmup_end_step = int(steps_per_epoch * args.warmup_end)
+
+    # lr_min = 1% of base LR (Llama 3 recipe) unless explicitly overridden
+    effective_lr_min = args.lr_min if args.lr_min > 0 else lr * 0.01
+    effective_ssm_lr_min = args.lr_min if args.lr_min > 0 else ssm_lr * 0.01
+
     lr_schedule_fn = create_lobs5_learning_rate_schedule(
         base_lr=lr, warmup_end_step=warmup_end_step,
-        total_steps=total_steps, lr_min=args.lr_min,
+        total_steps=total_steps, lr_min=effective_lr_min,
         use_cosine_anneal=args.cosine_anneal)
     ssm_lr_schedule_fn = create_lobs5_learning_rate_schedule(
         base_lr=ssm_lr, warmup_end_step=warmup_end_step,
-        total_steps=total_steps, lr_min=args.lr_min,
+        total_steps=total_steps, lr_min=effective_ssm_lr_min,
         use_cosine_anneal=args.cosine_anneal)
 
     # print("USING VERY INFREQUENT CHECKPOINTING FOR TINY EPOCH SIZE ")
@@ -351,9 +366,222 @@ def train(args):
             except (OSError, ValueError) as e:
                 print(f"[Checkpoint] WARNING: mid-epoch save failed: {e}")
 
+    # ── Mini-epoch validation callback ──
+    mini_epoch_counter = [0]  # mutable for closure
+
+    def _save_mini_epoch_checkpoint(cb_state, cb_epoch, mini_idx, val_loss, test_loss, val_acc, test_acc, train_loss_avg):
+        """Save checkpoint with val+test metrics at mini-epoch boundary."""
+        global_step = int(cb_state.step)
+        if is_distributed:
+            ckpt_st = _reshard_for_ckpt(cb_state)
+        else:
+            ckpt_st = deduplicate_trainstate(cb_state)
+        ckpt = {
+            'model': ckpt_st,
+            'config': vars(args) if is_main_process else {},
+            'metrics': {
+                'loss_train': float(train_loss_avg),
+                'loss_val_ar': float(val_loss),
+                'loss_test_rnn': float(test_loss),
+                'acc_val_ar': float(val_acc),
+                'acc_test_rnn': float(test_acc),
+                'mini_epoch': mini_idx,
+                'epoch': cb_epoch,
+            }
+        }
+        try:
+            save_checkpoint(ckpt_mgr, ckpt, global_step)
+            if is_main_process:
+                print(f"[Checkpoint] Mini-epoch save: epoch={cb_epoch}, mini={mini_idx}, "
+                      f"global_step={global_step}")
+        except (OSError, ValueError) as e:
+            print(f"[Checkpoint] WARNING: mini-epoch save failed: {e}")
+
+    def mini_epoch_validate(cb_state, cb_epoch, cb_batch_idx):
+        """Run val + test + checkpoint at mini-epoch boundary. Returns True to stop."""
+        nonlocal best_acc, best_loss, best_epoch, count, best_val_loss
+        nonlocal best_test_loss, best_test_acc
+        nonlocal best_test_last_order_loss, best_test_last_order_acc
+        nonlocal best_test_last_order_nll, best_test_all_orders_nll
+        nonlocal lr_count, opt_acc
+
+        current_mini = mini_epoch_counter[0]
+        mini_epoch_counter[0] += 1
+        global_step = int(cb_state.step)
+
+        print(f"\n[Mini-epoch {current_mini + 1}/{mini_epochs}] "
+              f"Epoch {cb_epoch + 1}, step {cb_batch_idx + 1}")
+
+        # Barrier before eval
+        if is_distributed:
+            sync_global_devices(f"pre_eval_mini_{cb_epoch}_{current_mini}")
+
+        # === Validation ===
+        eval_watchdog = StepWatchdog(timeout=1200)
+        eval_watchdog.kick(cb_epoch, 0)
+
+        (val_loss, val_acc,
+            val_ce_means, val_acc_means,
+            val_last_order_loss, val_last_order_acc,
+            val_last_order_nll, val_all_orders_nll) = validate(cb_state,
+                                        val_model.apply,
+                                        valloader,
+                                        seq_len,
+                                        in_dim,
+                                        batchnorm,
+                                        args.num_devices,
+                                        cb_epoch,
+                                        curtail_epoch=args.curtail_epochs,
+                                        apply_method='__call_ar__',
+                                        ignore_times=ignore_times,
+                                        log_ce_tables=args.log_ce_tables,
+                                        mesh=mesh,
+                                        jit_eval_step_fn=jit_eval_step)
+
+        # === Test ===
+        eval_watchdog.kick(cb_epoch, 1)
+        (test_loss, test_acc,
+          test_ce_means, test_acc_means,
+          test_last_order_loss, test_last_order_acc,
+          test_last_order_nll, test_all_orders_nll) = validate(cb_state,
+                                       val_model.apply,
+                                       testloader,
+                                       seq_len,
+                                       in_dim,
+                                       batchnorm,
+                                       args.num_devices,
+                                       cb_epoch,
+                                       curtail_epoch=args.curtail_epochs,
+                                       apply_method='__call_ar__',
+                                       ignore_times=ignore_times,
+                                       log_ce_tables=args.log_ce_tables,
+                                       mesh=mesh,
+                                       jit_eval_step_fn=jit_eval_step)
+
+        eval_watchdog.stop()
+
+        # === Per-ticker test (if multi-ticker) ===
+        per_ticker_metrics = {}
+        if per_ticker_test_loaders:
+            for ticker, ticker_loader in per_ticker_test_loaders.items():
+                print(f"[*] Mini-epoch {current_mini + 1} Test [{ticker}]")
+                (t_loss, t_acc, _, _, _, _, _, _) = validate(
+                    cb_state, val_model.apply, ticker_loader,
+                    seq_len, in_dim, batchnorm, args.num_devices, cb_epoch,
+                    curtail_epoch=args.curtail_epochs,
+                    apply_method='__call_ar__',
+                    ignore_times=ignore_times,
+                    log_ce_tables=False,
+                    mesh=mesh,
+                    jit_eval_step_fn=jit_eval_step)
+                per_ticker_metrics[ticker] = {'loss': float(t_loss), 'acc': float(t_acc)}
+                print(f"  [{ticker}] Loss: {t_loss:.5f}  Acc: {t_acc:.4f}")
+
+        # === Print metrics ===
+        # Compute train loss average so far this epoch
+        # (batch_losses is in train_epoch scope, not accessible here; use step_loss wandb)
+        print(f"\n=>> Mini-epoch {current_mini + 1}/{mini_epochs} Metrics ===")
+        print(f"\tAll Orders -- Val Loss: {val_loss:.5f} Val Acc: {val_acc:.4f} "
+              f"Val NLL: {val_all_orders_nll:.4f}")
+        print(f"\t              Test Loss: {test_loss:.5f} Test Acc: {test_acc:.4f} "
+              f"Test NLL: {test_all_orders_nll:.4f}")
+        print(f"\tLast Order -- Val Loss: {val_last_order_loss:.5f} Val Acc: {val_last_order_acc:.4f} "
+              f"Val NLL: {val_last_order_nll:.4f}")
+        print(f"\t              Test Loss: {test_last_order_loss:.5f} Test Acc: {test_last_order_acc:.4f} "
+              f"Test NLL: {test_last_order_nll:.4f}")
+
+        # === Checkpoint with val/test metrics ===
+        _save_mini_epoch_checkpoint(cb_state, cb_epoch, current_mini,
+                                    val_loss, test_loss, val_acc, test_acc,
+                                    float(val_loss))  # train_loss not available here, use val_loss
+
+        # === Update best metrics + early stopping ===
+        if val_loss < best_val_loss:
+            count = 0
+            best_val_loss = val_loss
+        else:
+            count += 1
+
+        if val_acc > best_acc:
+            count = 0
+            best_loss, best_acc, best_epoch = val_loss, val_acc, cb_epoch
+            if valloader is not None:
+                best_test_loss, best_test_acc = test_loss, test_acc
+            else:
+                best_test_loss, best_test_acc = best_loss, best_acc
+            best_test_last_order_loss = test_last_order_loss
+            best_test_last_order_acc = test_last_order_acc
+            best_test_last_order_nll = test_last_order_nll
+            best_test_all_orders_nll = test_all_orders_nll
+
+        # reduce_lr_on_plateau (informational only)
+        input_rl = lr, ssm_lr, lr_count, val_acc, opt_acc
+        _, _, lr_count, opt_acc = reduce_lr_on_plateau(
+            input_rl, factor=args.reduce_factor, patience=args.lr_patience, lr_min=args.lr_min)
+
+        # Print best so far
+        print(f"\tBest Val Loss: {best_loss:.5f} -- Best Val Accuracy: {best_acc:.4f}"
+              f" at Epoch {best_epoch + 1}\n"
+              f"\tBest All Orders -- Loss: {best_test_loss:.5f}"
+              f" Acc: {best_test_acc:.4f}"
+              f" NLL: {best_test_all_orders_nll:.4f}\n"
+              f"\tBest Last Order -- Loss: {best_test_last_order_loss:.5f}"
+              f" Acc: {best_test_last_order_acc:.4f}"
+              f" NLL: {best_test_last_order_nll:.4f}\n")
+
+        # === wandb logging ===
+        current_lr = float(lr_schedule_fn(global_step))
+        current_ssm_lr = float(ssm_lr_schedule_fn(global_step))
+
+        ticker_wandb = {}
+        if per_ticker_metrics:
+            for ticker, tm in per_ticker_metrics.items():
+                ticker_wandb[f"test/{ticker}/loss"] = tm['loss']
+                ticker_wandb[f"test/{ticker}/accuracy"] = tm['acc']
+
+        if is_main_process and args.USE_WANDB:
+            wandb.log({
+                "Val loss": val_loss,
+                "Val Accuracy": val_acc,
+                "Test Loss": test_loss,
+                "Test Accuracy": test_acc,
+                "Val All Orders NLL": val_all_orders_nll,
+                "Test All Orders NLL": test_all_orders_nll,
+                "Test Last Order Loss": test_last_order_loss,
+                "Test Last Order Accuracy": test_last_order_acc,
+                "Test Last Order NLL": test_last_order_nll,
+                "Val Last Order Loss": val_last_order_loss,
+                "Val Last Order Accuracy": val_last_order_acc,
+                "Val Last Order NLL": val_last_order_nll,
+                "count": count,
+                "Learning rate count": lr_count,
+                "Opt acc": opt_acc,
+                "lr": current_lr,
+                "ssm_lr": current_ssm_lr,
+                "mini_epoch": current_mini + 1,
+                **ticker_wandb,
+            }, step=global_step)
+
+            wandb.run.summary["Best Val Loss"] = best_loss
+            wandb.run.summary["Best Val Accuracy"] = best_acc
+            wandb.run.summary["Best Epoch"] = best_epoch
+            wandb.run.summary["Best Test Loss"] = best_test_loss
+            wandb.run.summary["Best Test Accuracy"] = best_test_acc
+            wandb.run.summary["Best Test All Orders NLL"] = best_test_all_orders_nll
+            wandb.run.summary["Best Test Last Order Loss"] = best_test_last_order_loss
+            wandb.run.summary["Best Test Last Order Accuracy"] = best_test_last_order_acc
+            wandb.run.summary["Best Test Last Order NLL"] = best_test_last_order_nll
+
+        # === Barrier after eval ===
+        if is_distributed:
+            sync_global_devices(f"post_eval_mini_{cb_epoch}_{current_mini}")
+
+        return count > args.early_stop_patience  # True → stop training
+
     for epoch in range(start_epoch, args.epochs):
         # Free residual memory from previous epoch's val/test before training
         gc.collect()
+        mini_epoch_counter[0] = 0  # reset for each data epoch
 
         # Update DistributedSampler epoch for proper cross-epoch shuffling
         if hasattr(trainloader, 'sampler') and hasattr(trainloader.sampler, 'set_epoch'):
@@ -387,6 +615,8 @@ def train(args):
                                               max_job_hours=getattr(args, 'max_job_hours', 24.0),
                                               save_before_timeout_minutes=getattr(args, 'save_before_timeout_minutes', 30),
                                               resume_from_step=resume_from_step,
+                                              validate_callback=mini_epoch_validate if mini_epochs > 1 else None,
+                                              validate_every_n_steps=validate_every_n_steps,
                                               )
         # resume_from_step only applies to the first epoch after restore
         resume_from_step = None
@@ -404,6 +634,24 @@ def train(args):
             # Refresh random offsets in-place without rebuilding DataLoader.
             # This keeps persistent workers alive across epochs.
             lobster_dataset.reset_train_offsets()
+
+        # Mini-epochs > 1: all validation/checkpoint/metrics handled by callback
+        if mini_epochs > 1:
+            # Handle trailing steps: if epoch didn't end exactly on a mini-epoch
+            # boundary, run one final evaluation for the remaining steps.
+            actual_steps = steps_per_epoch  # curtail already baked into steps_per_epoch
+            if actual_steps % validate_every_n_steps != 0:
+                last_batch_idx = actual_steps - 1
+                print(f"[Mini-epoch] Trailing {actual_steps % validate_every_n_steps} steps — "
+                      f"running final eval at step {actual_steps}")
+                mini_epoch_validate(state, epoch, last_batch_idx)
+            gc.collect()
+            if is_distributed:
+                sync_global_devices(f"post_epoch_{epoch}")
+            if count > args.early_stop_patience:
+                break
+            continue  # skip epoch-end eval block
+
         print(f"val model hash: {val_model.__hash__()}")
         print(f"val model apply hash: {val_model.__hash__()}")
 

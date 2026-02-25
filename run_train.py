@@ -151,11 +151,11 @@ if __name__ == "__main__":
 	parser.add_argument("--dt_global", type=str2bool, default=False,
 						help="Treat timescale parameter as global parameter or SSM parameter")
 	parser.add_argument("--lr_min", type=float, default=0,
-						help="minimum learning rate")
+						help="minimum learning rate. 0 = auto (1%% of base LR)")
 	parser.add_argument("--cosine_anneal", type=str2bool, default=True,
 						help="whether to use cosine annealing schedule")
-	parser.add_argument("--warmup_end", type=int, default=1,
-						help="epoch to end linear warmup")
+	parser.add_argument("--warmup_end", type=float, default=0.01,
+						help="epoch (or fraction) to end linear warmup. Default 0.01 = 1%% of training.")
 	parser.add_argument("--lr_patience", type=int, default=1000000,
 						help="patience before decaying learning rate for lr_decay_on_val_plateau")
 	parser.add_argument("--reduce_factor", type=float, default=0.9,
@@ -183,6 +183,9 @@ if __name__ == "__main__":
 					help="Set flag to True to use the TB profiler.")
 	parser.add_argument("--curtail_epochs", type=int, default=None,
 				help="End epoch after n steps. Default is None, never. ")
+	parser.add_argument("--mini_epochs", type=int, default=40,
+				help="Number of mini-epochs per data epoch. Validation/test/checkpoint "
+				     "happen after each mini-epoch. Default 40 for single-epoch training.")
 	parser.add_argument("--random_offsets_train", type=str2bool, default=True,
 				help="Whether or not the training data is offset randomly at each epoch.")
 	parser.add_argument("--shuffle_train", type=str2bool, default=True,

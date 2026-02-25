@@ -664,6 +664,9 @@ def train_epoch(
         max_job_hours=24.0,
         save_before_timeout_minutes=30,
         resume_from_step=None,
+        # ── Mini-epoch validation parameters ──
+        validate_callback=None,         # callable(state, epoch, batch_idx) -> bool (should_stop)
+        validate_every_n_steps=0,       # trigger validate_callback every N steps (0=disabled)
     ):
 
     """
@@ -825,6 +828,18 @@ def train_epoch(
                     watchdog.stop()
                     loss_mean = sum(batch_losses) / len(batch_losses) if batch_losses else float('nan')
                     return state, loss_mean, None, batch_idx + 1
+
+            # ── Mini-epoch validation ──
+            if (validate_every_n_steps > 0 and
+                validate_callback is not None and
+                (batch_idx + 1) % validate_every_n_steps == 0):
+                watchdog.kick(epoch, batch_idx)  # extend watchdog during eval
+                should_stop = validate_callback(state, epoch, batch_idx)
+                if should_stop:
+                    watchdog.stop()
+                    loss_mean = sum(batch_losses) / len(batch_losses) if batch_losses else float('nan')
+                    ce_means = onp.mean(onp.concatenate(cross_entropies, axis=0), axis=0) if log_ce_tables else None
+                    return state, loss_mean, ce_means, None  # normal exit (early stop)
 
         else:
             continue

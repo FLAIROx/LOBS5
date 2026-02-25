@@ -342,26 +342,31 @@ def init_train_state(
         if hasattr(args, 'curtail_epochs') and args.curtail_epochs is not None:
             steps_per_epoch = min(steps_per_epoch, args.curtail_epochs + 1)
         total_steps = steps_per_epoch * args.epochs
-        warmup_end_step = steps_per_epoch * args.warmup_end
+        warmup_end_step = int(steps_per_epoch * args.warmup_end)
+
+        # lr_min = 1% of base LR (Llama 3 recipe) unless explicitly overridden
+        effective_lr_min = args.lr_min if args.lr_min > 0 else lr * 0.01
+        effective_ssm_lr_min = args.lr_min if args.lr_min > 0 else ssm_lr * 0.01
 
         if print_shapes:
             print(f"[Schedule] steps_per_epoch: {steps_per_epoch}")
             print(f"[Schedule] total_steps: {total_steps}")
             print(f"[Schedule] warmup_end_step: {warmup_end_step}")
             print(f"[Schedule] Base SSM LR: {ssm_lr}, Base LR: {lr}")
+            print(f"[Schedule] lr_min: {effective_lr_min}, ssm_lr_min: {effective_ssm_lr_min}")
 
         ssm_lr_schedule = create_lobs5_learning_rate_schedule(
             base_lr=ssm_lr,
             warmup_end_step=warmup_end_step,
             total_steps=total_steps,
-            lr_min=args.lr_min,
+            lr_min=effective_ssm_lr_min,
             use_cosine_anneal=args.cosine_anneal,
         )
         lr_schedule = create_lobs5_learning_rate_schedule(
             base_lr=lr,
             warmup_end_step=warmup_end_step,
             total_steps=total_steps,
-            lr_min=args.lr_min,
+            lr_min=effective_lr_min,
             use_cosine_anneal=args.cosine_anneal,
         )
 

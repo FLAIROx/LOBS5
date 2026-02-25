@@ -146,7 +146,7 @@ SSM_SIZE_BASE=${SSM_SIZE_BASE:-2048}
 export PER_GPU_BSZ=${PER_GPU_BSZ:-2}
 SSM_LR_BASE=${SSM_LR_BASE:-5e-4}
 LR_FACTOR=${LR_FACTOR:-1}
-WARMUP_END=${WARMUP_END:-1}
+WARMUP_END=${WARMUP_END:-0.01}
 
 echo "[*] Model config: 360M (24tok, padded_large)"
 echo "    d_model=$D_MODEL, n_layers=$N_LAYERS, blocks=$BLOCKS"
@@ -157,6 +157,14 @@ echo "    per_gpu_bsz=$PER_GPU_BSZ"
 if [ -n "$CURTAIL_EPOCHS" ]; then
     echo "[*] Curtail epochs: $CURTAIL_EPOCHS steps (quick test mode)"
     export CURTAIL_EPOCHS
+fi
+
+# Mini-epochs: split each data epoch into K sub-epochs for frequent eval
+# Default 40: with 1 data epoch, get 40 eval points for LR/loss curve visibility
+MINI_EPOCHS=${MINI_EPOCHS:-40}
+export MINI_EPOCHS
+if [ "$MINI_EPOCHS" -gt 1 ]; then
+    echo "[*] Mini-epochs: $MINI_EPOCHS per data epoch"
 fi
 
 # Mid-epoch checkpoint: save every N steps or "auto" (30min time-based)
@@ -497,6 +505,7 @@ python -u -B run_train.py \
     --lr_factor='"$LR_FACTOR"' \
     --micro_bsz='"$PER_GPU_BSZ"' \
     ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS} \
+    --mini_epochs=$MINI_EPOCHS \
     ${RESTORE_PATH:+--restore=$RESTORE_PATH} \
     ${RESTORE_STEP:+--restore_step=$RESTORE_STEP} \
     ${RESUME_FROM_STEP:+--resume_from_step=$RESUME_FROM_STEP} \
@@ -1163,5 +1172,3 @@ this branch from train_full_autoreg.batch (32N).  **Bold** = differs from argpar
 
 #SBATCH --contiguous
 #SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
-
-'''
