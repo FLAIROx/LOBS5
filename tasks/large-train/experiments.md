@@ -120,6 +120,8 @@ All 32-node (128 GPU) experiments recorded here. Non-KTL (IGNORE_TIMES=True) and
 
 | Task | Job ID | Model Size | IGNORE_TIMES | Curtail | Nodes | Micro BSZ | LR | Global BSZ | Completed Epochs | Stopped At (Epoch/Step) | Best Val Acc | Best Test Acc | Best Val Loss | Best Test Loss | W&B | Time | Session ID | Description | Who |
 |------|--------|-----------|-------------|---------|-------|-----------|-----|-----------|-----------------|------------------------|-------------|--------------|--------------|---------------|-----|------|-----------|-------------|-----|
+| G7-muon-optimizer | 2467214 | 75M | -- | 300 | 2 | 10 | 1e-3 | 80 | 0 | FAILED (conda PATH, python not found) | -- | -- | -- | -- | -- | ~1min | 6124a772 | 2N speed test — conda.sh CONDA_EXE pointed to kangli.s5e home, inaccessible on nid010936-010937 | Jonathan |
+| G7-muon-optimizer | 2472218 | 75M | -- | 300 | 2 | 10 | 1e-3 | 80 | -- | -- | -- | -- | -- | -- | -- | -- | 94a426c2 | 2N speed test — conda PATH fix applied, OPT_CONFIG=muon, MUON_LR_FACTOR=1 (default) | Jonathan |
 
 ---
 
