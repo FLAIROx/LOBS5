@@ -109,6 +109,10 @@ export PER_GPU_BSZ=${PER_GPU_BSZ:-10}
 # G2 experiment evidence (32N, 40ep):
 #   24tok: Val Acc 78.87%, Test Acc 75.89% (Job 2440076, W&B pmk5zbad)
 #   22tok: Val Acc 76.61%, Test Acc 73.45% (Job 2458353, W&B cgdexweb)
+#
+# TODO: lob/inference.py and lob/inference_no_errcorr.py still use 22-token decode indices.
+#       Training/test loss not affected (pipeline never calls decode/inference).
+#       Must update before running autoregressive generation.
 
 # Multi-node: default to hierarchical shard_map (2D mesh)
 # Hierarchical splits allreduce into NVLink (intra-node) + Slingshot (inter-node)
