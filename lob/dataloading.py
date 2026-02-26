@@ -33,7 +33,7 @@ def create_lobster_prediction_dataset(
 		shuffle_train=True,
 		rand_offset=True,
 		debug_overfit=False,
-		val_split: float = 0.1,
+		val_split: float = 0.01,
 		test_split: float = 0.1,
 		pin_memory: bool = True,
 		prefetch_factor: int = 2,
