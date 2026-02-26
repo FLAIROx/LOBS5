@@ -8,7 +8,8 @@
 #
 # Usage:
 #   ./submit_scaling_law.sh benchmark              # 5 sequential benchmarks (30min each)
-#   ./submit_scaling_law.sh train                   # 5 sequential training (24h each)
+#   ./submit_scaling_law.sh train                   # 5 sequential training (15% epoch, 24h each)
+#   ./submit_scaling_law.sh epoch                   # 4 models × 1 full epoch (skip 120M)
 #   ./submit_scaling_law.sh single 10M benchmark    # single model benchmark
 #   ./submit_scaling_law.sh single 10M train        # single model training
 #
@@ -88,17 +89,24 @@ submit_job() {
     # Informational output to stderr (so stdout is clean for job ID capture)
     echo "──────────────────────────────────────" >&2
     echo "Model: $label (d=$d_model, L=$n_layers, B=$blocks, SSM=$ssm_size)" >&2
-    echo "BSZ: $bsz/GPU, global=$global_bsz, CURTAIL=$curtail" >&2
+    if [ "$curtail" -gt 0 ] 2>/dev/null; then
+        echo "BSZ: $bsz/GPU, global=$global_bsz, CURTAIL=$curtail" >&2
+    else
+        echo "BSZ: $bsz/GPU, global=$global_bsz, FULL EPOCH" >&2
+    fi
     echo "Nodes: $NODES, Time: $time_limit" >&2
     if [ -n "$dep_flag" ]; then
         echo "Dependency: $dep_flag" >&2
     fi
 
     local cmd="D_MODEL=$d_model N_LAYERS=$n_layers BLOCKS=$blocks SSM_SIZE_BASE=$ssm_size"
-    cmd+=" PER_GPU_BSZ=$bsz CURTAIL_EPOCHS=$curtail"
+    cmd+=" PER_GPU_BSZ=$bsz"
+    if [ "$curtail" -gt 0 ] 2>/dev/null; then
+        cmd+=" CURTAIL_EPOCHS=$curtail"
+    fi
     cmd+=" WANDB_PROJECT=$WANDB_PROJECT"
     cmd+=" NO_VALIDATION=1 NO_AUTO_RESUME=1"
-    cmd+=" sbatch --contiguous --nodes=$NODES --time=$time_limit"
+    cmd+=" sbatch --nodes=$NODES --time=$time_limit"
     if [ -n "$dep_flag" ]; then
         cmd+=" $dep_flag"
     fi
@@ -206,6 +214,55 @@ case "$MODE" in
         for entry in "${ALL_JOBS[@]}"; do
             IFS=':' read -r label jid curtail <<< "$entry"
             echo "  $label → Job $jid (CURTAIL=$curtail)"
+        done
+        echo "============================================"
+        ;;
+
+    epoch)
+        # Full epoch training (1 epoch, no curtail)
+        # Per-model time limits based on 64N benchmark (s/step × steps_per_epoch × 1.2 + compile)
+        # 120M skipped: 64-node JAX init bug (AssertionError in device_put)
+        declare -A EPOCH_TIMES=(
+            ["10M"]="02:00:00"   # 1.41h est → 2h
+            ["22M"]="03:00:00"   # 2.27h est → 3h
+            ["55M"]="08:00:00"   # 6.12h est → 8h
+            ["85M"]="13:00:00"   # 10.79h est → 13h
+        )
+        SKIP_MODELS="120M"
+
+        echo "============================================"
+        echo "H1 Scaling Law — Full Epoch Training"
+        echo "Nodes: $NODES, per-model time limits"
+        echo "Skipping: $SKIP_MODELS"
+        echo "============================================"
+        echo ""
+
+        PREV_JOB=""
+        ALL_JOBS=()
+        for spec in "${MODELS[@]}"; do
+            parse_model "$spec"
+            # Skip blacklisted models
+            if [[ " $SKIP_MODELS " =~ " $LABEL " ]]; then
+                echo "Skipping $LABEL (known issue)" >&2
+                echo ""
+                continue
+            fi
+            TIME=${EPOCH_TIMES[$LABEL]:-$TRAIN_TIME}
+            DEP=""
+            if [ -n "$PREV_JOB" ]; then
+                DEP="--dependency=afterok:$PREV_JOB"
+            fi
+            PREV_JOB=$(submit_job "$LABEL" "$D_MODEL" "$N_LAYERS" "$BLOCKS" "$SSM_SIZE" \
+                       "$PER_GPU_BSZ" "0" "$TIME" "$DEP")
+            ALL_JOBS+=("$LABEL:$PREV_JOB:$TIME")
+            echo ""
+        done
+
+        echo "============================================"
+        echo "All epoch training jobs submitted:"
+        for entry in "${ALL_JOBS[@]}"; do
+            IFS=':' read -r label jid time <<< "$entry"
+            echo "  $label → Job $jid (time=$time)"
         done
         echo "============================================"
         ;;
