@@ -198,6 +198,20 @@ if [ -n "$CURTAIL_EPOCHS" ]; then
     export CURTAIL_EPOCHS
 fi
 
+# NO_VALIDATION: Skip all validation during training (scaling law / speed benchmarks)
+# Validation will be done separately post-training with saved checkpoints
+if [ -n "$NO_VALIDATION" ]; then
+    echo "[*] Validation disabled (NO_VALIDATION=$NO_VALIDATION)"
+    export NO_VALIDATION
+fi
+
+# VAL_SPLIT: fraction of training files held out for validation (default: 0.01 = 1%)
+# All scaling law experiments must use the same val_split + seed for fair comparison.
+# Split details are auto-saved to logs_lobs5/data_split_j{JOBID}.json
+VAL_SPLIT=${VAL_SPLIT:-0.01}
+export VAL_SPLIT
+echo "[*] val_split: $VAL_SPLIT (seed=42)"
+
 # Mini-epochs: split each data epoch into K sub-epochs for frequent eval
 # Default 40: with 1 data epoch, get 40 eval points for LR/loss curve visibility
 MINI_EPOCHS=${MINI_EPOCHS:-1}

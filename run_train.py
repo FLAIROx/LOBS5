@@ -228,6 +228,12 @@ if __name__ == "__main__":
 				choices=["24tok", "1tok"],
 				help="Token encoding mode: '24tok' = 24 tokens per message (12000-step seq), "
 				     "'1tok' = 1 token per message via per-field embedding sum (500-step seq)")
+	parser.add_argument("--no_validation", action="store_true",
+				help="Skip all validation during training. For scaling law experiments "
+				     "where validation is done separately post-training.")
+	parser.add_argument("--val_split", type=float, default=0.01,
+				help="Fraction of training files to hold out for validation (default: 0.01 = 1%%). "
+				     "Set to 0 to use all data for training.")
 
 	args = parser.parse_args()
 
