@@ -2,8 +2,8 @@
 #SBATCH --job-name=lobs5_360m
 #SBATCH --output=logs_lobs5/lobs5_%j.out
 #SBATCH --error=logs_lobs5/lobs5_%j.err
-# === 32-node production config ===
-#SBATCH --nodes=32
+# === 256-node production config ===
+#SBATCH --nodes=256
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
@@ -168,7 +168,7 @@ fi
 
 # Mini-epochs: split each data epoch into K sub-epochs for frequent eval
 # Default 40: with 1 data epoch, get 40 eval points for LR/loss curve visibility
-MINI_EPOCHS=${MINI_EPOCHS:-40}
+MINI_EPOCHS=${MINI_EPOCHS:-1}
 export MINI_EPOCHS
 if [ "$MINI_EPOCHS" -gt 1 ]; then
     echo "[*] Mini-epochs: $MINI_EPOCHS per data epoch"
@@ -305,6 +305,7 @@ if [ "$SRUN_EXIT" -ne 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RES
           # Resubmit the same job with RESTORE_PATH, inheriting all current env vars
           # --dependency=afterany ensures it starts after this job fully finishes
           RESTORE_PATH="$JOB_CKPT_DIR" NO_AUTO_RESUME_DEPTH=$NEXT_DEPTH \
+            MINI_EPOCHS=1 \
             sbatch --nodes=${SLURM_NNODES} --time=${SBATCH_TIMELIMIT:-24:00:00} \
                    --dependency=afterany:${SLURM_JOB_ID} \
                    "$0"
