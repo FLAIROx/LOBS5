@@ -624,7 +624,7 @@ def train(args):
                                               max_job_hours=getattr(args, 'max_job_hours', 24.0),
                                               save_before_timeout_minutes=getattr(args, 'save_before_timeout_minutes', 30),
                                               resume_from_step=resume_from_step,
-                                              validate_callback=mini_epoch_validate if mini_epochs > 1 else None,
+                                              validate_callback=mini_epoch_validate if mini_epochs > 1 and not getattr(args, 'no_validation', False) else None,
                                               validate_every_n_steps=validate_every_n_steps,
                                               )
         # resume_from_step only applies to the first epoch after restore
@@ -649,7 +649,7 @@ def train(args):
             # Handle trailing steps: if epoch didn't end exactly on a mini-epoch
             # boundary, run one final evaluation for the remaining steps.
             actual_steps = steps_per_epoch  # curtail already baked into steps_per_epoch
-            if validate_every_n_steps > 0 and actual_steps % validate_every_n_steps != 0:
+            if not getattr(args, 'no_validation', False) and validate_every_n_steps > 0 and actual_steps % validate_every_n_steps != 0:
                 last_batch_idx = actual_steps - 1
                 print(f"[Mini-epoch] Trailing {actual_steps % validate_every_n_steps} steps — "
                       f"running final eval at step {actual_steps}")
@@ -660,6 +660,8 @@ def train(args):
             if count > args.early_stop_patience:
                 break
             continue  # skip epoch-end eval block
+
+        _skip_val = getattr(args, 'no_validation', False)
 
         print(f"val model hash: {val_model.__hash__()}")
         print(f"val model apply hash: {val_model.__hash__()}")
@@ -672,7 +674,21 @@ def train(args):
         if is_distributed:
             sync_global_devices(f"pre_eval_epoch_{epoch}")
 
-        if valloader is not None:
+        if _skip_val:
+            # --no_validation: skip all epoch-end validation, set dummy metrics
+            if is_main_process:
+                print(f"[*] Epoch {epoch + 1} — validation skipped (--no_validation)")
+            val_loss = test_loss = train_loss
+            val_acc = test_acc = 0.0
+            val_last_order_loss = test_last_order_loss = 0.0
+            val_last_order_acc = test_last_order_acc = 0.0
+            val_last_order_nll = test_last_order_nll = 0.0
+            val_all_orders_nll = test_all_orders_nll = 0.0
+            per_ticker_metrics = {}
+            print(f"\n=>> Epoch {epoch + 1} Metrics ===")
+            print(f"\tTrain Loss: {train_loss:.5f} (validation skipped)")
+
+        elif valloader is not None:
             # Eval watchdog: kill process if val/test eval hangs (e.g. NCCL deadlock).
             # 1200s (20min) timeout: 600s was too aggressive at 32N scale (job 2438369).
             eval_watchdog = StepWatchdog(timeout=1200)

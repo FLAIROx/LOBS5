@@ -336,6 +336,7 @@ python -u -B run_train.py \
     --micro_bsz="$PER_GPU_BSZ" \
     ${CURTAIL_EPOCHS:+--curtail_epochs=$CURTAIL_EPOCHS} \
     --mini_epochs=$MINI_EPOCHS \
+    ${NO_VALIDATION:+--no_validation} \
     ${RESTORE_PATH:+--restore=$RESTORE_PATH} \
     ${RESTORE_STEP:+--restore_step=$RESTORE_STEP} \
     ${RESUME_FROM_STEP:+--resume_from_step=$RESUME_FROM_STEP} \

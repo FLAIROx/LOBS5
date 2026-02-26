@@ -913,6 +913,49 @@ class LOBSTER(SequenceDataset):
                     if self.val_files:
                         self.val_files, self.val_book_files = zip(*self.val_files)
 
+        # ── Log data split for reproducibility ──
+        # All experiments with same config + seed=42 produce identical splits.
+        # This log provides an explicit manifest for post-training validation.
+        import os as _os
+        import json as _json
+        _slurm_job_id = _os.environ.get('SLURM_JOB_ID', 'unknown')
+        _split_info = {
+            'slurm_job_id': _slurm_job_id,
+            'tickers': getattr(self, 'tickers', None),
+            'data_dir': str(self.data_dir),
+            'train_date_range': getattr(self, 'train_date_range', None),
+            'test_date_range': getattr(self, 'test_date_range', None),
+            'val_split': self.val_split,
+            'test_split': self.test_split,
+            'seed': self.seed,
+            'n_train_files': len(self.train_files),
+            'n_val_files': len(self.val_files) if self.val_files else 0,
+            'n_test_files': len(self.test_files) if self.test_files else 0,
+            'train_files': [str(f) for f in self.train_files],
+            'val_files': [str(f) for f in self.val_files] if self.val_files else [],
+            'test_files': [str(f) for f in self.test_files] if self.test_files else [],
+        }
+        print(f"[Data Split] train={_split_info['n_train_files']} days, "
+              f"val={_split_info['n_val_files']} days, "
+              f"test={_split_info['n_test_files']} days "
+              f"(val_split={self.val_split}, seed={self.seed})")
+        # Save to JSON (rank 0 only — checked by caller or safe to write from all ranks
+        # since all ranks have identical split)
+        _split_path = _os.path.join(
+            _os.environ.get('SLURM_SUBMIT_DIR', '.'),
+            'logs_lobs5',
+            f'data_split_j{_slurm_job_id}.json'
+        )
+        try:
+            _os.makedirs(_os.path.dirname(_split_path), exist_ok=True)
+            # Only write from the first local process to avoid race conditions
+            if int(_os.environ.get('SLURM_LOCALID', '0')) == 0:
+                with open(_split_path, 'w') as _f:
+                    _json.dump(_split_info, _f, indent=2)
+                print(f"[Data Split] Saved to {_split_path}")
+        except (OSError, IOError) as _e:
+            print(f"[Data Split] WARNING: Could not save split info: {_e}")
+
         # ── Shared: create Dataset objects from file lists ──
         self.dataset_train = LOBSTER_Dataset(
             self.train_files,

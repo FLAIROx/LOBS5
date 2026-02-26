@@ -136,7 +136,36 @@ echo "Total GPUs: $((SLURM_NNODES * 4))"
 echo "============================================"
 
 # ============================================
-# 360M Model Configuration (24tok, padded_large)
+# H1 Scaling Law Model Configurations (block_size=64)
+# ============================================
+# 5 models: 10M → 22M → 55M → 85M → 120M
+# Data: 8 tickers × 4 years, P=15% of 1 epoch (~100B tokens)
+# Nodes: 64 (256 GPUs), EPOCHS=1
+#
+# ┌───────┬─────────┬──────────┬────────┬──────────┬──────────────┬─────┬────────────┬─────────┐
+# │ Label │ d_model │ n_layers │ blocks │ ssm_size │ params       │ BSZ │ global_bsz │ CURTAIL │
+# ├───────┼─────────┼──────────┼────────┼──────────┼──────────────┼─────┼────────────┼─────────┤
+# │ 10M   │ 512     │ 6        │ 8      │ 512      │ 10,821,741   │ 20  │ 5,120      │ 1,589   │
+# │ 22M   │ 768     │ 6        │ 12     │ 768      │ 21,805,677   │ 14  │ 3,584      │ 2,270   │
+# │ 55M   │ 1024    │ 12       │ 16     │ 1024     │ 55,498,861   │ 10  │ 2,560      │ 3,179   │
+# │ 85M   │ 1280    │ 12       │ 20     │ 1280     │ 84,710,253   │ 6   │ 1,536      │ 5,298   │
+# │ 120M  │ 1536    │ 12       │ 24     │ 1536     │ 120,082,029  │ 4   │ 1,024      │ 7,948   │
+# └───────┴─────────┴──────────┴────────┴──────────┴──────────────┴─────┴────────────┴─────────┘
+#
+# train_size = 54,264,656 samples (8 tickers)
+# CURTAIL = floor(train_size * 0.15 / global_bsz) - 1
+# BSZ estimates: memory ∝ d_model² × n_layers (360M:BSZ=2, 75M:BSZ=10)
+#
+# Benchmark (CURTAIL=300, 30min):
+#   D_MODEL=512 N_LAYERS=6 BLOCKS=8 SSM_SIZE_BASE=512 PER_GPU_BSZ=20 CURTAIL_EPOCHS=300 \
+#     WANDB_PROJECT=lobs5-scaling-law sbatch --contiguous --nodes=64 --time=00:30:00 train_full_autoreg.batch
+#
+# Train (15% data, 24h):
+#   D_MODEL=512 N_LAYERS=6 BLOCKS=8 SSM_SIZE_BASE=512 PER_GPU_BSZ=20 CURTAIL_EPOCHS=1589 \
+#     NO_VALIDATION=1 WANDB_PROJECT=lobs5-scaling-law sbatch --contiguous --nodes=64 --time=24:00:00 train_full_autoreg.batch
+#
+# ============================================
+# 360M Model Configuration (24tok, padded_large) — default
 # ============================================
 # Scaled from 75M: all dimensions doubled
 # 75M was: D_MODEL=1024, N_LAYERS=12, BLOCKS=16, SSM_SIZE=1024, PER_GPU_BSZ=10
@@ -164,6 +193,13 @@ echo "    per_gpu_bsz=$PER_GPU_BSZ"
 if [ -n "$CURTAIL_EPOCHS" ]; then
     echo "[*] Curtail epochs: $CURTAIL_EPOCHS steps (quick test mode)"
     export CURTAIL_EPOCHS
+fi
+
+# NO_VALIDATION: Skip all validation during training (scaling law / speed benchmarks)
+# Validation will be done separately post-training with saved checkpoints
+if [ -n "$NO_VALIDATION" ]; then
+    echo "[*] Validation disabled (NO_VALIDATION=$NO_VALIDATION)"
+    export NO_VALIDATION
 fi
 
 # Mini-epochs: split each data epoch into K sub-epochs for frequent eval

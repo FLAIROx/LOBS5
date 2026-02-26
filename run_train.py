@@ -214,6 +214,9 @@ if __name__ == "__main__":
 				help="Local Steps: each node trains independently for K steps, "
 				     "then params averaged via pmean('nodes'). 0=disabled (standard AllReduce). "
 				     "K>0 requires --hierarchical=True. Inner optimizer (Adam/AdamW) is unchanged.")
+	parser.add_argument("--no_validation", action="store_true",
+				help="Skip all validation during training. For scaling law experiments "
+				     "where validation is done separately post-training.")
 
 	args = parser.parse_args()
 
