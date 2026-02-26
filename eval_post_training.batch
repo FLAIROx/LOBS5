@@ -1,0 +1,96 @@
+#!/bin/bash
+#SBATCH --job-name=eval_post
+#SBATCH --output=logs_lobs5/eval_%j.out
+#SBATCH --error=logs_lobs5/eval_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --mem=0
+#SBATCH --time=01:00:00
+
+# ============================================
+# Post-Training Evaluation
+# ============================================
+# Loads a trained checkpoint and runs val/test evaluation.
+# All model parameters are auto-read from checkpoint metadata.
+#
+# Usage:
+#   RESTORE=/path/to/checkpoint sbatch eval_post_training.batch
+#   RESTORE=/path/to/ckpt RESTORE_STEP=5000 sbatch eval_post_training.batch
+#   RESTORE=/path/to/ckpt MICRO_BSZ=4 sbatch eval_post_training.batch
+#
+# The val/test split is deterministic (seed=42 + val_split=0.01).
+# Split details are auto-saved to logs_lobs5/data_split_j{JOBID}.json
+# by the data loader, so you can verify it matches training.
+# ============================================
+
+if [ -z "$RESTORE" ]; then
+    echo "ERROR: RESTORE env var not set. Usage: RESTORE=/path/to/ckpt sbatch eval_post_training.batch"
+    exit 1
+fi
+
+echo "============================================"
+echo "Post-Training Eval"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $(hostname)"
+echo "Checkpoint: $RESTORE"
+echo "Step: ${RESTORE_STEP:-latest}"
+echo "============================================"
+
+mkdir -p logs_lobs5
+
+WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR}}"
+cd "$WORKDIR"
+
+export GPUS_PER_NODE=4
+export TMPDIR=/tmp
+
+# Conda env
+CONDA_ENV=${CONDA_ENV:-base}
+if [ "$CONDA_ENV" = "base" ]; then
+    export CONDA_PREFIX=/projects/s5e/quant/miniforge3
+else
+    export CONDA_PREFIX=/projects/s5e/quant/miniforge3/envs/$CONDA_ENV
+fi
+export PATH=$CONDA_PREFIX/bin:$PATH
+
+# CUDA
+module load cuda/12.6
+
+# LD paths (same as training)
+NCCL_LIB_OVERRIDE=/projects/s5e/quant/nccl-2.29.3/lib
+export LD_LIBRARY_PATH=$NCCL_LIB_OVERRIDE:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusparse/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cuda_cupti/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cufft/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nvjitlink/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cusolver/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/nccl/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cublas/lib:$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+export LD_PRELOAD=$NCCL_LIB_OVERRIDE/libnccl.so.2${LD_PRELOAD:+:$LD_PRELOAD}
+
+# JAX env
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export XLA_PYTHON_CLIENT_MEM_FRACTION=${MEM_FRACTION:-0.90}
+export JAX_PLATFORMS="cuda"
+export CUDA_MODULE_LOADING=EAGER
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+# Data paths (same as training — needed to recreate the split)
+export TICKERS="${TICKERS:-GOOG,AAPL,NVDA,AMZN,META,TSLA,MSFT,AMD}"
+export DATA_ROOT="${DATA_ROOT:-/lus/lfs1aip2/projects/s5e/lob_preproc}"
+export TRAIN_DATE_RANGE="${TRAIN_DATE_RANGE:-2022-01-01,2025-12-31}"
+export TEST_DATE_RANGE="${TEST_DATE_RANGE:-2026-01-01,2026-01-31}"
+export DATA_DIR="$DATA_ROOT"
+
+export PYTHONPATH="$WORKDIR:$PYTHONPATH"
+
+# Build CLI args
+EVAL_ARGS="--restore=$RESTORE"
+[ -n "$RESTORE_STEP" ] && EVAL_ARGS="$EVAL_ARGS --restore_step=$RESTORE_STEP"
+[ -n "$MICRO_BSZ" ] && EVAL_ARGS="$EVAL_ARGS --micro_bsz=$MICRO_BSZ"
+[ -n "$VAL_SPLIT" ] && EVAL_ARGS="$EVAL_ARGS --val_split=$VAL_SPLIT"
+[ -n "$NO_VAL" ] && EVAL_ARGS="$EVAL_ARGS --no_val"
+[ -n "$NO_TEST" ] && EVAL_ARGS="$EVAL_ARGS --no_test"
+[ -n "$OUTPUT_JSON" ] && EVAL_ARGS="$EVAL_ARGS --output_json=$OUTPUT_JSON"
+
+echo "[*] Running: python run_eval_post_training.py $EVAL_ARGS"
+python -u -B run_eval_post_training.py $EVAL_ARGS
+
+echo "============================================"
+echo "Eval finished at: $(date)"
+echo "Exit code: $?"
+echo "============================================"
