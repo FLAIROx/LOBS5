@@ -208,6 +208,13 @@ def train(args):
         # Move state to host numpy (device-agnostic) then shard to global mesh.
         # This handles both init (jax array on local device) and restore (numpy from checkpoint).
         state = jax.device_get(state)
+        # Fix: ensure all processes have identical state before device_put.
+        # numpy.linalg.eigh in make_DPLR_HiPPO (ssm_init.py:69) can produce
+        # bit-level differences across nodes (LAPACK non-determinism).
+        # device_put uses strict assert_equal, so broadcast rank 0's state.
+        if jax.process_count() > 1:
+            from jax.experimental.multihost_utils import broadcast_one_to_all
+            state = broadcast_one_to_all(state)
         state_shardings = create_state_shardings(state, mesh)
         state = jax.device_put(state, state_shardings)
         total_devices = jax.device_count() if jax.process_count() > 1 else args.num_devices
