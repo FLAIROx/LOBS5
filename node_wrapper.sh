@@ -294,7 +294,7 @@ export PYTHONPATH="$WORKDIR:$PYTHONPATH"
 
 python -u -B run_train.py \
     --USE_WANDB=True \
-    --wandb_project="${WANDB_PROJECT:-context-scaling}" \
+    --wandb_project="${WANDB_PROJECT:-lobs5-360M-G30}" \
     --wandb_entity=oxford-lob \
     --C_init=trunc_standard_normal \
     --prenorm=True \
