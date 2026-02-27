@@ -368,14 +368,23 @@ def train(args):
     batchnorm=args.batchnorm
 
     start_epoch = 0
+    resume_from_step_auto = None
     if args.restore is not None and args.restore != '':
         # Always infer from state.step (works for both epoch-end and mid-epoch checkpoints)
         start_epoch = int(state.step) // max(steps_per_epoch, 1)
-        print(f"[Restore] Resuming training from epoch {start_epoch} (of {args.epochs})")
+        # Auto-compute resume_from_step for mid-epoch checkpoints
+        step_within_epoch = int(state.step) % max(steps_per_epoch, 1)
+        if step_within_epoch > 0:
+            resume_from_step_auto = step_within_epoch
+            print(f"[Restore] Resuming from epoch {start_epoch}, batch_idx={resume_from_step_auto} "
+                  f"(state.step={int(state.step)}, steps_per_epoch={steps_per_epoch})")
+        else:
+            print(f"[Restore] Resuming training from epoch {start_epoch} (of {args.epochs})")
 
     # Mid-epoch checkpoint: callback + resume state
     job_start_time = time.monotonic()
-    resume_from_step = getattr(args, 'resume_from_step', None)
+    # CLI arg overrides auto-computed value
+    resume_from_step = getattr(args, 'resume_from_step', None) or resume_from_step_auto
 
     # Reshard via host roundtrip — avoids creating a new NCCL clique that can
     # deadlock on CXI (Slingshot) when memory registrations go stale.
