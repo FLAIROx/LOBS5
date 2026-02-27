@@ -380,6 +380,15 @@ fi
 # NOTE: no --output flag — per-node srun output also causes "Slurmd could not connect IO".
 # All training output goes to wandb + main sbatch log.
 export SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
+
+# ── Smoke test: kill srun after N seconds to test priority chain resume ──
+# Usage: KILL_AFTER_SECS=600 sbatch ... (kill after 10 min, ~after 1st checkpoint)
+if [ -n "${KILL_AFTER_SECS:-}" ]; then
+    echo "[SMOKE TEST] Will kill srun after ${KILL_AFTER_SECS}s to test auto-resume"
+    ( sleep "$KILL_AFTER_SECS" && echo "[SMOKE TEST] Killing srun now (${KILL_AFTER_SECS}s elapsed)" && kill -TERM %1 ) &
+    KILLER_PID=$!
+fi
+
 srun --nodes=$NNODES \
      --ntasks=$NNODES \
      --ntasks-per-node=1 \
@@ -390,6 +399,11 @@ srun --nodes=$NNODES \
      bash "$SCRIPT_DIR/node_wrapper.sh"
 
 SRUN_EXIT=$?
+
+# Clean up killer if srun finished before timer
+if [ -n "${KILLER_PID:-}" ]; then
+    kill "$KILLER_PID" 2>/dev/null || true
+fi
 echo "============================================"
 echo "Training finished at: $(date)"
 echo "srun exit code: $SRUN_EXIT"
