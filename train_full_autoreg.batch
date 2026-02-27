@@ -261,9 +261,11 @@ fi
 if [ -n "${RESTORE_PATH:-}" ]; then
     echo "[*] Restore from: $RESTORE_PATH (step=${RESTORE_STEP:-latest})"
 fi
-if [ -n "${RESUME_FROM_STEP:-}" ]; then
-    echo "[*] Resume from batch_idx=$RESUME_FROM_STEP within epoch"
-fi
+# CAVEAT: RESUME_FROM_STEP print disabled — causes confusion when set by
+# priority chain auto-discover before training actually starts
+# if [ -n "${RESUME_FROM_STEP:-}" ]; then
+#     echo "[*] Resume from batch_idx=$RESUME_FROM_STEP within epoch"
+# fi
 
 # Group-writable files: allow brics.s5e members to read/write logs & checkpoints
 umask 002
