@@ -247,7 +247,7 @@ case "$MODE" in
                 echo ""
                 continue
             fi
-            TIME=${EPOCH_TIMES[$LABEL]:-$TRAIN_TIME}
+            TIME=$TRAIN_TIME
             DEP=""
             if [ -n "$PREV_JOB" ]; then
                 DEP="--dependency=afterok:$PREV_JOB"
@@ -271,7 +271,7 @@ case "$MODE" in
         TARGET_LABEL="${2:-}"
         TARGET_MODE="${3:-benchmark}"
         if [ -z "$TARGET_LABEL" ]; then
-            echo "Usage: $0 single <LABEL> {benchmark|train}"
+            echo "Usage: $0 single <LABEL> {benchmark|curtail|full}"
             echo "Labels: 10M, 22M, 55M, 85M, 120M"
             exit 1
         fi
@@ -283,12 +283,16 @@ case "$MODE" in
             CURTAIL=$BENCH_CURTAIL
             TIME=$BENCH_TIME
             echo "Single benchmark: $LABEL"
-        elif [ "$TARGET_MODE" = "train" ]; then
+        elif [ "$TARGET_MODE" = "curtail" ]; then
             CURTAIL=$(calc_curtail_15pct "$PER_GPU_BSZ")
             TIME=$TRAIN_TIME
-            echo "Single training: $LABEL (CURTAIL=$CURTAIL)"
+            echo "Single curtail: $LABEL (CURTAIL=$CURTAIL, ${DATA_FRACTION}x epoch)"
+        elif [ "$TARGET_MODE" = "full" ]; then
+            CURTAIL=0
+            TIME=$TRAIN_TIME
+            echo "Single full epoch: $LABEL (time=$TIME)"
         else
-            echo "Unknown mode: $TARGET_MODE (use 'benchmark' or 'train')"
+            echo "Unknown mode: $TARGET_MODE (use 'benchmark', 'curtail', or 'full')"
             exit 1
         fi
 
@@ -300,7 +304,7 @@ case "$MODE" in
 
     *)
         echo "Unknown mode: $MODE"
-        echo "Usage: $0 {benchmark|train|single <LABEL> {benchmark|train}}"
+        echo "Usage: $0 {benchmark|train|epoch|single <LABEL> {benchmark|curtail|full}}"
         exit 1
         ;;
 esac
