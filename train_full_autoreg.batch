@@ -229,10 +229,39 @@ export CHECKPOINT_EVERY MAX_JOB_HOURS
 echo "[*] Mid-epoch checkpoint: every=$CHECKPOINT_EVERY, max_job_hours=$MAX_JOB_HOURS"
 
 # Restore from mid-epoch checkpoint
-if [ -n "$RESTORE_PATH" ]; then
+# Priority chain backups: auto-discover latest checkpoint if RESTORE_PATH not set
+if [ -z "${RESTORE_PATH:-}" ] && [ "${PRIORITY_CHAIN_DEPTH:-0}" -gt 0 ]; then
+    _CKPT_BASE="${WORKDIR:-${SLURM_SUBMIT_DIR}}/checkpoints"
+    if [ -d "$_CKPT_BASE" ]; then
+        _LATEST_DIR=$(ls -1td "$_CKPT_BASE"/j* 2>/dev/null | head -1)
+        if [ -n "$_LATEST_DIR" ] && [ -d "$_LATEST_DIR" ]; then
+            _LATEST_STEP=$(ls -1 "$_LATEST_DIR" 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -1)
+            if [ -n "$_LATEST_STEP" ]; then
+                export RESTORE_PATH="$_LATEST_DIR"
+                # Extract step_in_epoch for mid-epoch resume
+                _META="$_LATEST_DIR/$_LATEST_STEP/metadata/metadata"
+                if [ -f "$_META" ]; then
+                    _RESUME=$(python3 -c "
+import json
+with open('$_META') as f:
+    d = json.load(f)
+step = d.get('metrics', {}).get('step_in_epoch')
+if step is not None:
+    print(step + 1)
+" 2>/dev/null)
+                    if [ -n "$_RESUME" ]; then
+                        export RESUME_FROM_STEP="$_RESUME"
+                    fi
+                fi
+                echo "[Priority Chain] Auto-discovered checkpoint: $RESTORE_PATH step $_LATEST_STEP (resume_from=$RESUME_FROM_STEP)"
+            fi
+        fi
+    fi
+fi
+if [ -n "${RESTORE_PATH:-}" ]; then
     echo "[*] Restore from: $RESTORE_PATH (step=${RESTORE_STEP:-latest})"
 fi
-if [ -n "$RESUME_FROM_STEP" ]; then
+if [ -n "${RESUME_FROM_STEP:-}" ]; then
     echo "[*] Resume from batch_idx=$RESUME_FROM_STEP within epoch"
 fi
 
@@ -304,6 +333,44 @@ else
   echo "[*] Test data: $TEST_DIR"
 fi
 
+# ============================================================================
+# Priority Chain: pre-submit backup jobs so they accumulate scheduling priority
+# ============================================================================
+# Problem: if this job fails (NCCL deadlock, OOM), a post-failure resubmit has
+# 0 age priority and gets stuck behind large pending jobs.
+# Solution: submit backup jobs NOW with --dependency=afternotok:$SLURM_JOB_ID.
+# They accumulate priority while this job runs. If we succeed, SLURM auto-cancels
+# them (afternotok condition not met). If we fail, they're already high-priority.
+#
+# PRIORITY_CHAIN_DEPTH tracks position in chain (0=main, 1+=backup).
+# Only the main job (depth 0) creates the chain. Backups skip this.
+PRIORITY_CHAIN_LENGTH=${PRIORITY_CHAIN_LENGTH:-3}
+PRIORITY_CHAIN_DEPTH=${PRIORITY_CHAIN_DEPTH:-0}
+
+if [ "$PRIORITY_CHAIN_DEPTH" -eq 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ "$PRIORITY_CHAIN_LENGTH" -gt 0 ]; then
+    echo "[Priority Chain] Creating $PRIORITY_CHAIN_LENGTH backup jobs with afternotok dependency..."
+    PREV_ID=$SLURM_JOB_ID
+    for i in $(seq 1 $PRIORITY_CHAIN_LENGTH); do
+        # Inherit all env vars (MSG_SEQ_LEN, PER_GPU_BSZ, LOCAL_STEPS_K, etc.)
+        # Each backup discovers the latest checkpoint at runtime via auto-resume logic
+        BACKUP_ID=$(PRIORITY_CHAIN_DEPTH=$i \
+            sbatch --parsable \
+                   --dependency=afternotok:${PREV_ID} \
+                   --nodes=${SLURM_NNODES} \
+                   --time=${SBATCH_TIMELIMIT:-24:00:00} \
+                   --job-name="${SLURM_JOB_NAME:-backup}-r${i}" \
+                   "$0" 2>/dev/null) || true
+        if [ -n "$BACKUP_ID" ]; then
+            echo "[Priority Chain] Backup $i/$PRIORITY_CHAIN_LENGTH: job $BACKUP_ID (afternotok:$PREV_ID)"
+            PREV_ID=$BACKUP_ID
+        else
+            echo "[Priority Chain] WARNING: Failed to submit backup $i"
+        fi
+    done
+elif [ "$PRIORITY_CHAIN_DEPTH" -gt 0 ]; then
+    echo "[Priority Chain] This is backup #${PRIORITY_CHAIN_DEPTH} in chain."
+fi
+
 # Launch with srun (1 process per node, each managing GPUS_PER_NODE GPUs)
 # --kill-on-bad-exit=1: if ANY rank exits non-zero, srun kills ALL ranks immediately.
 # Without this, a watchdog-killed rank leaves 127 others stuck in NCCL wait forever.
@@ -329,7 +396,8 @@ echo "============================================"
 # Auto-resume on watchdog kill or NCCL deadlock
 # Exit codes: 0=success, 1=watchdog kill, 126=NCCL error, 137=SIGKILL
 # Only auto-resume for full training runs (no CURTAIL_EPOCHS) to avoid infinite loops
-if [ "$SRUN_EXIT" -ne 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RESUME:-}" ]; then
+# Skip in-script auto-resume if priority chain backups exist (they handle resumption)
+if [ "$SRUN_EXIT" -ne 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RESUME:-}" ] && [ "${PRIORITY_CHAIN_DEPTH:-0}" -eq 0 ]; then
   # Find latest checkpoint directory
   # Checkpoint layout: $WORKDIR/checkpoints/j<JOBID>_<WANDB>_<JOBID>/<step>/
   # Each step subdir contains the orbax checkpoint for that training step.
