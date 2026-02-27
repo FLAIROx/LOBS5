@@ -336,20 +336,33 @@ if [ "$SRUN_EXIT" -ne 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RES
         echo "[Auto-Resume] srun failed (exit=$SRUN_EXIT). Latest checkpoint: $JOB_CKPT_DIR step $LATEST_STEP"
         echo "[Auto-Resume] Resubmitting with RESTORE_PATH=$JOB_CKPT_DIR"
 
-        # Extract step_in_epoch from checkpoint metadata for mid-epoch resume
+        # Extract step_in_epoch from checkpoint metadata for mid-epoch resume.
+        # Adjusts for BSZ change when node count differs between checkpoint and resubmit.
         METADATA_FILE="$JOB_CKPT_DIR/$LATEST_STEP/metadata/metadata"
         RESUME_STEP=""
         if [ -f "$METADATA_FILE" ]; then
           RESUME_STEP=$(python3 -c "
-import json
+import json, os
 with open('$METADATA_FILE') as f:
     d = json.load(f)
 step = d.get('metrics', {}).get('step_in_epoch')
-if step is not None:
-    print(step + 1)
+if step is None:
+    exit()  # epoch-end checkpoint, no mid-epoch resume needed
+resume = step + 1
+ckpt_pc = d.get('config', {}).get('process_count')
+new_pc = int(os.environ.get('SLURM_NNODES', 0))
+gpus = int(os.environ.get('GPUS_PER_NODE', 4))
+bsz = int(os.environ.get('PER_GPU_BSZ', 2))
+if ckpt_pc and new_pc and ckpt_pc != new_pc:
+    old_global = ckpt_pc * gpus * bsz
+    new_global = new_pc * gpus * bsz
+    adjusted = resume * old_global // new_global
+    print(adjusted)
+else:
+    print(resume)
 " 2>/dev/null)
           if [ -n "$RESUME_STEP" ]; then
-            echo "[Auto-Resume] Will resume from batch_idx=$RESUME_STEP (step_in_epoch from checkpoint)"
+            echo "[Auto-Resume] RESUME_FROM_STEP=$RESUME_STEP (from metadata step_in_epoch, BSZ-adjusted)"
           fi
         fi
 
