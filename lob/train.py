@@ -189,9 +189,12 @@ def train(args):
                 new_spe = min(raw_new_spe, args.curtail_epochs + 1) if args.curtail_epochs is not None else raw_new_spe
 
                 restored_epoch = int(state.step) // max(original_spe, 1)
-                remapped_step = restored_epoch * new_spe
+                step_within_epoch = int(state.step) % max(original_spe, 1)
+                scaled_step_within = round(step_within_epoch * new_spe / original_spe) if original_spe > 0 else 0
+                remapped_step = restored_epoch * new_spe + scaled_step_within
                 print(f"[Elastic Resume] process_count changed: {original_process_count} → {process_count}")
                 print(f"[Elastic Resume] steps/epoch: {original_spe} → {new_spe}")
+                print(f"[Elastic Resume] intra-epoch: {step_within_epoch}/{original_spe} → {scaled_step_within}/{new_spe} ({step_within_epoch/max(original_spe,1)*100:.1f}%)")
                 print(f"[Elastic Resume] state.step {int(state.step)} → {remapped_step} (epoch {restored_epoch})")
                 state = remap_train_state_step(state, remapped_step)
 
