@@ -329,17 +329,20 @@ if [ "$SRUN_EXIT" -ne 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RES
     if [ -z "$JOB_CKPT_DIR" ]; then
       JOB_CKPT_DIR=$(ls -1td "$CKPT_BASE"/j* 2>/dev/null | head -1)
     fi
+    # --- Determine RESUME_RESTORE_PATH and RESUME_STEP for resubmission ---
+    RESUME_RESTORE_PATH=""
+    RESUME_STEP=""
+
     if [ -n "$JOB_CKPT_DIR" ] && [ -d "$JOB_CKPT_DIR" ]; then
-      # Find the highest step number (numeric dirs only, exclude 'metadata')
       LATEST_STEP=$(ls -1 "$JOB_CKPT_DIR" | grep -E '^[0-9]+$' | sort -n | tail -1)
       if [ -n "$LATEST_STEP" ]; then
+        # This job saved a checkpoint — use it
+        RESUME_RESTORE_PATH="$JOB_CKPT_DIR"
         echo "[Auto-Resume] srun failed (exit=$SRUN_EXIT). Latest checkpoint: $JOB_CKPT_DIR step $LATEST_STEP"
-        echo "[Auto-Resume] Resubmitting with RESTORE_PATH=$JOB_CKPT_DIR"
 
         # Extract step_in_epoch from checkpoint metadata for mid-epoch resume.
         # Adjusts for BSZ change when node count differs between checkpoint and resubmit.
         METADATA_FILE="$JOB_CKPT_DIR/$LATEST_STEP/metadata/metadata"
-        RESUME_STEP=""
         if [ -f "$METADATA_FILE" ]; then
           RESUME_STEP=$(python3 -c "
 import json, os
@@ -365,33 +368,38 @@ else:
             echo "[Auto-Resume] RESUME_FROM_STEP=$RESUME_STEP (from metadata step_in_epoch, BSZ-adjusted)"
           fi
         fi
-
-        NEXT_DEPTH=$((${NO_AUTO_RESUME_DEPTH:-0} + 1))
-        # Safety: stop after 3 consecutive auto-resumes
-        if [ "$NEXT_DEPTH" -gt 3 ]; then
-          echo "[Auto-Resume] WARNING: Reached 3 consecutive auto-resumes. Stopping to prevent infinite loop."
-        else
-          # Export RESUME_FROM_STEP if we have a value from checkpoint metadata
-          # NOTE: cannot use ${VAR:+FOO=$VAR} in VAR=val command prefix — bash
-          # doesn't treat parameter expansions as variable assignments.
-          if [ -n "$RESUME_STEP" ]; then
-            export RESUME_FROM_STEP="$RESUME_STEP"
-          fi
-
-          # Resubmit the same job with RESTORE_PATH, inheriting all current env vars
-          # --dependency=afterany ensures it starts after this job fully finishes
-          RESTORE_PATH="$JOB_CKPT_DIR" NO_AUTO_RESUME_DEPTH=$NEXT_DEPTH \
-            MINI_EPOCHS=1 \
-            sbatch --nodes=${SLURM_NNODES} --time=${SBATCH_TIMELIMIT:-24:00:00} \
-                   --dependency=afterany:${SLURM_JOB_ID} \
-                   "$0"
-          echo "[Auto-Resume] Submitted (depth $NEXT_DEPTH/3)."
-        fi
       else
-        echo "[Auto-Resume] No step checkpoints found in $JOB_CKPT_DIR. Cannot resume."
+        echo "[Auto-Resume] No step checkpoints found in $JOB_CKPT_DIR."
+      fi
+    fi
+
+    # Fallback: no new checkpoint saved — re-use the RESTORE_PATH passed to this job
+    if [ -z "$RESUME_RESTORE_PATH" ] && [ -n "${RESTORE_PATH:-}" ]; then
+      RESUME_RESTORE_PATH="$RESTORE_PATH"
+      # Re-use the original RESUME_FROM_STEP (still in env from submission)
+      RESUME_STEP="${RESUME_FROM_STEP:-}"
+      echo "[Auto-Resume] No new checkpoint. Falling back to original RESTORE_PATH=$RESTORE_PATH RESUME_FROM_STEP=${RESUME_STEP:-<unset>}"
+    fi
+
+    # --- Resubmit if we have a restore path ---
+    if [ -n "$RESUME_RESTORE_PATH" ]; then
+      NEXT_DEPTH=$((${NO_AUTO_RESUME_DEPTH:-0} + 1))
+      if [ "$NEXT_DEPTH" -gt 3 ]; then
+        echo "[Auto-Resume] WARNING: Reached 3 consecutive auto-resumes. Stopping to prevent infinite loop."
+      else
+        if [ -n "$RESUME_STEP" ]; then
+          export RESUME_FROM_STEP="$RESUME_STEP"
+        fi
+
+        RESTORE_PATH="$RESUME_RESTORE_PATH" NO_AUTO_RESUME_DEPTH=$NEXT_DEPTH \
+          MINI_EPOCHS=1 \
+          sbatch --nodes=${SLURM_NNODES} --time=${SBATCH_TIMELIMIT:-24:00:00} \
+                 --dependency=afterany:${SLURM_JOB_ID} \
+                 "$0"
+        echo "[Auto-Resume] Submitted with RESTORE_PATH=$RESUME_RESTORE_PATH (depth $NEXT_DEPTH/3)."
       fi
     else
-      echo "[Auto-Resume] No checkpoint directory found in $CKPT_BASE. Cannot resume."
+      echo "[Auto-Resume] No checkpoint available and no original RESTORE_PATH. Cannot resume."
     fi
   else
     echo "[Auto-Resume] Checkpoint directory $CKPT_BASE not found."
