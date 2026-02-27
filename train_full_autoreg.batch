@@ -324,11 +324,17 @@ if step is not None:
         if [ "$NEXT_DEPTH" -gt 3 ]; then
           echo "[Auto-Resume] WARNING: Reached 3 consecutive auto-resumes. Stopping to prevent infinite loop."
         else
+          # Export RESUME_FROM_STEP if we have a value from checkpoint metadata
+          # NOTE: cannot use ${VAR:+FOO=$VAR} in VAR=val command prefix — bash
+          # doesn't treat parameter expansions as variable assignments.
+          if [ -n "$RESUME_STEP" ]; then
+            export RESUME_FROM_STEP="$RESUME_STEP"
+          fi
+
           # Resubmit the same job with RESTORE_PATH, inheriting all current env vars
           # --dependency=afterany ensures it starts after this job fully finishes
           RESTORE_PATH="$JOB_CKPT_DIR" NO_AUTO_RESUME_DEPTH=$NEXT_DEPTH \
             MINI_EPOCHS=1 \
-            ${RESUME_STEP:+RESUME_FROM_STEP=$RESUME_STEP} \
             sbatch --nodes=${SLURM_NNODES} --time=${SBATCH_TIMELIMIT:-24:00:00} \
                    --dependency=afterany:${SLURM_JOB_ID} \
                    "$0"
