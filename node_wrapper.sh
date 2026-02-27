@@ -294,7 +294,7 @@ export PYTHONPATH="$WORKDIR:$PYTHONPATH"
 
 python -u -B run_train.py \
     --USE_WANDB=True \
-    --wandb_project="${WANDB_PROJECT:-lobs5-360M-G30}" \
+    --wandb_project="${WANDB_PROJECT:-context-scaling}" \
     --wandb_entity=oxford-lob \
     --C_init=trunc_standard_normal \
     --prenorm=True \
@@ -313,7 +313,7 @@ python -u -B run_train.py \
     --p_dropout=0.0 \
     --warmup_end="$WARMUP_END" \
     --weight_decay=0.05 \
-    --msg_seq_len=500 \
+    --msg_seq_len="${MSG_SEQ_LEN:-500}" \
     --use_book_data=True \
     --use_simple_book=False \
     --book_transform=True \
