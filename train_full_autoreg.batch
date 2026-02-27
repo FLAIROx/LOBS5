@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=lobs5_360m
+#SBATCH --job-name=context-scaling
 #SBATCH --output=logs_lobs5/lobs5_%j.out
 #SBATCH --error=logs_lobs5/lobs5_%j.err
 # === 256-node production config ===
