@@ -236,6 +236,9 @@ if [ -n "$RESUME_FROM_STEP" ]; then
     echo "[*] Resume from batch_idx=$RESUME_FROM_STEP within epoch"
 fi
 
+# Group-writable files: allow brics.s5e members to read/write logs & checkpoints
+umask 002
+
 # Create logs directory
 mkdir -p logs_lobs5
 
