@@ -731,7 +731,17 @@ def train_epoch(
                 print(f"\n=== Epoch {epoch}, Batch {batch_idx} ===")
                 print_memory_usage()
 
-            train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
+            # Local Steps mode: jit_train_step_fn is (local_fn, sync_fn, K) tuple
+            if isinstance(jit_train_step_fn, tuple):
+                _local_fn, _sync_fn, _local_k = jit_train_step_fn
+                # Use batch_idx for step counting (avoids D2H sync of state.step)
+                _effective_step = batch_idx + 1  # 1-indexed: sync on K, 2K, 3K, ...
+                if _effective_step % _local_k == 0:
+                    train_fn = _sync_fn
+                else:
+                    train_fn = _local_fn
+            else:
+                train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
             state, loss, ce, logits = train_fn(
                 state,
                 drop_rng,
@@ -1301,8 +1311,11 @@ def create_jit_train_step(mesh, state, has_book_data=True, hierarchical=False,
     every K steps. Requires hierarchical=True. K=0 disables (standard AllReduce).
     """
     if hierarchical:
+        if local_steps_k > 0:
+            return _create_local_steps_train_step(mesh, has_book_data, batchnorm,
+                                                   ignore_times, local_steps_k)
         return _create_hierarchical_train_step(mesh, has_book_data, batchnorm,
-                                               ignore_times, local_steps_k)
+                                               ignore_times)
 
     from lob.sharding_utils import create_state_shardings, get_data_shardings_for_batch
 
