@@ -105,6 +105,9 @@ submit_job() {
         cmd+=" CURTAIL_EPOCHS=$curtail"
     fi
     cmd+=" WANDB_PROJECT=$WANDB_PROJECT"
+    if [ -n "${RESTORE_PATH:-}" ]; then
+        cmd+=" RESTORE_PATH=$RESTORE_PATH"
+    fi
     cmd+=" NO_VALIDATION=1 NO_AUTO_RESUME=1"
     cmd+=" sbatch --nodes=$NODES --time=$time_limit"
     if [ -n "$dep_flag" ]; then
