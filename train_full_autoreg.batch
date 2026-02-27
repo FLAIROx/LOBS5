@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
 #SBATCH --time=24:00:00
-#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid010655,nid010052,nid010442,nid010093,nid010990,nid010499,nid011290,nid011263
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid010655,nid010052,nid010442,nid010093,nid010990,nid010499,nid011290,nid011263,nid010993
 
 
 # --- 32-node 24h production submit command ---
@@ -1014,6 +1014,6 @@ this branch from train_full_autoreg.batch (32N).  **Bold** = differs from argpar
 
 
 #SBATCH --contiguous
-#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid011108
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid010655,nid010052,nid010442,nid010093,nid010990,nid010499,nid011290,nid011263,nid010993,nid011108
 
 '''
