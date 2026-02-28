@@ -210,19 +210,10 @@ if __name__ == "__main__":
 	parser.add_argument("--hierarchical", type=str2bool, default=True,
 				help="Use hierarchical AllReduce via shard_map with 2D mesh (nodes, gpus). "
 				     "Decomposes flat AllReduce(N*4) into pmean(gpus)+pmean(nodes).")
-	parser.add_argument("--local_steps_k", type=int, default=0,
-				help="Local Steps (DiLoCo-style): each node trains independently for K steps "
-				     "(pmean('gpus') only), then params averaged via pmean('nodes'). "
-				     "0=disabled (standard hierarchical AllReduce). "
-				     "K>0 requires --hierarchical=True. Uses two JIT functions to truly "
-				     "eliminate cross-node collectives on non-sync steps. "
-				     "Set via LOCAL_STEPS_K env var in batch script.")
-	parser.add_argument("--no_validation", action="store_true",
-				help="Skip all validation during training. For scaling law experiments "
-				     "where validation is done separately post-training.")
-	parser.add_argument("--val_split", type=float, default=0.01,
-				help="Fraction of training files to hold out for validation (default: 0.01 = 1%%). "
-				     "Set to 0 to use all data for training.")
+	parser.add_argument("--local_steps_k", type=int, default=10,
+				help="Local Steps: each node trains independently for K steps, "
+				     "then params averaged via pmean('nodes'). 0=disabled (standard AllReduce). "
+				     "K>0 requires --hierarchical=True. Inner optimizer (Adam/AdamW) is unchanged.")
 
 	args = parser.parse_args()
 

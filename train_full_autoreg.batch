@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
-#SBATCH --time=10:00:00
+#SBATCH --time=09:00:00
 #SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid010655,nid010052,nid010442,nid010093,nid010990,nid010499,nid011290,nid011263,nid010993
 
 
@@ -186,7 +186,7 @@ echo "[*] msg_seq_len: $MSG_SEQ_LEN orders (context = $((MSG_SEQ_LEN * 24)) toke
 
 # Mid-epoch checkpoint: save every N steps or "auto" (30min time-based)
 CHECKPOINT_EVERY=${CHECKPOINT_EVERY:-"auto"}
-MAX_JOB_HOURS=${MAX_JOB_HOURS:-"24.0"}
+MAX_JOB_HOURS=${MAX_JOB_HOURS:-"8.5"}
 export CHECKPOINT_EVERY MAX_JOB_HOURS
 echo "[*] Mid-epoch checkpoint: every=$CHECKPOINT_EVERY, max_job_hours=$MAX_JOB_HOURS"
 
@@ -398,7 +398,7 @@ else:
 
         RESTORE_PATH="$RESUME_RESTORE_PATH" NO_AUTO_RESUME_DEPTH=$NEXT_DEPTH \
           MINI_EPOCHS=1 \
-          sbatch --nodes=${SLURM_NNODES} --time=${SBATCH_TIMELIMIT:-24:00:00} \
+          sbatch --nodes=${SLURM_NNODES} --time=${SBATCH_TIMELIMIT:-09:00:00} \
                  --dependency=afterany:${SLURM_JOB_ID} \
                  "$0"
         echo "[Auto-Resume] Submitted with RESTORE_PATH=$RESUME_RESTORE_PATH (depth $NEXT_DEPTH/3)."
