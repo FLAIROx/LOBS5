@@ -96,6 +96,13 @@ fi
 export JAX_PLATFORMS="cuda"
 export TF_GPU_ALLOCATOR=cuda_malloc_async
 
+# Persistent compilation cache: skip XLA recompilation on resume (ref: MaxText pyconfig.py:310)
+# Cache key = HLO module fingerprint (includes model config + sharding + device info)
+# Same model + same node count → cache hit → skip compile (~30-120s saved per resume)
+# Also auto-enables xla_gpu_per_fusion_autotune_cache (JAX 0.9.0.1 default behavior)
+# Cache dir must be on shared Lustre filesystem (accessible by all nodes across jobs)
+export JAX_COMPILATION_CACHE_DIR="/lus/lfs1aip2/projects/s5e/quant/jax_cache_lobs5"
+
 # CAVEAT — XLA FLAGS FOR MULTI-HOST AUTOTUNER
 # autotune_level=0 is FORBIDDEN — XLA AutoTune (kernel fusion) is why we use JAX
 #

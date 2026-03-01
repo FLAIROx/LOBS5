@@ -275,6 +275,9 @@ if __name__ == "__main__":
 		sync_start = time.time()
 		multihost_utils.sync_global_devices("jax_distributed_init")
 		print(f"[*] All {process_count} nodes synchronized (took {time.time() - sync_start:.2f}s)")
+
+		# Debug: log compilation cache hit/miss reasons (remove after verification)
+		jax.config.update("jax_explain_cache_misses", True)
 	else:
 		process_index = 0
 		process_count = 1
