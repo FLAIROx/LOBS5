@@ -86,6 +86,7 @@ def train(args):
     is_distributed = getattr(args, 'is_distributed', False)
     process_rank = getattr(args, 'process_index', 0)
     process_count = getattr(args, 'process_count', 1)
+    grad_accum_steps = getattr(args, 'grad_accum_steps', 1)
 
     (lobster_dataset, trainloader, valloader, testloader, aux_dataloaders,
         n_classes, seq_len, in_dim, book_seq_len, book_dim, train_size) = \
@@ -249,7 +250,6 @@ def train(args):
         best_test_acc = restored_metrics.get('acc_test_rnn', best_test_acc)
         print(f"[Restore] Best metrics restored: val_loss={best_loss:.5f}, val_acc={best_acc:.4f}, "
               f"test_loss={best_test_loss:.5f}, test_acc={best_test_acc:.4f}")
-    grad_accum_steps = getattr(args, 'grad_accum_steps', 1)
     micro_steps_per_epoch = int(train_size / (args.micro_bsz * args.num_devices * process_count)) if args.curtail_epochs is None else args.curtail_epochs+1
     # steps_per_epoch in optimizer updates (= micro_steps // K)
     steps_per_epoch = micro_steps_per_epoch // grad_accum_steps
