@@ -703,22 +703,28 @@ def train_epoch(
     if resume_from_step is not None:
         print(f"[Resume] Skipping batches 0..{resume_from_step-1}, starting from batch_idx={resume_from_step}")
 
+    # ── Gradient accumulation setup ──
+    use_grad_accum = isinstance(jit_train_step_fn, tuple)
+    if use_grad_accum:
+        micro_step_fn, apply_step_fn, grad_K = jit_train_step_fn
+        accum_grads = None
+        accum_loss = 0.0
+        micro_idx = 0
+    else:
+        grad_K = 1
+
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     for batch_idx, batch in enumerate(tqdm(trainloader)):
         # Skip batches when resuming mid-epoch
         if resume_from_step is not None and batch_idx < resume_from_step:
             continue
         watchdog.kick(epoch, batch_idx)
-        # print(f"train_epoch: Epoch {epoch} - Batch {batch_idx} / {len(trainloader)}")
-        # print(f"train_epoch: Batch input shape: {batch[0].shape}, batch target shape: {batch[1].shape}")
         if not debug_loading:
             if (step>1) & (step<3) & debug_profiler:
                 jax.profiler.start_trace("/tmp/tensorboard")
             inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
 
             # jit+sharding: place data on devices with correct sharding
-            # Use make_array_from_process_local_data for multi-host: each process
-            # provides its local shard, JAX assembles the global array.
             if mesh is not None:
                 from lob.sharding_utils import get_data_shardings_for_batch
                 inputs_sh, labels_sh, times_sh = get_data_shardings_for_batch(mesh, has_book_data=(len(inputs) > 1))
@@ -727,37 +733,84 @@ def train_epoch(
                 integration_times = tuple(jax.make_array_from_process_local_data(sh, ts) for ts, sh in zip(integration_times, times_sh))
 
             rng, drop_rng = jax.random.split(rng)
-            if batch_idx % 1000 == 0:
-                print(f"\n=== Epoch {epoch}, Batch {batch_idx} ===")
-                print_memory_usage()
 
-            train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
-            state, loss, ce, logits = train_fn(
-                state,
-                drop_rng,
-                inputs,
-                labels,
-                integration_times,
-                batchnorm,
-                ignore_times,
-            )
+            if use_grad_accum:
+                # ── Gradient Accumulation Mode ──
+                # micro_step: fwd-bwd + pmean('gpus') only (no cross-node comm)
+                grads, micro_loss = micro_step_fn(
+                    state, drop_rng, inputs, labels, integration_times,
+                    batchnorm, ignore_times,
+                )
+
+                if micro_idx == 0:
+                    accum_grads = grads
+                    accum_loss = float(micro_loss)
+                else:
+                    accum_grads = jax.tree.map(np.add, accum_grads, grads)
+                    accum_loss += float(micro_loss)
+
+                micro_idx += 1
+
+                # Not yet K micro-batches: skip optimizer update + all bookkeeping
+                if micro_idx < grad_K:
+                    # Still check curtail_epochs (operates on micro-batch index)
+                    if (curtail_epochs is not None) and (batch_idx >= curtail_epochs):
+                        print(f"[GradAccum] Ending epoch early at micro_batch {batch_idx} "
+                              f"(mid-accumulation, {micro_idx}/{grad_K}). "
+                              f"Discarding partial accumulation.")
+                        break
+                    # Check timeout even during accumulation
+                    if checkpoint_callback is not None and job_start_time is not None:
+                        elapsed_h = (time.monotonic() - job_start_time) / 3600.0
+                        remaining_min = (max_job_hours - elapsed_h) * 60
+                        if remaining_min <= save_before_timeout_minutes:
+                            print(f"[GradAccum] Timeout imminent during accumulation "
+                                  f"({micro_idx}/{grad_K}). Saving and exiting.")
+                            checkpoint_callback(state, epoch, batch_idx, micro_loss, True)
+                            watchdog.stop()
+                            loss_mean = sum(batch_losses) / len(batch_losses) if batch_losses else float('nan')
+                            return state, loss_mean, None, batch_idx + 1
+                    continue
+
+                # K micro-batches done: average accumulated grads and apply
+                accum_grads = jax.tree.map(lambda g: g / grad_K, accum_grads)
+                accum_loss /= grad_K
+
+                # apply_step: pmean('nodes') + apply_gradients (Slingshot, once per K)
+                state = apply_step_fn(state, accum_grads)
+
+                # Reset accumulation state
+                loss = accum_loss
+                micro_idx = 0
+                accum_grads = None
+                accum_loss = 0.0
+
+            else:
+                # ── Standard Mode (K=1) ──
+                if batch_idx % 1000 == 0:
+                    print(f"\n=== Epoch {epoch}, Batch {batch_idx} ===")
+                    print_memory_usage()
+
+                train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
+                state, loss, ce, logits = train_fn(
+                    state, drop_rng, inputs, labels, integration_times,
+                    batchnorm, ignore_times,
+                )
+
             if debug_profiler:
-                loss.block_until_ready()
+                if not use_grad_accum:
+                    loss.block_until_ready()
 
             # jit+sharding: loss is already a scalar (no device dimension)
             batch_losses.append(float(loss))
-            if log_ce_tables:
+            if log_ce_tables and not use_grad_accum:
                 cross_entropies.append(ce)
 
             if use_optax_schedules:
-                # Python counter avoids per-step D2H sync (async dispatch friendly).
-                # Periodic watchdog every 100 steps uses int(state.step) to detect NCCL hangs.
                 step += 1
-                if batch_idx % 100 == 99:
-                    # Reset watchdog BEFORE D2H sync — the sync materializes all
-                    # accumulated async computations, which can take >120s on first
-                    # check (XLA warmup + 99 steps of async backlog). The timer
-                    # should only measure the D2H transfer itself, not the backlog.
+                # D2H watchdog check every 100 optimizer steps
+                optimizer_steps_since_start = len(batch_losses)
+                if optimizer_steps_since_start % 100 == 0 and optimizer_steps_since_start > 0:
                     watchdog.kick(epoch, batch_idx)
                     t0 = time.monotonic()
                     _device_step = int(state.step)
@@ -768,7 +821,6 @@ def train_epoch(
                               f"Epoch {epoch}, batch {batch_idx}, global_step {step}")
                         raise TimeoutError(f"NCCL hang detected at epoch {epoch} step {step}")
             else:
-                # Legacy mode: manual per-step LR update
                 lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
                 state, step = update_learning_rate_per_step(lr_params, state, mesh=mesh)
 
@@ -780,10 +832,16 @@ def train_epoch(
                 break
 
             # Periodic timing log for hang diagnosis
-            if batch_idx % 100 == 99 and batch_idx > 0:
+            optimizer_steps_since_start = len(batch_losses)
+            if optimizer_steps_since_start % 100 == 0 and optimizer_steps_since_start > 0:
                 avg_step_time = (time.monotonic() - epoch_start) / (batch_idx + 1)
-                print(f"[Timing] Epoch {epoch} step {batch_idx+1}/{len(trainloader)}: "
-                      f"avg {avg_step_time:.2f} s/step")
+                if use_grad_accum:
+                    print(f"[Timing] Epoch {epoch} opt_step {optimizer_steps_since_start} "
+                          f"(micro_batch {batch_idx+1}/{len(trainloader)}, K={grad_K}): "
+                          f"avg {avg_step_time:.3f} s/micro_step")
+                else:
+                    print(f"[Timing] Epoch {epoch} step {batch_idx+1}/{len(trainloader)}: "
+                          f"avg {avg_step_time:.2f} s/step")
 
             # ── Mid-epoch checkpoint ──
             if checkpoint_callback is not None:
@@ -791,12 +849,10 @@ def train_epoch(
                 should_wandb = False
                 timeout_imminent = False
 
-                # Manual mode: every N steps
-                if _ckpt_every > 0 and (batch_idx + 1) % _ckpt_every == 0:
+                if _ckpt_every > 0 and optimizer_steps_since_start % _ckpt_every == 0:
                     should_ckpt = True
                     should_wandb = True
 
-                # Auto mode: time-based
                 if auto_checkpoint_mode:
                     now = time.monotonic()
                     if now - last_wandb_log_time >= AUTO_WANDB_INTERVAL:
@@ -805,7 +861,6 @@ def train_epoch(
                         should_ckpt = True
                         should_wandb = True
 
-                # Timeout: approaching job time limit
                 if job_start_time is not None:
                     elapsed_h = (time.monotonic() - job_start_time) / 3600.0
                     remaining_min = (max_job_hours - elapsed_h) * 60
@@ -814,7 +869,7 @@ def train_epoch(
                         timeout_imminent = True
 
                 if should_wandb or should_ckpt:
-                    watchdog.kick(epoch, batch_idx)  # prevent watchdog kill during save
+                    watchdog.kick(epoch, batch_idx)
                     checkpoint_callback(state, epoch, batch_idx, loss, should_ckpt)
                     if auto_checkpoint_mode:
                         if should_wandb:
@@ -832,14 +887,15 @@ def train_epoch(
             # ── Mini-epoch validation ──
             if (validate_every_n_steps > 0 and
                 validate_callback is not None and
-                (batch_idx + 1) % validate_every_n_steps == 0):
-                watchdog.kick(epoch, batch_idx)  # extend watchdog during eval
+                optimizer_steps_since_start % validate_every_n_steps == 0 and
+                optimizer_steps_since_start > 0):
+                watchdog.kick(epoch, batch_idx)
                 should_stop = validate_callback(state, epoch, batch_idx)
                 if should_stop:
                     watchdog.stop()
                     loss_mean = sum(batch_losses) / len(batch_losses) if batch_losses else float('nan')
                     ce_means = onp.mean(onp.concatenate(cross_entropies, axis=0), axis=0) if log_ce_tables else None
-                    return state, loss_mean, ce_means, None  # normal exit (early stop)
+                    return state, loss_mean, ce_means, None
 
         else:
             continue
@@ -1290,7 +1346,8 @@ def swap_leading(targetsize,x):
 # ============================================================================
 
 def create_jit_train_step(mesh, state, has_book_data=True, hierarchical=False,
-                          batchnorm=False, ignore_times=True, local_steps_k=0):
+                          batchnorm=False, ignore_times=True, local_steps_k=0,
+                          grad_accum_steps=1):
     """Create JIT-compiled train_step with explicit sharding.
 
     hierarchical=True: uses shard_map + explicit pmean('gpus') + pmean('nodes')
@@ -1299,7 +1356,14 @@ def create_jit_train_step(mesh, state, has_book_data=True, hierarchical=False,
     local_steps_k>0: Local Steps mode — each node trains independently for K steps
     (only intra-node pmean('gpus') per step), then params averaged via pmean('nodes')
     every K steps. Requires hierarchical=True. K=0 disables (standard AllReduce).
+
+    grad_accum_steps>1: Gradient accumulation — returns (micro_step_fn, apply_step_fn, K)
+    tuple. micro_step_fn does fwd-bwd + pmean('gpus') only. apply_step_fn does
+    pmean('nodes') + apply_gradients. Requires hierarchical=True.
     """
+    if hierarchical and grad_accum_steps > 1:
+        return _create_hierarchical_grad_accum_fns(mesh, has_book_data, batchnorm,
+                                                    ignore_times, grad_accum_steps)
     if hierarchical:
         return _create_hierarchical_train_step(mesh, has_book_data, batchnorm,
                                                ignore_times, local_steps_k)
@@ -1332,6 +1396,121 @@ def create_jit_train_step(mesh, state, has_book_data=True, hierarchical=False,
     )
     print("[JIT] Created JIT-compiled train_step with sharding")
     return jit_train_step
+
+
+def _create_hierarchical_grad_accum_fns(mesh, has_book_data, batchnorm, ignore_times,
+                                         grad_accum_steps):
+    """Create split shard_map functions for gradient accumulation.
+
+    Returns (micro_step_fn, apply_step_fn, K) where:
+    - micro_step_fn: fwd-bwd + pmean('gpus') only (NVLink, fast)
+      Signature: micro_step_fn(state, rng, inputs, labels, times) -> (grads, loss)
+    - apply_step_fn: pmean('nodes') + apply_gradients (Slingshot, once per K)
+      Signature: apply_step_fn(state, accum_grads) -> state
+    - K: number of micro-batches per optimizer update
+    """
+    from jax.experimental.shard_map import shard_map
+
+    batch_axis = ('nodes', 'gpus')
+
+    if has_book_data:
+        in_data = (P(batch_axis, None), P(batch_axis, None))
+        in_times = (P(batch_axis, None), P(batch_axis, None))
+    else:
+        in_data = (P(batch_axis, None),)
+        in_times = (P(batch_axis, None),)
+
+    # ── micro_step: fwd-bwd + pmean('gpus') only ──
+    micro_in_specs = (
+        P(),            # state — replicated (needed for apply_fn + params)
+        P(),            # rng — replicated
+        in_data,        # batch_inputs — sharded tuple
+        P(batch_axis),  # batch_labels — sharded
+        in_times,       # batch_integration_timesteps — sharded tuple
+    )
+    # grads: per-node averaged (same within node, different across nodes)
+    # loss: per-node averaged scalar
+    micro_out_specs = (P(), P())
+
+    def micro_body(state, rng, batch_inputs, batch_labels,
+                   batch_integration_timesteps):
+        """Forward-backward + intra-node gradient average (NVLink only)."""
+        batch_inputs = repeat_book(*batch_inputs, True)
+
+        def loss_fn(params):
+            if batchnorm:
+                logits, mod_vars = state.apply_fn(
+                    {"params": params, "batch_stats": state.batch_stats},
+                    *batch_inputs, *batch_integration_timesteps,
+                    rngs={"dropout": rng},
+                    mutable=["intermediates", "batch_stats"],
+                    method='__call_ar__'
+                )
+            else:
+                logits, mod_vars = state.apply_fn(
+                    {"params": params},
+                    *batch_inputs, *batch_integration_timesteps,
+                    rngs={"dropout": rng},
+                    mutable=["intermediates"],
+                    method='__call_ar__'
+                )
+
+            ce = cross_entropy_loss(logits, batch_labels)
+            if ignore_times:
+                ce = ce.reshape(ce.shape[0], -1, Message_Tokenizer.MSG_LEN)
+                ce_1 = ce[:, :, :Message_Tokenizer.TIME_START_I]
+                ce_2 = ce[:, :, (Message_Tokenizer.TIME_END_I + 1):]
+                ce = np.concatenate([ce_1, ce_2], axis=2)
+                ce = ce.reshape(ce.shape[0], -1)
+
+            ce = np.mean(ce, axis=0)
+            loss = np.mean(ce)
+            return loss, (mod_vars, logits, ce)
+
+        (loss, (mod_vars, logits, ce)), grads = jax.value_and_grad(
+            loss_fn, has_aux=True)(state.params)
+
+        # Level 1 only: NVLink within each node (4 GPUs, ~478 GB/s)
+        grads = jax.lax.pmean(grads, axis_name='gpus')
+        loss = jax.lax.pmean(loss, axis_name='gpus')
+
+        return grads, loss
+
+    mapped_micro = shard_map(micro_body, mesh=mesh,
+                             in_specs=micro_in_specs, out_specs=micro_out_specs,
+                             check_rep=False)
+    jitted_micro = jax.jit(mapped_micro)
+
+    # API-compatible wrapper: train_epoch passes batchnorm, ignore_times as args 6-7
+    def micro_step_fn(state, rng, batch_inputs, batch_labels,
+                      batch_integration_timesteps, _batchnorm, _ignore_times):
+        return jitted_micro(state, rng, batch_inputs, batch_labels,
+                            batch_integration_timesteps)
+
+    # ── apply_step: pmean('nodes') + apply_gradients ──
+    apply_in_specs = (
+        P(),  # state — replicated
+        P(),  # accum_grads — per-node (different across nodes, same within node)
+    )
+    apply_out_specs = P()  # state — replicated after pmean + apply
+
+    def apply_body(state, accum_grads):
+        """Cross-node gradient average (Slingshot) + parameter update."""
+        # Level 2: Slingshot across nodes — grads only
+        grads = jax.lax.pmean(accum_grads, axis_name='nodes')
+        state = state.apply_gradients(grads=grads)
+        return state
+
+    mapped_apply = shard_map(apply_body, mesh=mesh,
+                             in_specs=apply_in_specs, out_specs=apply_out_specs,
+                             check_rep=False)
+    jitted_apply = jax.jit(mapped_apply, donate_argnums=(0,))
+
+    print(f"[JIT] Created hierarchical grad_accum shard_map functions "
+          f"(K={grad_accum_steps}: micro_step=pmean('gpus'), "
+          f"apply_step=pmean('nodes')+apply_gradients)")
+
+    return micro_step_fn, jitted_apply, grad_accum_steps
 
 
 def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times,

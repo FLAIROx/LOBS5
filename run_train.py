@@ -214,8 +214,17 @@ if __name__ == "__main__":
 				help="Local Steps: each node trains independently for K steps, "
 				     "then params averaged via pmean('nodes'). 0=disabled (standard AllReduce). "
 				     "K>0 requires --hierarchical=True. Inner optimizer (Adam/AdamW) is unchanged.")
+	parser.add_argument("--grad_accum_steps", type=int, default=1,
+				help="Gradient accumulation: accumulate K micro-batches before AllReduce. "
+				     "Effective BSZ = micro_bsz * num_devices * process_count * K. "
+				     "Default 1 (no accumulation). Mutually exclusive with local_steps_k>0.")
 
 	args = parser.parse_args()
+
+	# Mutual exclusion: grad_accum and local_steps cannot be used together
+	if getattr(args, 'grad_accum_steps', 1) > 1 and getattr(args, 'local_steps_k', 0) > 0:
+		parser.error("--grad_accum_steps>1 and --local_steps_k>0 are mutually exclusive. "
+		             "Use one or the other.")
 
 	# Post-parse: multi-ticker string args → list/tuple
 	if args.tickers is not None:

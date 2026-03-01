@@ -341,6 +341,7 @@ python -u -B run_train.py \
     ${RESUME_FROM_STEP:+--resume_from_step=$RESUME_FROM_STEP} \
     ${HIERARCHICAL:+--hierarchical=$HIERARCHICAL} \
     ${LOCAL_STEPS_K:+--local_steps_k=$LOCAL_STEPS_K} \
+    ${GRAD_ACCUM_STEPS:+--grad_accum_steps=$GRAD_ACCUM_STEPS} \
     ${TICKERS:+--tickers=$TICKERS} \
     ${DATA_ROOT:+--data_root="$DATA_ROOT"} \
     ${TRAIN_DATE_RANGE:+--train_date_range=$TRAIN_DATE_RANGE} \

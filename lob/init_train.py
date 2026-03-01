@@ -337,10 +337,13 @@ def init_train_state(
     lr_schedule = None
     if train_size > 0:
         process_count = getattr(args, 'process_count', jax.process_count())
+        grad_accum_steps = getattr(args, 'grad_accum_steps', 1)
         # args.micro_bsz is per-GPU BSZ; global BSZ = micro_bsz * num_devices * process_count
-        steps_per_epoch = train_size // (args.micro_bsz * args.num_devices * process_count)
+        micro_steps_per_epoch = train_size // (args.micro_bsz * args.num_devices * process_count)
         if hasattr(args, 'curtail_epochs') and args.curtail_epochs is not None:
-            steps_per_epoch = min(steps_per_epoch, args.curtail_epochs + 1)
+            micro_steps_per_epoch = min(micro_steps_per_epoch, args.curtail_epochs + 1)
+        # steps_per_epoch in optimizer updates (= micro_steps // K)
+        steps_per_epoch = micro_steps_per_epoch // grad_accum_steps
         total_steps = steps_per_epoch * args.epochs
         warmup_end_step = int(steps_per_epoch * args.warmup_end)
 

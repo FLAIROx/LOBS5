@@ -175,25 +175,29 @@ def train(args):
             print(f"[Restore] Schedule count = {int(schedule_count)}")
             restored_metrics = ckpt.get('metrics', {})
 
-            # --- Elastic Resume: remap step when device count changes ---
+            # --- Elastic Resume: remap step when device count or grad_accum changes ---
             ckpt_config = ckpt.get('config', {})
             original_process_count = ckpt_config.get('process_count', process_count)
-            if original_process_count != process_count:
-                # Compute original steps_per_epoch (respecting curtail if checkpoint used it)
+            original_grad_accum = ckpt_config.get('grad_accum_steps', 1)
+            if original_process_count != process_count or original_grad_accum != grad_accum_steps:
+                # Compute original optimizer_steps_per_epoch (respecting curtail if checkpoint used it)
                 original_curtail = ckpt_config.get('curtail_epochs', None)
-                raw_original_spe = train_size // (args.micro_bsz * args.num_devices * original_process_count)
-                original_spe = min(raw_original_spe, original_curtail + 1) if original_curtail is not None else raw_original_spe
+                raw_original_micro_spe = train_size // (args.micro_bsz * args.num_devices * original_process_count)
+                original_micro_spe = min(raw_original_micro_spe, original_curtail + 1) if original_curtail is not None else raw_original_micro_spe
+                original_spe = original_micro_spe // max(original_grad_accum, 1)
 
-                # Compute new steps_per_epoch (respecting current curtail setting)
-                raw_new_spe = train_size // (args.micro_bsz * args.num_devices * process_count)
-                new_spe = min(raw_new_spe, args.curtail_epochs + 1) if args.curtail_epochs is not None else raw_new_spe
+                # Compute new optimizer_steps_per_epoch (respecting current curtail setting)
+                raw_new_micro_spe = train_size // (args.micro_bsz * args.num_devices * process_count)
+                new_micro_spe = min(raw_new_micro_spe, args.curtail_epochs + 1) if args.curtail_epochs is not None else raw_new_micro_spe
+                new_spe = new_micro_spe // max(grad_accum_steps, 1)
 
                 restored_epoch = int(state.step) // max(original_spe, 1)
                 step_within_epoch = int(state.step) % max(original_spe, 1)
                 scaled_step_within = round(step_within_epoch * new_spe / original_spe) if original_spe > 0 else 0
                 remapped_step = restored_epoch * new_spe + scaled_step_within
                 print(f"[Elastic Resume] process_count changed: {original_process_count} → {process_count}")
-                print(f"[Elastic Resume] steps/epoch: {original_spe} → {new_spe}")
+                print(f"[Elastic Resume] grad_accum changed: {original_grad_accum} → {grad_accum_steps}")
+                print(f"[Elastic Resume] optimizer_steps/epoch: {original_spe} → {new_spe}")
                 print(f"[Elastic Resume] intra-epoch: {step_within_epoch}/{original_spe} → {scaled_step_within}/{new_spe} ({step_within_epoch/max(original_spe,1)*100:.1f}%)")
                 print(f"[Elastic Resume] state.step {int(state.step)} → {remapped_step} (epoch {restored_epoch})")
                 state = remap_train_state_step(state, remapped_step)
@@ -226,7 +230,8 @@ def train(args):
             mesh, state, has_book_data=args.use_book_data,
             hierarchical=use_hierarchical,
             batchnorm=args.batchnorm, ignore_times=args.ignore_times,
-            local_steps_k=local_steps_k)
+            local_steps_k=local_steps_k,
+            grad_accum_steps=grad_accum_steps)
         jit_eval_step = create_jit_eval_step(mesh, state, has_book_data=args.use_book_data)
 
     # Training Loop over epochs
@@ -244,7 +249,14 @@ def train(args):
         best_test_acc = restored_metrics.get('acc_test_rnn', best_test_acc)
         print(f"[Restore] Best metrics restored: val_loss={best_loss:.5f}, val_acc={best_acc:.4f}, "
               f"test_loss={best_test_loss:.5f}, test_acc={best_test_acc:.4f}")
-    steps_per_epoch = int(train_size / (args.micro_bsz * args.num_devices * process_count)) if args.curtail_epochs is None else args.curtail_epochs+1
+    grad_accum_steps = getattr(args, 'grad_accum_steps', 1)
+    micro_steps_per_epoch = int(train_size / (args.micro_bsz * args.num_devices * process_count)) if args.curtail_epochs is None else args.curtail_epochs+1
+    # steps_per_epoch in optimizer updates (= micro_steps // K)
+    steps_per_epoch = micro_steps_per_epoch // grad_accum_steps
+    if grad_accum_steps > 1:
+        print(f"[GradAccum] K={grad_accum_steps}: micro_steps/epoch={micro_steps_per_epoch}, "
+              f"optimizer_steps/epoch={steps_per_epoch}, "
+              f"effective_bsz={args.micro_bsz * args.num_devices * process_count * grad_accum_steps}")
 
     # Mini-epoch: split each data epoch into K sub-epochs for frequent eval
     mini_epochs = getattr(args, 'mini_epochs', 1)

@@ -179,6 +179,16 @@ fi
 LOCAL_STEPS_K=${LOCAL_STEPS_K:-10}
 export LOCAL_STEPS_K
 
+# Gradient Accumulation: accumulate K micro-batches before cross-node AllReduce.
+# Effective BSZ = micro_bsz * gpus_per_node * nodes * GRAD_ACCUM_STEPS.
+# Use to match large-cluster BSZ with fewer nodes (e.g. 128N K=4 ≈ 512N K=1).
+# Mutually exclusive with LOCAL_STEPS_K>0.
+GRAD_ACCUM_STEPS=${GRAD_ACCUM_STEPS:-1}
+export GRAD_ACCUM_STEPS
+if [ "$GRAD_ACCUM_STEPS" -gt 1 ]; then
+    echo "[*] Gradient accumulation: K=$GRAD_ACCUM_STEPS (effective BSZ = $((PER_GPU_BSZ * GPUS_PER_NODE * SLURM_NNODES * GRAD_ACCUM_STEPS)))"
+fi
+
 # Context length: number of orders per sample (G21 experiment)
 MSG_SEQ_LEN=${MSG_SEQ_LEN:-500}
 export MSG_SEQ_LEN
@@ -361,13 +371,16 @@ ckpt_pc = d.get('config', {}).get('process_count')
 new_pc = int(os.environ.get('SLURM_NNODES', 0))
 gpus = int(os.environ.get('GPUS_PER_NODE', 4))
 bsz = int(os.environ.get('PER_GPU_BSZ', 2))
+# BSZ adjustment: map sample position across node count changes
 if ckpt_pc and new_pc and ckpt_pc != new_pc:
     old_global = ckpt_pc * gpus * bsz
     new_global = new_pc * gpus * bsz
-    adjusted = resume * old_global // new_global
-    print(adjusted)
-else:
-    print(resume)
+    resume = resume * old_global // new_global
+# K-align: ensure resume starts at a grad_accum boundary
+K = int(os.environ.get('GRAD_ACCUM_STEPS', 1))
+if K > 1:
+    resume = ((resume + K - 1) // K) * K
+print(resume)
 " 2>/dev/null)
           if [ -n "$RESUME_STEP" ]; then
             echo "[Auto-Resume] RESUME_FROM_STEP=$RESUME_STEP (from metadata step_in_epoch, BSZ-adjusted)"
