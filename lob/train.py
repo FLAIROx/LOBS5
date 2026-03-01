@@ -15,7 +15,7 @@ from lob.dataloading import create_lobster_prediction_dataset, create_lobster_tr
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import reduce_lr_on_plateau, train_epoch, validate, \
     create_jit_train_step, create_jit_eval_step, create_lobs5_learning_rate_schedule, \
-    StepWatchdog, TIME_START_I, TIME_END_I
+    StepWatchdog, TIME_START_I, TIME_END_I, LR_MIN_FRACTION
 from lob.encoding import Message_Tokenizer
 from lob.sharding_utils import initialize_mesh, create_state_shardings
 
@@ -272,9 +272,8 @@ def train(args):
     total_steps = steps_per_epoch * args.epochs
     warmup_end_step = int(steps_per_epoch * args.warmup_end)
 
-    # lr_min = 1% of base LR (Llama 3 recipe) unless explicitly overridden
-    effective_lr_min = args.lr_min if args.lr_min > 0 else lr * 0.01
-    effective_ssm_lr_min = args.lr_min if args.lr_min > 0 else ssm_lr * 0.01
+    effective_lr_min = args.lr_min if args.lr_min > 0 else lr * LR_MIN_FRACTION
+    effective_ssm_lr_min = args.lr_min if args.lr_min > 0 else ssm_lr * LR_MIN_FRACTION
 
     lr_schedule_fn = create_lobs5_learning_rate_schedule(
         base_lr=lr, warmup_end_step=warmup_end_step,

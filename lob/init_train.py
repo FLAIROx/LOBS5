@@ -21,7 +21,7 @@ from lob.encoding import Vocab
 from lob.lob_seq_model import BatchFullLobPredModel, BatchLobPredModel, BatchPaddedLobPredModel,OldBatchPaddedLobPredModel, FullLobPredModel#, ParFullLobPredModel
 
 #from lob.lob_seq_model import BatchLobPredModel
-from lob.train_helpers import create_train_state, create_lobs5_learning_rate_schedule
+from lob.train_helpers import create_train_state, create_lobs5_learning_rate_schedule, LR_MIN_FRACTION
 from s5.ssm import init_S5SSM
 from s5.ssm_init import make_DPLR_HiPPO
 # from s5.dataloading import make_data_loader
@@ -347,9 +347,8 @@ def init_train_state(
         total_steps = steps_per_epoch * args.epochs
         warmup_end_step = int(steps_per_epoch * args.warmup_end)
 
-        # lr_min = 5% of base LR unless explicitly overridden
-        effective_lr_min = args.lr_min if args.lr_min > 0 else lr * 0.05
-        effective_ssm_lr_min = args.lr_min if args.lr_min > 0 else ssm_lr * 0.05
+        effective_lr_min = args.lr_min if args.lr_min > 0 else lr * LR_MIN_FRACTION
+        effective_ssm_lr_min = args.lr_min if args.lr_min > 0 else ssm_lr * LR_MIN_FRACTION
 
         if print_shapes:
             print(f"[Schedule] steps_per_epoch: {steps_per_epoch}")

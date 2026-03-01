@@ -18,6 +18,10 @@ import signal
 import psutil
 import os
 
+# Default lr_min as fraction of base LR (when args.lr_min=0).
+# 5% matches Chinchilla convention for cosine decay floor.
+LR_MIN_FRACTION = 0.05
+
 # Step-level timeout for NCCL hang detection (seconds).
 # Normal step ~1s; if D2H transfer exceeds this, likely NCCL deadlock.
 STEP_TIMEOUT = int(os.environ.get('STEP_TIMEOUT', '300'))

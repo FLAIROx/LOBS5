@@ -151,7 +151,7 @@ if __name__ == "__main__":
 	parser.add_argument("--dt_global", type=str2bool, default=False,
 						help="Treat timescale parameter as global parameter or SSM parameter")
 	parser.add_argument("--lr_min", type=float, default=0,
-						help="minimum learning rate. 0 = auto (1%% of base LR)")
+						help="minimum learning rate. 0 = auto (5%% of base LR)")
 	parser.add_argument("--cosine_anneal", type=str2bool, default=True,
 						help="whether to use cosine annealing schedule")
 	parser.add_argument("--warmup_end", type=float, default=0.01,
