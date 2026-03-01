@@ -11,7 +11,7 @@ import wandb
 import gc
 
 from lob.init_train import init_train_state, load_checkpoint, save_checkpoint, deduplicate_trainstate, remap_train_state_step
-from lob.dataloading import create_lobster_prediction_dataset#, Datasets
+from lob.dataloading import create_lobster_prediction_dataset, create_lobster_train_loader
 from lob.lobster_dataloader import LOBSTER_Dataset
 from lob.train_helpers import reduce_lr_on_plateau, train_epoch, validate, \
     create_jit_train_step, create_jit_eval_step, create_lobs5_learning_rate_schedule, \
@@ -607,9 +607,28 @@ def train(args):
         gc.collect()
         mini_epoch_counter[0] = 0  # reset for each data epoch
 
-        # Update DistributedSampler epoch for proper cross-epoch shuffling
-        if hasattr(trainloader, 'sampler') and hasattr(trainloader.sampler, 'set_epoch'):
-            trainloader.sampler.set_epoch(epoch)
+        # Mid-epoch resume: rebuild trainloader with sampler-level skip
+        # so DataLoader never calls __getitem__ for already-completed batches.
+        if resume_from_step is not None and resume_from_step > 0:
+            print(f"[Resume] Rebuilding trainloader with sampler skip: "
+                  f"step={resume_from_step}, epoch={epoch}")
+            trainloader = create_lobster_train_loader(
+                lobster_dataset,
+                seed=args.jax_seed,
+                per_process_bsz=args.micro_bsz * args.num_devices,
+                num_workers=args.n_data_workers,
+                reset_train_offsets=False,
+                shuffle=args.shuffle_train,
+                use_distributed_sampler=is_distributed,
+                process_rank=process_rank,
+                process_count=process_count,
+                resume_from_step=resume_from_step,
+                resume_epoch=epoch,
+            )
+        else:
+            # Update DistributedSampler epoch for proper cross-epoch shuffling
+            if hasattr(trainloader, 'sampler') and hasattr(trainloader.sampler, 'set_epoch'):
+                trainloader.sampler.set_epoch(epoch)
 
         print(f"[*] Starting Training Epoch {epoch + 1}...")
         print(f"[*] Step {step} - LR managed by optax schedules")
@@ -642,7 +661,21 @@ def train(args):
                                               validate_callback=mini_epoch_validate if mini_epochs > 1 else None,
                                               validate_every_n_steps=validate_every_n_steps,
                                               )
-        # resume_from_step only applies to the first epoch after restore
+        # resume_from_step only applies to the first epoch after restore.
+        # If we rebuilt the trainloader with sampler skip, restore the normal
+        # loader for subsequent epochs (so DistributedSampler.set_epoch works).
+        if resume_from_step is not None:
+            trainloader = create_lobster_train_loader(
+                lobster_dataset,
+                seed=args.jax_seed,
+                per_process_bsz=args.micro_bsz * args.num_devices,
+                num_workers=args.n_data_workers,
+                reset_train_offsets=False,
+                shuffle=args.shuffle_train,
+                use_distributed_sampler=is_distributed,
+                process_rank=process_rank,
+                process_count=process_count,
+            )
         resume_from_step = None
         step = int(state.step)
 

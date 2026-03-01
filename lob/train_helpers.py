@@ -700,8 +700,10 @@ def train_epoch(
     else:
         _ckpt_every = int(_ckpt_every_str) if _ckpt_every_str != "0" else 0
 
-    if resume_from_step is not None:
-        print(f"[Resume] Skipping batches 0..{resume_from_step-1}, starting from batch_idx={resume_from_step}")
+    # resume_from_step: used for tqdm display offset and checkpoint step tracking.
+    # Actual batch skipping is now done at sampler level (dataloading.py),
+    # so DataLoader never loads skipped batches (zero IO overhead).
+    batch_offset = resume_from_step if resume_from_step is not None else 0
 
     # ── Gradient accumulation setup ──
     use_grad_accum = isinstance(jit_train_step_fn, tuple)
@@ -714,10 +716,9 @@ def train_epoch(
         grad_K = 1
 
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
-    for batch_idx, batch in enumerate(tqdm(trainloader)):
-        # Skip batches when resuming mid-epoch
-        if resume_from_step is not None and batch_idx < resume_from_step:
-            continue
+    total_steps = len(trainloader) + batch_offset
+    for local_idx, batch in enumerate(tqdm(trainloader, initial=batch_offset, total=total_steps)):
+        batch_idx = local_idx + batch_offset
         watchdog.kick(epoch, batch_idx)
         if not debug_loading:
             if (step>1) & (step<3) & debug_profiler:
@@ -834,13 +835,13 @@ def train_epoch(
             # Periodic timing log for hang diagnosis
             optimizer_steps_since_start = len(batch_losses)
             if optimizer_steps_since_start % 100 == 0 and optimizer_steps_since_start > 0:
-                avg_step_time = (time.monotonic() - epoch_start) / (batch_idx + 1)
+                avg_step_time = (time.monotonic() - epoch_start) / (local_idx + 1)
                 if use_grad_accum:
                     print(f"[Timing] Epoch {epoch} opt_step {optimizer_steps_since_start} "
-                          f"(micro_batch {batch_idx+1}/{len(trainloader)}, K={grad_K}): "
+                          f"(micro_batch {batch_idx+1}/{total_steps}, K={grad_K}): "
                           f"avg {avg_step_time:.3f} s/micro_step")
                 else:
-                    print(f"[Timing] Epoch {epoch} step {batch_idx+1}/{len(trainloader)}: "
+                    print(f"[Timing] Epoch {epoch} step {batch_idx+1}/{total_steps}: "
                           f"avg {avg_step_time:.2f} s/step")
 
             # ── Mid-epoch checkpoint ──

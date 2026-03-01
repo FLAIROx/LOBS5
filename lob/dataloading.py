@@ -151,7 +151,14 @@ def create_lobster_prediction_dataset(
 
 def create_lobster_train_loader(dataset_obj, seed, per_process_bsz, num_workers, reset_train_offsets=False, shuffle=True,
 								pin_memory=True, prefetch_factor=2, persistent_workers=True,
-								use_distributed_sampler=False, process_rank=0, process_count=1):
+								use_distributed_sampler=False, process_rank=0, process_count=1,
+								resume_from_step=None, resume_epoch=0):
+	"""Create train DataLoader, optionally skipping already-completed batches at sampler level.
+
+	When resume_from_step is set, the sampler indices are sliced to exclude
+	the first `resume_from_step * per_process_bsz` samples.  This avoids
+	the ~3h idle skip that previously used `continue` in the training loop.
+	"""
 	if reset_train_offsets:
 		dataset_obj.reset_train_offsets()
 
@@ -166,9 +173,54 @@ def create_lobster_train_loader(dataset_obj, seed, per_process_bsz, num_workers,
 			seed=seed,
 			drop_last=True,
 		)
+		# Reproduce the same shuffle order as the original run
+		train_sampler.set_epoch(resume_epoch)
 		print(f"[*] DistributedSampler: rank={process_rank}/{process_count}, "
 			  f"samples_per_node={len(train_sampler)}")
 		shuffle = False  # sampler handles shuffling
+
+		# Sampler-level skip: slice off completed batches so DataLoader
+		# never calls __getitem__ for them (zero IO overhead).
+		if resume_from_step is not None and resume_from_step > 0:
+			skip_samples = resume_from_step * per_process_bsz
+			full_indices = list(train_sampler)
+			if skip_samples < len(full_indices):
+				remaining_indices = full_indices[skip_samples:]
+				from torch.utils.data.sampler import SequentialSampler
+				# Use a simple list-based sampler that yields indices in order
+				# (order is already determined by DistributedSampler + epoch seed)
+				train_sampler = remaining_indices  # DataLoader accepts a list as sampler
+				print(f"[Resume] Sampler skip: {skip_samples}/{len(full_indices)} samples skipped "
+					  f"({resume_from_step} batches × {per_process_bsz} BSZ), "
+					  f"{len(remaining_indices)} remaining")
+			else:
+				print(f"[Resume] WARNING: skip_samples={skip_samples} >= total={len(full_indices)}, "
+					  f"no data remaining — epoch already complete")
+				return None
+	else:
+		# Non-distributed: handle resume skip for sequential/random sampler
+		if resume_from_step is not None and resume_from_step > 0:
+			skip_samples = resume_from_step * per_process_bsz
+			total_samples = len(dataset_obj.dataset_train)
+			if shuffle:
+				import torch
+				g = torch.Generator()
+				g.manual_seed(seed + resume_epoch)
+				full_indices = torch.randperm(total_samples, generator=g).tolist()
+			else:
+				full_indices = list(range(total_samples))
+			# drop_last equivalent: truncate to multiple of batch size
+			full_indices = full_indices[:total_samples - total_samples % per_process_bsz]
+			if skip_samples < len(full_indices):
+				remaining_indices = full_indices[skip_samples:]
+				train_sampler = remaining_indices
+				shuffle = False  # indices already in correct order
+				print(f"[Resume] Sampler skip (non-distributed): {skip_samples}/{len(full_indices)} samples skipped, "
+					  f"{len(remaining_indices)} remaining")
+			else:
+				print(f"[Resume] WARNING: skip_samples={skip_samples} >= total={len(full_indices)}, "
+					  f"no data remaining")
+				return None
 
 	trn_loader = make_data_loader(
 		dataset_obj.dataset_train,
