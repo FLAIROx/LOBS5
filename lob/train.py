@@ -476,7 +476,7 @@ def train(args):
             sync_global_devices(f"pre_eval_mini_{cb_epoch}_{current_mini}")
 
         # === Validation ===
-        eval_watchdog = StepWatchdog(timeout=1200)
+        eval_watchdog = StepWatchdog(timeout=2400)  # 40min: eval JIT + NCCL init can be slow
         eval_watchdog.kick(cb_epoch, 0)
 
         (val_loss, val_acc,
@@ -645,6 +645,54 @@ def train(args):
         gc.collect()
 
         return count > args.early_stop_patience  # True → stop training
+
+    # ── Eval warmup: pre-compile eval_step to avoid NCCL deadlock at first mini-epoch ──
+    # Problem: eval_step is JIT-compiled lazily on first call (potentially hours into training).
+    # It uses plain jax.jit (not shard_map), creating a different NCCL communicator than
+    # train_step. First-time compilation + NCCL init at the mini-epoch boundary causes
+    # deadlock that triggers watchdog timeout. Fix: pre-compile eval_step here with dummy data.
+    if is_distributed and jit_eval_step is not None:
+        print("[*] Warming up eval_step JIT compilation (prevents NCCL deadlock at mini-epoch)...")
+        _warmup_t0 = time.monotonic()
+        sync_global_devices("pre_eval_warmup")
+
+        import numpy as _np
+        _ppb = args.micro_bsz * args.num_devices  # per-process batch size
+        if args.use_book_data:
+            _dummy_inputs = (
+                _np.ones((_ppb, seq_len), dtype=_np.int32),
+                _np.ones((_ppb, book_seq_len, book_dim), dtype=_np.float32),
+            )
+        else:
+            _dummy_inputs = (_np.ones((_ppb, seq_len), dtype=_np.int32),)
+        _dummy_labels = _np.ones((_ppb, seq_len), dtype=_np.int32)
+        _dummy_times = (
+            _np.ones((_ppb, seq_len), dtype=_np.float32),
+            _np.ones((_ppb, seq_len), dtype=_np.float32),
+        )
+
+        from lob.sharding_utils import get_data_shardings_for_batch
+        _inp_sh, _lab_sh, _ts_sh = get_data_shardings_for_batch(
+            mesh, has_book_data=args.use_book_data)
+        _dummy_inputs = tuple(
+            jax.make_array_from_process_local_data(sh, inp)
+            for inp, sh in zip(_dummy_inputs, _inp_sh))
+        _dummy_labels = jax.make_array_from_process_local_data(_lab_sh, _dummy_labels)
+        _dummy_times = tuple(
+            jax.make_array_from_process_local_data(sh, ts)
+            for ts, sh in zip(_dummy_times, _ts_sh))
+
+        _w_loss, _w_acc, _ = jit_eval_step(
+            _dummy_inputs, _dummy_labels, _dummy_times, state,
+            val_model.apply, batchnorm, '__call_ar__',
+            jnp.array([0]), ignore_times,
+        )
+        _w_loss.block_until_ready()
+
+        sync_global_devices("post_eval_warmup")
+        del _dummy_inputs, _dummy_labels, _dummy_times, _w_loss, _w_acc
+        gc.collect()
+        print(f"[*] Eval warmup complete ({time.monotonic() - _warmup_t0:.1f}s)")
 
     for epoch in range(start_epoch, args.epochs):
         # Free residual memory from previous epoch's val/test before training
