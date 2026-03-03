@@ -195,6 +195,11 @@ def create_lobster_train_loader(dataset_obj, seed, per_process_bsz, num_workers,
 		# See: AlphaTrade/maxtext/src/MaxText/checkpointing.py (GrainCheckpointHandler)
 		# This requires migrating data format from .npy to ArrayRecord — not worth
 		# the effort for current dataset sizes.
+		#
+		# PERF (benchmarked 2026-03-03, 54M samples):
+		#   randperm(54M): 2.6s CPU | tolist(): 0.5s | slice: 0.1s | total: ~3.2s
+		#   All CPU-only, zero GPU waste. Fully masked by JAX coordinator init (2-5 min).
+		#   vs pre-fix continue-based skip: ~3h wall + 192 GPU-hours wasted (3375x slower).
 		if resume_from_step is not None and resume_from_step > 0:
 			skip_samples = resume_from_step * per_process_bsz
 			full_indices = list(train_sampler)
