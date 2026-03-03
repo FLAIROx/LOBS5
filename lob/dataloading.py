@@ -181,6 +181,20 @@ def create_lobster_train_loader(dataset_obj, seed, per_process_bsz, num_workers,
 
 		# Sampler-level skip: slice off completed batches so DataLoader
 		# never calls __getitem__ for them (zero IO overhead).
+		#
+		# DESIGN NOTE: Current approach materializes all indices via list(train_sampler)
+		# then slices [skip_samples:]. Memory cost = N_samples/N_nodes × 28 bytes:
+		#   128N: ~12 MB (negligible), 2N: ~756 MB (acceptable for testing).
+		# Both approaches require O(N) randperm — the bottleneck is shuffle order
+		# reproduction, not the list materialization.
+		#
+		# Alternative (MaxText/Grain): Google's MaxText uses Grain library with
+		# ArrayRecordDataSource (O(1) random access) + iterator state serialization
+		# via get_state()/set_state(). The iterator checkpoint is a ~few KB JSON
+		# file per process, and resume is O(1) index seek with no randperm.
+		# See: AlphaTrade/maxtext/src/MaxText/checkpointing.py (GrainCheckpointHandler)
+		# This requires migrating data format from .npy to ArrayRecord — not worth
+		# the effort for current dataset sizes.
 		if resume_from_step is not None and resume_from_step > 0:
 			skip_samples = resume_from_step * per_process_bsz
 			full_indices = list(train_sampler)
