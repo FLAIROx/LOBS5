@@ -299,6 +299,9 @@ def create_train_state(model_cls,
                        lr=1e-3,
                        ssm_lr_schedule=None,
                        lr_schedule=None,
+                       muon_lr=0.02,
+                       muon_wd=None,
+                       muon_lr_schedule=None,
                        dt_global=False,
                        num_devices=1,
                        ):
@@ -477,6 +480,60 @@ def create_train_state(model_cls,
                 "none": optax.sgd(learning_rate=0.0),
                 "ssm": _make_opt(optax.adam, _ssm_lr),
                 "regular": _make_opt(optax.adamw, _lr, weight_decay=weight_decay),
+            },
+            ssm_fn,
+        )
+
+    elif opt_config in ["muon"]:
+        """Muon optimizer for 2D kernel weights (Dense layers).
+        SSM params use Adam (no weight decay), non-kernel params use AdamW.
+        Only 'kernel' leaves are routed to the Muon Newton-Schulz transform.
+
+        Three-tier routing:
+          SSM params (B, Lambda_re, Lambda_im, log_step, norm) -> Adam (ssm_lr, no WD)
+          2D kernel weights                                     -> Muon NS (muon_lr, muon_wd)
+          Everything else (embedding, bias, head, etc.)         -> AdamW (lr, weight_decay)
+        """
+        _muon_wd = muon_wd if muon_wd is not None else weight_decay
+        _muon_lr_sched = muon_lr_schedule if muon_lr_schedule is not None else muon_lr
+
+        print(f"configuring Muon optimization (kernel -> NS, SSM -> Adam, rest -> AdamW)")
+        print(f"  Muon kernel LR: {muon_lr}, WD: {_muon_wd}")
+        print(f"  AdamW LR: {lr}, WD: {weight_decay}")
+        print(f"  SSM LR: {ssm_lr}, WD: 0")
+
+        # scale_by_muon requires explicit weight_dimension_numbers inside multi_transform
+        # (default None causes jax.tree.map ValueError: "Expected dict, got None")
+        _muon_dim_nums = optax.contrib.MuonDimensionNumbers(
+            reduction_axis=0, output_axis=1)
+        _wdn_fn = lambda p: jax.tree.map(lambda x: _muon_dim_nums, p)
+
+        if dt_global:
+            ssm_fn = map_nested_fn(
+                lambda k, _: "ssm"
+                if k in ["B", "Lambda_re", "Lambda_im", "norm"]
+                else ("muon" if k == "kernel" else "regular")
+            )
+        else:
+            ssm_fn = map_nested_fn(
+                lambda k, _: "ssm"
+                if k in ["B", "Lambda_re", "Lambda_im", "log_step", "norm"]
+                else ("muon" if k == "kernel" else "regular")
+            )
+
+        tx = optax.multi_transform(
+            {
+                "none": optax.sgd(learning_rate=0.0),
+                "ssm": _make_opt(optax.adam, _ssm_lr),
+                "regular": _make_opt(optax.adamw, _lr, weight_decay=weight_decay),
+                "muon": optax.chain(
+                    optax.contrib.scale_by_muon(
+                        nesterov=True,
+                        weight_dimension_numbers=_wdn_fn,
+                    ),
+                    optax.add_decayed_weights(weight_decay=_muon_wd),
+                    optax.scale_by_learning_rate(_muon_lr_sched),
+                ),
             },
             ssm_fn,
         )

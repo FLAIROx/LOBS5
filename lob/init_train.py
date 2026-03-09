@@ -372,6 +372,22 @@ def init_train_state(
             use_cosine_anneal=args.cosine_anneal,
         )
 
+    # Create Muon kernel LR schedule if using Muon optimizer
+    muon_lr_val = getattr(args, 'muon_lr', 0.02)
+    muon_wd_val = getattr(args, 'muon_wd', None)
+    muon_lr_schedule = None
+    if args.opt_config == 'muon' and train_size > 0:
+        effective_muon_lr_min = muon_lr_val * LR_MIN_FRACTION
+        muon_lr_schedule = create_lobs5_learning_rate_schedule(
+            base_lr=muon_lr_val,
+            warmup_end_step=warmup_end_step,
+            total_steps=total_steps,
+            lr_min=effective_muon_lr_min,
+            use_cosine_anneal=args.cosine_anneal,
+        )
+        if print_shapes:
+            print(f"[Schedule] Muon kernel LR: {muon_lr_val}, min: {effective_muon_lr_min}")
+
     # initialize training state
     state = create_train_state(
         model_cls,
@@ -391,6 +407,9 @@ def init_train_state(
         lr=lr,
         ssm_lr_schedule=ssm_lr_schedule,
         lr_schedule=lr_schedule,
+        muon_lr=muon_lr_val,
+        muon_wd=muon_wd_val,
+        muon_lr_schedule=muon_lr_schedule,
         dt_global=args.dt_global,
         num_devices=args.num_devices,
     )

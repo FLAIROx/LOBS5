@@ -316,10 +316,10 @@ python -u -B run_train.py \
     --dt_global=False \
     --epochs="${EPOCHS:-1}" \
     --jax_seed=42 \
-    --opt_config=standard \
+    --opt_config="${OPT_CONFIG:-standard}" \
     --p_dropout=0.0 \
     --warmup_end="$WARMUP_END" \
-    --weight_decay=0.05 \
+    --weight_decay="${WEIGHT_DECAY:-0.05}" \
     --msg_seq_len="${MSG_SEQ_LEN:-500}" \
     --use_book_data=True \
     --use_simple_book=False \
@@ -353,5 +353,7 @@ python -u -B run_train.py \
     ${DATA_ROOT:+--data_root="$DATA_ROOT"} \
     ${TRAIN_DATE_RANGE:+--train_date_range=$TRAIN_DATE_RANGE} \
     ${TEST_DATE_RANGE:+--test_date_range=$TEST_DATE_RANGE} \
+    ${MUON_LR:+--muon_lr=$MUON_LR} \
+    ${MUON_WD:+--muon_wd=$MUON_WD} \
     --checkpoint_every_n_steps="$CHECKPOINT_EVERY" \
     --max_job_hours="$MAX_JOB_HOURS"

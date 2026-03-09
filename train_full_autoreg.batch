@@ -96,6 +96,24 @@
 #   PER_GPU_BSZ=<optimal> sbatch train_full_autoreg.batch
 # ============================================
 
+# ============================================
+# Muon Optimizer (Newton-Schulz for 2D kernel weights)
+# ============================================
+# Routes: SSM params -> Adam, 2D kernels -> Muon NS, rest -> AdamW
+# Paper default: MUON_LR=0.02, WEIGHT_DECAY=0.01 (for <500M models)
+#
+# Quick test (2N, 30min, 75M):
+#   OPT_CONFIG=muon MUON_LR=0.02 WEIGHT_DECAY=0.01 \
+#     D_MODEL=1024 N_LAYERS=12 BLOCKS=16 SSM_SIZE_BASE=1024 PER_GPU_BSZ=10 \
+#     CURTAIL_EPOCHS=300 IGNORE_TIMES=True \
+#     sbatch --nodes=2 --time=00:30:00 --job-name=muon-75m-2n-30m train_full_autoreg.batch
+#
+# Full training (32N, 24h, 75M):
+#   OPT_CONFIG=muon MUON_LR=0.02 WEIGHT_DECAY=0.01 \
+#     D_MODEL=1024 N_LAYERS=12 BLOCKS=16 SSM_SIZE_BASE=1024 PER_GPU_BSZ=10 \
+#     IGNORE_TIMES=True EPOCHS=40 \
+#     sbatch --nodes=32 --time=24:00:00 --job-name=muon-75m-32n-24h train_full_autoreg.batch
+
 # Default per-GPU batch size — set in model config section below
 # (can be overridden via environment variable: PER_GPU_BSZ=N sbatch ...)
 # NOTE: do NOT set a default here — model config section handles it
@@ -148,11 +166,21 @@ export PER_GPU_BSZ=${PER_GPU_BSZ:-2}
 export SSM_LR_BASE=${SSM_LR_BASE:-5e-4}
 export LR_FACTOR=${LR_FACTOR:-1}
 export WARMUP_END=${WARMUP_END:-0.01}
+export OPT_CONFIG=${OPT_CONFIG:-standard}
+export WEIGHT_DECAY=${WEIGHT_DECAY:-0.05}
+# Muon-specific (only used when OPT_CONFIG=muon)
+if [ "$OPT_CONFIG" = "muon" ]; then
+    export MUON_LR=${MUON_LR:-0.02}
+    export MUON_WD=${MUON_WD:-}  # defaults to WEIGHT_DECAY in Python if unset
+fi
 
 echo "[*] Model config: 360M (24tok, padded_large)"
 echo "    d_model=$D_MODEL, n_layers=$N_LAYERS, blocks=$BLOCKS"
 echo "    ssm_size_base=$SSM_SIZE_BASE, ssm_lr_base=$SSM_LR_BASE"
-echo "    per_gpu_bsz=$PER_GPU_BSZ"
+echo "    per_gpu_bsz=$PER_GPU_BSZ, opt_config=$OPT_CONFIG"
+if [ "$OPT_CONFIG" = "muon" ]; then
+    echo "    muon_lr=$MUON_LR, weight_decay=$WEIGHT_DECAY"
+fi
 
 # XLA thunk init timeout for large models (360M+)
 # 128 GPUs: thunk initialization can exceed default 30s, GPU 3 (last NCCL channel) gets SIGABRT
