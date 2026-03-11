@@ -2,8 +2,15 @@ import argparse
 import os
 import sys
 
+# --model_code_dir must be parsed BEFORE module imports (s5/, lob/ etc.)
+# because `from s5.ssm import *` happens at module level.
+if '--model_code_dir' in sys.argv:
+    _idx = sys.argv.index('--model_code_dir')
+    _model_code_dir = sys.argv[_idx + 1]
+    sys.path.insert(0, _model_code_dir)
+    print(f"[model_code_dir] {_model_code_dir} → sys.path[0]")
+
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 # os.environ['XLA_FLAGS'] ='--xla_gpu_deterministic_ops=true'
 
 
@@ -17,9 +24,13 @@ os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".90"
 sys.path.append(parent_folder_path)
 
 # add git submodule to path to allow imports to work
+# AlphaTrade may be a sibling of LOBS5/ (original layout) or inside it (pipeline repo)
 submodule_name = 'AlphaTrade'
 (parent_folder_path, current_dir) = os.path.split(os.path.abspath(''))
-sys.path.append(os.path.join(parent_folder_path, submodule_name))
+for candidate in [os.path.join(os.path.abspath(''), submodule_name),
+                  os.path.join(parent_folder_path, submodule_name)]:
+    if os.path.isdir(candidate) and candidate not in sys.path:
+        sys.path.append(candidate)
 
 print(sys.path)
 from gymnax_exchange.jaxob.jorderbook import OrderBook
@@ -71,41 +82,60 @@ from preproc import transform_L2_state
 
 if __name__ == "__main__":
 
-    # get args from command line to select stock between GOOG, INTC
     parser = argparse.ArgumentParser()
     parser.add_argument('--stock', type=str, default='GOOG', help='stock to evaluate')
     parser.add_argument('--checkpoint_step', type=int, default=None, help='Which checkpoint step to load')
     parser.add_argument('--test_split', type=float, default=0.1, help='Which test split to use')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for inference')
-    parser.add_argument("--n_sequences", type=int, default=1024, help="Number of sequences to generate")
-    parser.add_argument("--n_cond_msgs", type=int, default=500, help="Number of sequences to generate")
+    parser.add_argument("--n_sequences", type=int, default=1024, help="Total number of sequences to generate (before rank splitting)")
+    parser.add_argument("--n_cond_msgs", type=int, default=500, help="Number of conditioning messages")
+    parser.add_argument("--n_gen_msgs", type=int, default=500, help="Number of messages to generate")
+    parser.add_argument("--data_dir", type=str, default=None, help="Path to preprocessed data directory")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="Path to model checkpoint")
+    parser.add_argument("--save_dir", type=str, default=None, help="Directory to save inference results")
+    parser.add_argument("--sample_indices_file", type=str, default=None, help="File with dataset indices for HF-matched mode (one per line)")
+    parser.add_argument("--wide_book_dir", type=str, default=None,
+                        help="Path to wider L2 book .npy files (e.g. L100) for simulator init")
+    parser.add_argument("--wide_levels", type=int, default=10,
+                        help="Number of book levels in wide_book_dir data (default: 10 = no change)")
+    # Multi-GPU args
+    parser.add_argument("--rank", type=int, default=0, help="Rank of this process (0-indexed)")
+    parser.add_argument("--world_size", type=int, default=1, help="Total number of processes")
+    # Model code override (parsed early in sys.argv for path injection, declared here for --help)
+    parser.add_argument("--model_code_dir", type=str, default=None,
+                        help="Override s5/lob/preproc modules from this directory (injected at sys.path[0])")
 
     run_args = parser.parse_args()
 
     overfit_debug = False
 
-    if run_args.stock == 'AMZN':
-        data_dir = '/home/myuser/processed_data/AMZN/2024_Dec'
-        ckpt_path='/home/myuser/checkpoints/ruby-aardvark-62_98nov1i7'
-        save_dir='/home/myuser/data/evalsequences/s5v2N5/AMZN/2024'
-    if run_args.stock == 'GOOG':
-        data_dir = '/home/myuser/data/processed_data/GOOG/2023_Jan'
-        ckpt_path='/home/myuser/data/checkpoints/lobs5_v2/twilight-sound-77_s42sujip'
-        save_dir='/home/myuser/data/evalsequences/s5v2N5/GOOG/2023_Jan'
-    elif run_args.stock == 'INTC':
-        data_dir = '/home/myuser/data/processed_data/INTC/2023_Jan'
-        ckpt_path='/home/myuser/data/checkpoints/lobs5_v2/dazzling-meadow-75_zpp3bf6z'
-        save_dir='/home/myuser/data/evalsequences/s5v2N5/INTC/2023_Jan'
-    else:
-        raise Warning("Saved Model was trained on GOOGLE data. Generating for TSLA")
-        data_dir = '/data1/sascha/data/lobster_proc'
-        ckpt_path = '/data1/sascha/data/checkpoints/honest-oath-159_3kn3xbd5' # Dummy model trained on just 5 days... for debugging. 
+    # Resolve paths: CLI args take priority, fall back to hardcoded defaults
+    data_dir = run_args.data_dir
+    ckpt_path = run_args.ckpt_path
+    save_dir = run_args.save_dir
+
+    if data_dir is None or ckpt_path is None or save_dir is None:
+        # Legacy hardcoded paths (only used when CLI args not provided)
+        if run_args.stock == 'AMZN':
+            data_dir = data_dir or '/home/myuser/processed_data/AMZN/2024_Dec'
+            ckpt_path = ckpt_path or '/home/myuser/checkpoints/ruby-aardvark-62_98nov1i7'
+            save_dir = save_dir or '/home/myuser/data/evalsequences/s5v2N5/AMZN/2024'
+        elif run_args.stock == 'GOOG':
+            data_dir = data_dir or '/home/myuser/data/processed_data/GOOG/2023_Jan'
+            ckpt_path = ckpt_path or '/home/myuser/data/checkpoints/lobs5_v2/twilight-sound-77_s42sujip'
+            save_dir = save_dir or '/home/myuser/data/evalsequences/s5v2N5/GOOG/2023_Jan'
+        elif run_args.stock == 'INTC':
+            data_dir = data_dir or '/home/myuser/data/processed_data/INTC/2023_Jan'
+            ckpt_path = ckpt_path or '/home/myuser/data/checkpoints/lobs5_v2/dazzling-meadow-75_zpp3bf6z'
+            save_dir = save_dir or '/home/myuser/data/evalsequences/s5v2N5/INTC/2023_Jan'
+        else:
+            raise ValueError(f"No default paths for stock '{run_args.stock}' -- provide --data_dir, --ckpt_path, --save_dir")
 
     ##################################################
 
-    n_gen_msgs = 500  #500 # how many messages to generate into the future
+    n_gen_msgs = run_args.n_gen_msgs
     n_messages_conditional = run_args.n_cond_msgs
-    n_eval_messages = n_gen_msgs  # how many to load from dataset 
+    n_eval_messages = n_gen_msgs  # how many to load from dataset
     eval_seq_len = (n_eval_messages-1) * Message_Tokenizer.MSG_LEN
     cond_seq_len = (n_messages_conditional) * Message_Tokenizer.MSG_LEN
     data_levels = 10
@@ -120,8 +150,8 @@ if __name__ == "__main__":
     book_dim = 503 #b_enc.shape[1]
     eval_book_seq_len = eval_seq_len
 
-
-    rng = jax.random.key(42)
+    # Per-rank RNG: different sampling randomness per rank, shared base seed for index selection
+    rng = jax.random.key(42 + run_args.rank)
     rng, rng_ = jax.random.split(rng)
     if overfit_debug:
         sample_top_n = 1
@@ -134,6 +164,7 @@ if __name__ == "__main__":
     args = load_metadata(ckpt_path)
     args.num_devices=1
     args.bsz=1
+    args.micro_bsz=1
 
 
     new_train_state, model_cls = init_train_state(
@@ -146,12 +177,79 @@ if __name__ == "__main__":
 
 
     # jax.tree_util.tree_map(lambda x: x.shape,state)
-    ckpt = load_checkpoint(
-        new_train_state,
-        ckpt_path,
-        step=0 if run_args.checkpoint_step is None else run_args.checkpoint_step,
-        train=False,
-    )
+    _step = 0 if run_args.checkpoint_step is None else run_args.checkpoint_step
+    try:
+        ckpt = load_checkpoint(
+            new_train_state,
+            ckpt_path,
+            step=_step,
+            train=False,
+            partial_restore=True,
+        )
+    except (ValueError, TypeError) as _ckpt_err:
+        # opt_state tree structure may differ between optax versions.
+        # For inference we only need params — read directly via TensorStore.
+        print(f"[load_checkpoint] StandardRestore failed: {_ckpt_err}")
+        print("[load_checkpoint] TensorStore direct-read fallback (params only)...")
+        import json, ast
+        import numpy as _onp
+        import tensorstore as ts
+        import orbax.checkpoint as ocp
+        from lob.init_train import deduplicate_trainstate
+
+        _abs_path = os.path.abspath(ckpt_path)
+        _mngr = ocp.CheckpointManager(
+            _abs_path, item_names=('state', 'metadata'),
+            options=ocp.CheckpointManagerOptions(),
+        )
+        if _step == 0:
+            _step = _mngr.latest_step()
+        _meta = _mngr.restore(_step, args=ocp.args.Composite(
+            metadata=ocp.args.JsonRestore()))['metadata']
+
+        _state_dir = os.path.join(_abs_path, str(_step), 'state')
+        _mj = json.loads(open(os.path.join(_state_dir, '_METADATA')).read())
+        _use_ocdbt = (os.path.exists(os.path.join(_state_dir, 'ocdbt.base_path'))
+                      or os.path.exists(os.path.join(_state_dir, 'manifest.ocdbt')))
+        _use_zarr3 = _mj.get('use_zarr3', False)
+        _flat = {tuple(ast.literal_eval(k)): v
+                 for k, v in _mj['tree_metadata'].items()}
+
+        print(f"  Reading {sum(1 for k in _flat if k[0]=='params')} arrays "
+              f"(OCDBT={_use_ocdbt})")
+
+        def _make_tspec(state_dir, name, use_ocdbt, use_zarr3):
+            """Build a TensorStore spec for a single array (orbax-version-agnostic)."""
+            if use_ocdbt:
+                return {'driver': 'zarr3' if use_zarr3 else 'zarr',
+                        'kvstore': {'driver': 'ocdbt',
+                                    'base': f'file://{state_dir}',
+                                    'path': name}}
+            else:
+                return {'driver': 'zarr3' if use_zarr3 else 'zarr',
+                        'kvstore': {'driver': 'file',
+                                    'path': os.path.join(state_dir, name)}}
+
+        _raw = {}
+        for kp in _flat:
+            if kp[0] != 'params':
+                continue
+            _tspec = _make_tspec(_state_dir, '.'.join(kp), _use_ocdbt, _use_zarr3)
+            _raw[kp[1:]] = _onp.asarray(
+                ts.open(_tspec, open=True).result().read().result())
+
+        _params = {}
+        for kp, arr in _raw.items():
+            d = _params
+            for key in kp[:-1]:
+                d = d.setdefault(key, {})
+            d[kp[-1]] = arr
+        print(f"  Loaded {len(_raw)} param arrays")
+
+        _dedup = deduplicate_trainstate(new_train_state)
+        ckpt = _meta
+        ckpt['model'] = _dedup.replace(params=_params)
+
     state = ckpt['model']
     print(state.params['message_encoder']['encoder']['embedding'].shape)
 
@@ -172,24 +270,12 @@ if __name__ == "__main__":
                                n_messages_conditional,
                                n_eval_messages,
                                test_split= run_args.test_split,
+                               wide_book_dir=run_args.wide_book_dir,
                             #    day_indeces= [0],
-                            #    limit_seq=4 
+                            #    limit_seq=4
                                )
 
     print("Dataset length: ", len(ds))
-    # ds = LOBSTER_Dataset(
-    #     msg_files,
-    #     n_messages=n_messages + n_eval_messages,
-    #     mask_fn=lambda X, rng: (X, jnp.array(0)),
-    #     seed=42,
-    #     n_cache_files=100,
-    #     randomize_offset=False,
-    #     book_files=book_files,
-    #     use_simple_book=True,
-    #     book_transform=False,
-    #     book_depth=500,
-    #     return_raw_msgs=True,
-    # )
 
     ##################################################
 
@@ -205,16 +291,49 @@ if __name__ == "__main__":
 
     ##################################################
 
+    # Compute this rank's dataset indices
+    rank = run_args.rank
+    world_size = run_args.world_size
+    n_total = run_args.n_sequences
 
+    if run_args.sample_indices_file is not None:
+        # HF-matched mode: read indices from file
+        with open(run_args.sample_indices_file, 'r') as f:
+            all_indices = [int(line.strip()) for line in f if line.strip()]
+        n_total = len(all_indices)
+    else:
+        # Random mode: generate full index set with shared seed 42
+        rng_idx = jax.random.key(42)
+        all_indices = jax.random.choice(
+            rng_idx,
+            jnp.arange(len(ds), dtype=jnp.int32),
+            shape=(n_total,),
+            replace=False
+        ).tolist()
 
-    n_samples = run_args.n_sequences
+    # Interleaved split: rank takes every world_size-th index starting from rank
+    rank_indices = all_indices[rank::world_size]
+    n_samples = len(rank_indices)
+
+    print(f"[Rank {rank}/{world_size}] Processing {n_samples} sequences out of {n_total} total")
+    print(f"[Rank {rank}/{world_size}] GPU: {os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
+    print(f"[Rank {rank}/{world_size}] First indices: {rank_indices[:5]}")
+
     batch_size = run_args.batch_size
+
+    # Pad rank_indices to be divisible by batch_size
+    if n_samples % batch_size != 0:
+        n_padded = ((n_samples + batch_size - 1) // batch_size) * batch_size
+        n_pad = n_padded - n_samples
+        # Tile indices to cover padding (handles n_pad > n_samples, e.g. many ranks / small dataset)
+        rank_indices = (rank_indices * (n_padded // n_samples + 1))[:n_padded]
+        print(f"[Rank {rank}/{world_size}] Padded {n_pad} indices to fill last batch ({n_padded} total)")
 
     # m_seq_gen, b_seq_gen, msgs_decoded, l2_book_states, num_errors = inference.sample_new(
     # saves data to disk
     start=time()
     inference.sample_new(
-        n_samples,
+        len(rank_indices),
         batch_size,
         ds,
         rng,
@@ -231,5 +350,7 @@ if __name__ == "__main__":
         args=args,
         conditional= True if n_messages_conditional>0 else False,
         overfit_debug=overfit_debug,
+        sample_indices=rank_indices,
+        wide_levels=run_args.wide_levels,
     )
-    print(f"Generation time for {n_samples} sequences across {batch_size} batch size: {time()-start}")
+    print(f"[Rank {rank}/{world_size}] Generation time for {n_samples} sequences across {batch_size} batch size: {time()-start}")

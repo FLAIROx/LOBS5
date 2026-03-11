@@ -24,6 +24,7 @@ from lob.lob_seq_model import BatchFullLobPredModel, BatchLobPredModel, BatchPad
 from lob.train_helpers import create_train_state, create_lobs5_learning_rate_schedule, LR_MIN_FRACTION
 from s5.ssm import init_S5SSM
 from s5.ssm_init import make_DPLR_HiPPO
+from s5.transformer import init_TransformerBlock
 # from s5.dataloading import make_data_loader
 # from lob.lobster_dataloader import LOBSTER_Dataset, LOBSTER
 
@@ -138,6 +139,8 @@ def load_metadata(
     # Extract the actual parameters from the nested custom_metadata structure
     if 'custom_metadata' in metadata:
         return Namespace(**metadata['custom_metadata'])
+    elif 'custom' in metadata:
+        return Namespace(**metadata['custom'])
     else:
         return Namespace(**metadata)
 
@@ -164,17 +167,138 @@ def load_checkpoint(
     print(f"[Checkpoint] Loading step={step} from {path} "
           f"(partial_restore={partial_restore})")
 
-    loaded = mngr.restore(
-        step,
-        args=ocp.args.Composite(
-            state=ocp.args.StandardRestore(
-                # only stored trainstate from a single device (as they are all the same)
-                deduplicate_trainstate(state),
-                strict=(not partial_restore),
-            ),
-            metadata=ocp.args.JsonRestore()
+    restore_state = deduplicate_trainstate(state)
+
+    try:
+        loaded = mngr.restore(
+            step,
+            args=ocp.args.Composite(
+                state=ocp.args.StandardRestore(
+                    restore_state,
+                    strict=(not partial_restore),
+                ),
+                metadata=ocp.args.JsonRestore()
+            )
         )
-    )
+    except (ValueError, TypeError, FileNotFoundError) as e:
+        if not train:
+            # opt_state tree structure may differ between Orbax/optax versions.
+            # For inference we only need params — bypass CheckpointManager and
+            # restore the state directory directly as a raw dict.
+            print(f"[load_checkpoint] StandardRestore failed ({e}), "
+                  "falling back to direct restore for inference")
+
+            import numpy as onp
+            import tensorstore as ts
+            from orbax.checkpoint import type_handlers as _th
+            from orbax.checkpoint import utils as _ocp_utils
+            from etils import epath as _epath
+
+            # Restore metadata (config dict) via manager — this always works
+            meta_loaded = mngr.restore(
+                step,
+                args=ocp.args.Composite(
+                    metadata=ocp.args.JsonRestore()
+                )
+            )
+
+            state_dir = os.path.join(os.path.abspath(path), str(step), 'state')
+            state_dir_ep = _epath.Path(state_dir)
+            is_ocdbt = _th.is_ocdbt_checkpoint(state_dir_ep)
+
+            _meta_json = json.loads((state_dir_ep / '_METADATA').read_text())
+            _use_zarr3 = _meta_json.get('use_zarr3', False)
+
+            import ast
+            _tree_md = _meta_json['tree_metadata']
+            flat_abstract = {}
+            for key_str, entry in _tree_md.items():
+                keypath = tuple(ast.literal_eval(key_str))
+                flat_abstract[keypath] = entry
+
+            # Only read 'params' subtree (skip opt_state for inference)
+            print(f"[load_checkpoint] Reading {sum(1 for k in flat_abstract if k[0] == 'params')} "
+                  f"param arrays via TensorStore (OCDBT={is_ocdbt})")
+            raw_params = {}
+            _ts_ctx = _th.get_ts_context()
+            for keypath, meta in flat_abstract.items():
+                if keypath[0] != 'params':
+                    continue
+                param_name = '.'.join(keypath)
+                _zarr_driver = 'zarr3' if _use_zarr3 else 'zarr'
+                if is_ocdbt:
+                    tspec = {
+                        'driver': _zarr_driver,
+                        'kvstore': {
+                            'driver': 'ocdbt',
+                            'base': str(state_dir),
+                            'path': param_name,
+                        },
+                    }
+                else:
+                    tspec = {
+                        'driver': _zarr_driver,
+                        'kvstore': {
+                            'driver': 'file',
+                            'path': os.path.join(str(state_dir), param_name),
+                        },
+                    }
+                t = ts.open(
+                    ts.Spec(tspec), open=True, context=_ts_ctx
+                ).result()
+                raw_params[keypath[1:]] = onp.asarray(t.read().result())
+
+            # Rebuild nested params dict from flat
+            params = {}
+            for keypath, arr in raw_params.items():
+                d = params
+                for key in keypath[:-1]:
+                    d = d.setdefault(key, {})
+                d[keypath[-1]] = arr
+
+            print(f"[load_checkpoint] Loaded {len(raw_params)} param arrays")
+            restored = restore_state.replace(params=params)
+
+            # Also load batch_stats if present
+            batch_stats_keys = [k for k in flat_abstract if k[0] == 'batch_stats']
+            if batch_stats_keys:
+                raw_bs = {}
+                for keypath in batch_stats_keys:
+                    param_name = '.'.join(keypath)
+                    _zarr_driver = 'zarr3' if _use_zarr3 else 'zarr'
+                    if is_ocdbt:
+                        tspec = {
+                            'driver': _zarr_driver,
+                            'kvstore': {
+                                'driver': 'ocdbt',
+                                'base': str(state_dir),
+                                'path': param_name,
+                            },
+                        }
+                    else:
+                        tspec = {
+                            'driver': _zarr_driver,
+                            'kvstore': {
+                                'driver': 'file',
+                                'path': os.path.join(str(state_dir), param_name),
+                            },
+                        }
+                    t = ts.open(
+                        ts.Spec(tspec), open=True, context=_ts_ctx
+                    ).result()
+                    raw_bs[keypath[1:]] = onp.asarray(t.read().result())
+                batch_stats = {}
+                for keypath, arr in raw_bs.items():
+                    d = batch_stats
+                    for key in keypath[:-1]:
+                        d = d.setdefault(key, {})
+                    d[keypath[-1]] = arr
+                restored = restored.replace(batch_stats=batch_stats)
+
+            loaded = {'state': restored, 'metadata': meta_loaded['metadata']}
+        else:
+            raise
+
     ckpt = loaded['metadata']
     # copy train state back to all devices
     if train:
@@ -205,61 +329,118 @@ def init_train_state(
 
     in_dim = n_classes
 
-    ssm_size = args.ssm_size_base
+    model_type = getattr(args, 'model_type', 's5')
+    ssm_type = getattr(args, 'ssm_type', 's5')
+
     ssm_lr = args.ssm_lr_base
 
     # Set global learning rate lr (e.g. encoders, etc.) as function of ssm_lr
     lr = args.lr_factor * ssm_lr
 
-    # determine the size of initial blocks
-    block_size = int(ssm_size / args.blocks)
-
     key = random.PRNGKey(args.jax_seed)
     init_rng, train_rng = random.split(key, num=2)
-
-    # Initialize state matrix A using approximation to HiPPO-LegS matrix
-    Lambda, _, B, V, B_orig = make_DPLR_HiPPO(block_size)
-
-    if args.conj_sym:
-        block_size = block_size // 2
-        ssm_size = ssm_size // 2
-
-    Lambda = Lambda[:block_size]
-    V = V[:, :block_size]
-    Vc = V.conj().T
-
-    # If initializing state matrix A as block-diagonal, put HiPPO approximation
-    # on each block
-    Lambda = (Lambda * np.ones((args.blocks, block_size))).ravel()
-    V = block_diag(*([V] * args.blocks))
-    Vinv = block_diag(*([Vc] * args.blocks))
-
-    if print_shapes:
-        print("Lambda.shape={}".format(Lambda.shape))
-        print("V.shape={}".format(V.shape))
-        print("Vinv.shape={}".format(Vinv.shape))
-        print("book_seq_len", book_seq_len)
-        print("book_dim", book_dim)
 
     padded = False
     retrieval = False
     speech = False
 
-    ssm_init_fn = init_S5SSM(
-        H=args.d_model,
-        P=ssm_size,
-        Lambda_re_init=Lambda.real,
-        Lambda_im_init=Lambda.imag,
-        V=V,
-        Vinv=Vinv,
-        C_init=args.C_init,
-        discretization=args.discretization,
-        dt_min=args.dt_min,
-        dt_max=args.dt_max,
-        conj_sym=args.conj_sym,
-        clip_eigs=args.clip_eigs,
-        bidirectional=args.bidirectional
-    )
+    if ssm_type in ('gdn', 'kda'):
+        from s5.gdn import init_GDN_SSM
+        gdn_head_dim = getattr(args, 'gdn_head_dim', 128)
+        gdn_num_heads = getattr(args, 'gdn_num_heads', None) or max(1, args.d_model // gdn_head_dim)
+        gdn_expand_v = getattr(args, 'gdn_expand_v', 2)
+        gdn_chunk_size = getattr(args, 'gdn_chunk_size', 64)
+        gdn_use_conv = getattr(args, 'gdn_use_conv', True)
+
+        if print_shapes:
+            print(f"[GDN] ssm_type={ssm_type}, num_heads={gdn_num_heads}, "
+                  f"head_dim={gdn_head_dim}, expand_v={gdn_expand_v}, "
+                  f"chunk_size={gdn_chunk_size}, use_conv={gdn_use_conv}")
+            print("book_seq_len", book_seq_len)
+            print("book_dim", book_dim)
+
+        ssm_init_fn = init_GDN_SSM(
+            H=args.d_model,
+            num_heads=gdn_num_heads,
+            head_dim=gdn_head_dim,
+            expand_v=gdn_expand_v,
+            chunk_size=gdn_chunk_size,
+            use_conv=gdn_use_conv,
+            use_kda=(ssm_type == 'kda'),
+        )
+    elif model_type == 'transformer':
+        # Transformer: no HiPPO, no SSM state space
+        n_heads = getattr(args, 'n_heads', 16)
+        d_ff = getattr(args, 'd_ff', 0)
+
+        import jax.numpy as jnp
+        dtype_map = {'float32': jnp.float32, 'bfloat16': jnp.bfloat16}
+        compute_dtype = dtype_map.get(getattr(args, 'dtype', 'float32'), jnp.float32)
+
+        use_flash = getattr(args, 'use_flash', False)
+        remat = getattr(args, 'remat', False)
+
+        ssm_init_fn = init_TransformerBlock(
+            H=args.d_model,
+            n_heads=n_heads,
+            d_ff=d_ff,
+            dropout=args.p_dropout,
+            dtype=compute_dtype,
+            use_flash=use_flash,
+            remat=remat,
+        )
+
+        if print_shapes:
+            print(f"[Transformer] d_model={args.d_model}, n_heads={n_heads}, "
+                  f"d_ff={d_ff if d_ff > 0 else 4 * args.d_model}")
+            print("book_seq_len", book_seq_len)
+            print("book_dim", book_dim)
+    else:
+        # S5 SSM: HiPPO initialization
+        ssm_size = args.ssm_size_base
+
+        # determine the size of initial blocks
+        block_size = int(ssm_size / args.blocks)
+
+        # Initialize state matrix A using approximation to HiPPO-LegS matrix
+        Lambda, _, B, V, B_orig = make_DPLR_HiPPO(block_size)
+
+        if args.conj_sym:
+            block_size = block_size // 2
+            ssm_size = ssm_size // 2
+
+        Lambda = Lambda[:block_size]
+        V = V[:, :block_size]
+        Vc = V.conj().T
+
+        # If initializing state matrix A as block-diagonal, put HiPPO approximation
+        # on each block
+        Lambda = (Lambda * np.ones((args.blocks, block_size))).ravel()
+        V = block_diag(*([V] * args.blocks))
+        Vinv = block_diag(*([Vc] * args.blocks))
+
+        if print_shapes:
+            print("Lambda.shape={}".format(Lambda.shape))
+            print("V.shape={}".format(V.shape))
+            print("Vinv.shape={}".format(Vinv.shape))
+            print("book_seq_len", book_seq_len)
+            print("book_dim", book_dim)
+
+        ssm_init_fn = init_S5SSM(
+            H=args.d_model,
+            P=ssm_size,
+            Lambda_re_init=Lambda.real,
+            Lambda_im_init=Lambda.imag,
+            V=V,
+            Vinv=Vinv,
+            C_init=args.C_init,
+            discretization=args.discretization,
+            dt_min=args.dt_min,
+            dt_max=args.dt_max,
+            conj_sym=args.conj_sym,
+            clip_eigs=args.clip_eigs,
+            bidirectional=args.bidirectional
+        )
     
     if args.use_book_data:
         # if args.num_devices > 1:
@@ -308,7 +489,17 @@ def init_train_state(
                 prenorm=args.prenorm,
                 batchnorm=args.batchnorm,
                 bn_momentum=args.bn_momentum,
-                #args not adding to partial: training & rescale. 
+                # MoE parameters
+                use_moe=getattr(args, 'use_moe', False),
+                num_experts=getattr(args, 'num_experts', 128),
+                top_k=getattr(args, 'moe_top_k', 8),
+                d_ff=getattr(args, 'd_ff', None) or args.d_model,
+                num_shared_experts=getattr(args, 'num_shared_experts', 1),
+                moe_every_n=getattr(args, 'moe_every_n', 2),
+                moe_capacity_factor=getattr(args, 'moe_capacity_factor', 1.25),
+                moe_lb_weight=getattr(args, 'moe_lb_weight', 0.01),
+                moe_z_loss_weight=getattr(args, 'moe_z_loss_weight', 0.001),
+                #args not adding to partial: training & rescale.
             )
         else:
             raise ValueError("Merge method: " + args.merging + " is not valid (check spelling)")
@@ -393,6 +584,7 @@ def init_train_state(
         lr_schedule=lr_schedule,
         dt_global=args.dt_global,
         num_devices=args.num_devices,
+        model_type=model_type,
     )
 
     return state, model_cls

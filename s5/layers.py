@@ -28,29 +28,61 @@ class SequenceLayer(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.90
     step_rescale: float = 1.0
+    # MoE parameters
+    use_moe: bool = False
+    num_experts: int = 128
+    top_k: int = 8
+    d_ff: int = 1024
+    num_shared_experts: int = 1
+    moe_capacity_factor: float = 1.25
+    moe_lb_weight: float = 0.01
+    moe_z_loss_weight: float = 0.001
 
     def setup(self):
         """Initializes the ssm, batch/layer norm and dropout
         """
+        # Detect if the SSM is a TransformerBlock (has its own Pre-LN + residual).
+        # Unwrap nested functools.partial (e.g. LobBookModel wraps ssm in an extra partial).
+        _cls = self.ssm
+        while hasattr(_cls, 'func'):
+            _cls = _cls.func
+        self._is_transformer = getattr(_cls, 'is_transformer', False)
+
         self.seq = self.ssm(step_rescale=self.step_rescale)
 
-        if self.activation in ["full_glu"]:
-            self.out1 = nn.Dense(self.d_model)
-            self.out2 = nn.Dense(self.d_model)
-        elif self.activation in ["half_glu1", "half_glu2"]:
-            self.out2 = nn.Dense(self.d_model)
+        if not self._is_transformer:
+            if self.activation in ["full_glu"]:
+                self.out1 = nn.Dense(self.d_model)
+                self.out2 = nn.Dense(self.d_model)
+            elif self.activation in ["half_glu1", "half_glu2"]:
+                self.out2 = nn.Dense(self.d_model)
 
-        if self.batchnorm:
-            self.norm = nn.BatchNorm(use_running_average=not self.training,
-                                     momentum=self.bn_momentum, axis_name='batch')
-        else:
-            self.norm = nn.LayerNorm()
+            if self.batchnorm:
+                self.norm = nn.BatchNorm(use_running_average=not self.training,
+                                         momentum=self.bn_momentum, axis_name='batch')
+            else:
+                self.norm = nn.LayerNorm()
 
-        self.drop = nn.Dropout(
-            self.dropout,
-            broadcast_dims=[0],
-            deterministic=not self.training,
-        )
+            self.drop = nn.Dropout(
+                self.dropout,
+                broadcast_dims=[0],
+                deterministic=not self.training,
+            )
+
+            # MoE sub-layer (optional)
+            if self.use_moe:
+                from s5.moe import MoEFFN
+                self.moe_norm = nn.LayerNorm()
+                self.moe_ffn = MoEFFN(
+                    d_model=self.d_model,
+                    d_ff=self.d_ff,
+                    num_experts=self.num_experts,
+                    top_k=self.top_k,
+                    num_shared_experts=self.num_shared_experts,
+                    capacity_factor=self.moe_capacity_factor,
+                    lb_weight=self.moe_lb_weight,
+                    z_loss_weight=self.moe_z_loss_weight,
+                )
 
     def __call__(self, x):
         """
@@ -60,7 +92,9 @@ class SequenceLayer(nn.Module):
         Returns:
             output sequence (float32): (L, d_model)
         """
-        #jax.debug.print("call x before prenorm : {}",x)
+        # TransformerBlock has its own Pre-LN + residual — pass through directly
+        if self._is_transformer:
+            return self.seq(x)
 
         skip = x
         if self.prenorm:
@@ -95,6 +129,12 @@ class SequenceLayer(nn.Module):
         if not self.prenorm:
             x = self.norm(x)
 
+        # MoE sub-layer: LayerNorm -> MoE FFN -> residual
+        if self.use_moe:
+            skip_moe = x
+            x = self.moe_norm(x)
+            x = self.moe_ffn(x)
+            x = skip_moe + x
 
         return x
 
@@ -108,7 +148,9 @@ class SequenceLayer(nn.Module):
             Returns:
                 output sequence (float32): (L, d_model)
             """
-            #jax.debug.print("call_rnn x before prenorm : {}",x)
+            # TransformerBlock: delegate to KV-cache inference
+            if self._is_transformer:
+                return self.seq.__call_rnn__(hidden, x, d)
 
             skip = x
             if self.prenorm:
@@ -141,8 +183,27 @@ class SequenceLayer(nn.Module):
             if not self.prenorm:
                 x = self.norm(x)
 
+            # MoE sub-layer (token-wise, no hidden state)
+            if self.use_moe:
+                skip_moe = x
+                x = self.moe_norm(x)
+                x = self.moe_ffn(x)
+                x = skip_moe + x
+
             return hidden, x
     @staticmethod
-    def initialize_carry(batch_size, hidden_size):
-        # Use a dummy key since the default state init fn is just zeros.
+    def initialize_carry(batch_size, hidden_size,
+                         is_transformer=False, transformer_config=None,
+                         ssm_type='s5', **gdn_kwargs):
+        if ssm_type in ('gdn', 'kda'):
+            nh = gdn_kwargs['num_heads']
+            hd = gdn_kwargs['head_dim']
+            hvd = gdn_kwargs['head_v_dim']
+            return jax.numpy.zeros((batch_size, 1, nh, hvd, hd), dtype=jax.numpy.float32)
+        if is_transformer and transformer_config is not None:
+            from s5.transformer import TransformerBlock
+            cfg = transformer_config
+            return TransformerBlock.initialize_cache(
+                batch_size, cfg['n_heads'], cfg['head_dim'],
+                cfg['max_cache_len'], cfg.get('dtype', jax.numpy.float32))
         return jax.numpy.zeros((batch_size,1, hidden_size), dtype=jax.numpy.complex64)

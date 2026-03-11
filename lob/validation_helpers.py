@@ -24,7 +24,7 @@ from lob.train_helpers import repeat_book
 v = Vocab()
 
 
-def syntax_validation_matrix(v = None):
+def syntax_validation_matrix(v = None, block_start_tok = False):
     """ Create a matrix of shape (MSG_LEN, VOCAB_SIZE) where a
         True value indicates that the token is valid for the location
         in the message.
@@ -52,10 +52,13 @@ def syntax_validation_matrix(v = None):
     i, _ = get_idx_from_field("price_ref")
     mask = update_allowed_tok_slice(mask, i, np.array([1, -1]), encoder['sign'])
 
-    # adjustments for special tokens (no MSK or HID) allowed
-    # NA always allowed
+    # adjustments for special tokens (no MSK or HID allowed during generation)
     mask = mask.at[:, v.MASK_TOK].set(False)
     mask = mask.at[:, v.HIDDEN_TOK].set(False)
+    # Block START_TOK for transformers (which predict it 30-40% mid-sequence);
+    # S5 models never emit it, so leave it unmasked to match upstream behavior.
+    if block_start_tok:
+        mask = mask.at[:, v.START_TOK].set(False)
     # allow NAN token in ref fields only
     mask = mask.at[:, v.NA_TOK].set(False)
     mask = mask.at[Message_Tokenizer.NEW_MSG_LEN: , v.NA_TOK].set(True)
@@ -354,11 +357,11 @@ def filter_valid_pred(
         valid_mask = np.expand_dims(valid_mask, axis=0)
     pred = np.where(
         valid_mask == 0,
-        -9999,
+        -1e9,
         pred,
     )
-    # renormalize
-    pred = pred - np.log(np.sum(np.exp(pred), axis=-1, keepdims=True))
+    # renormalize (numerically stable log-softmax)
+    pred = jax.nn.log_softmax(pred, axis=-1)
     return pred
 
 

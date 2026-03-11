@@ -33,6 +33,16 @@ class StackedEncoderModel(nn.Module):
     step_rescale: float = 1.0
     use_embed_layer: bool = False
     vocab_size: int = -1  # only used if use_encode_layer is True
+    # MoE parameters
+    use_moe: bool = False
+    num_experts: int = 128
+    top_k: int = 8
+    d_ff: int = 1024
+    num_shared_experts: int = 1
+    moe_every_n: int = 2
+    moe_capacity_factor: float = 1.25
+    moe_lb_weight: float = 0.01
+    moe_z_loss_weight: float = 0.001
 
     def setup(self):
         """
@@ -56,8 +66,17 @@ class StackedEncoderModel(nn.Module):
                 batchnorm=self.batchnorm,
                 bn_momentum=self.bn_momentum,
                 step_rescale=self.step_rescale,
+                # MoE on alternating layers (every moe_every_n-th layer)
+                use_moe=self.use_moe and (i % self.moe_every_n == 0),
+                num_experts=self.num_experts,
+                top_k=self.top_k,
+                d_ff=self.d_ff,
+                num_shared_experts=self.num_shared_experts,
+                moe_capacity_factor=self.moe_capacity_factor,
+                moe_lb_weight=self.moe_lb_weight,
+                moe_z_loss_weight=self.moe_z_loss_weight,
             )
-            for _ in range(self.n_layers)
+            for i in range(self.n_layers)
         ]
 
     def __call__(self, x, integration_timesteps):
@@ -112,9 +131,16 @@ class StackedEncoderModel(nn.Module):
         return new_hiddens,x
 
     @staticmethod
-    def initialize_carry(batch_size, hidden_size, n_layers):
+    def initialize_carry(batch_size, hidden_size, n_layers,
+                         is_transformer=False, transformer_config=None,
+                         ssm_type='s5', **gdn_kwargs):
         # Use a dummy key since the default state init fn is just zeros.
-        return [SequenceLayer.initialize_carry(batch_size,hidden_size) for _ in range(n_layers)]
+        return [SequenceLayer.initialize_carry(
+                    batch_size, hidden_size,
+                    is_transformer=is_transformer,
+                    transformer_config=transformer_config,
+                    ssm_type=ssm_type, **gdn_kwargs)
+                for _ in range(n_layers)]
 
 def masked_meanpool(x, lengths):
     """

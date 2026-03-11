@@ -301,6 +301,7 @@ def create_train_state(model_cls,
                        lr_schedule=None,
                        dt_global=False,
                        num_devices=1,
+                       model_type="s5",
                        ):
     """
     Initializes the training state using optax.
@@ -374,7 +375,13 @@ def create_train_state(model_cls,
         else:
             return optax.inject_hyperparams(optimizer_fn)(learning_rate=learning_rate, **kwargs)
 
-    if opt_config in ["standard"]:
+    if model_type == "transformer":
+        # Transformer: all params are standard Dense/attention weights.
+        # Single AdamW optimizer with weight decay — no SSM-specific routing.
+        print("configuring transformer optimization (single AdamW, no SSM groups)")
+        tx = _make_opt(optax.adamw, _lr, weight_decay=weight_decay)
+
+    elif opt_config in ["standard"]:
         """This option applies weight decay to C, but B is kept with the
             SSM parameters with no weight decay.
         """

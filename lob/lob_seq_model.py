@@ -92,8 +92,8 @@ class LobPredModel(nn.Module):
             raise NotImplementedError("Mode must be in ['pool', 'last]")
 
         x = self.decoder(x)
-        return nn.log_softmax(x, axis=-1)
-    
+        return nn.log_softmax(x.astype(jnp.float32), axis=-1)
+
     def __call_rnn__(self,hidden, x,d, integration_timesteps):
         """
         Compute the size d_output log softmax output given a
@@ -124,7 +124,7 @@ class LobPredModel(nn.Module):
             raise NotImplementedError("Mode must be in ['pool', 'last]")
 
         x = self.decoder(x)
-        return nn.log_softmax(x, axis=-1)
+        return nn.log_softmax(x.astype(jnp.float32), axis=-1)
 
 # Here we call vmap to parallelize across a batch of input sequences
 BatchLobPredModel = nn.vmap(
@@ -223,10 +223,24 @@ class LobBookModel(nn.Module):
 
         return (new_hiddens_pre,new_hiddens_post),x
     @staticmethod
-    def initialize_carry(batch_size, hidden_size,n_layers_pre,n_layers_post,):
+    def initialize_carry(batch_size, hidden_size, n_layers_pre, n_layers_post,
+                         is_transformer=False, transformer_config=None,
+                         transformer_config_book=None,
+                         ssm_type='s5', **gdn_kwargs):
         # Use a dummy key since the default state init fn is just zeros.
-        init_hidden=([SequenceLayer.initialize_carry(batch_size,hidden_size) for _ in range(n_layers_pre)],
-                      [SequenceLayer.initialize_carry(batch_size,hidden_size) for _ in range(n_layers_post)])
+        pre_cfg = transformer_config_book if transformer_config_book else transformer_config
+        init_hidden = (
+            [SequenceLayer.initialize_carry(
+                batch_size, hidden_size,
+                is_transformer=is_transformer, transformer_config=pre_cfg,
+                ssm_type=ssm_type, **gdn_kwargs)
+             for _ in range(n_layers_pre)],
+            [SequenceLayer.initialize_carry(
+                batch_size, hidden_size,
+                is_transformer=is_transformer, transformer_config=transformer_config,
+                ssm_type=ssm_type, **gdn_kwargs)
+             for _ in range(n_layers_post)],
+        )
         return init_hidden
     
     
@@ -330,8 +344,8 @@ class FullLobPredModel(nn.Module):
             raise NotImplementedError("Mode must be in ['pool', 'last]")
 
         x = self.decoder(x)
-        return nn.log_softmax(x, axis=-1)
-    
+        return nn.log_softmax(x.astype(jnp.float32), axis=-1)
+
 
 
 # Here we call vmap to parallelize across a batch of input sequences
@@ -361,6 +375,16 @@ class PaddedLobPredModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    # MoE parameters (only applied to fused_s5)
+    use_moe: bool = False
+    num_experts: int = 128
+    top_k: int = 8
+    d_ff: int = 1024
+    num_shared_experts: int = 1
+    moe_every_n: int = 2
+    moe_capacity_factor: float = 1.25
+    moe_lb_weight: float = 0.01
+    moe_z_loss_weight: float = 0.001
 
     def setup(self):
         """
@@ -416,6 +440,16 @@ class PaddedLobPredModel(nn.Module):
             batchnorm=self.batchnorm,
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
+            # MoE only on fused layers (message/book encoders are too shallow)
+            use_moe=self.use_moe,
+            num_experts=self.num_experts,
+            top_k=self.top_k,
+            d_ff=self.d_ff,
+            num_shared_experts=self.num_shared_experts,
+            moe_every_n=self.moe_every_n,
+            moe_capacity_factor=self.moe_capacity_factor,
+            moe_lb_weight=self.moe_lb_weight,
+            moe_z_loss_weight=self.moe_z_loss_weight,
         )
         self.decoder = nn.Dense(self.d_output)
 
@@ -425,7 +459,7 @@ class PaddedLobPredModel(nn.Module):
         (L_m x d_input, L_b x [P+1]) input sequence tuple,
         combining message and book inputs.
         Args:
-             x_m: message input sequence (L_m x d_input, 
+             x_m: message input sequence (L_m x d_input,
              x_b: book state (volume series) (L_b x [P+1])
         Returns:
             output (float32): (d_output)
@@ -474,7 +508,7 @@ class PaddedLobPredModel(nn.Module):
         x = self.decoder(x)
         jax.debug.print("x output shape after decoder {}",x.shape,x[:5,:5])
 
-        return nn.log_softmax(x, axis=-1)
+        return nn.log_softmax(x.astype(jnp.float32), axis=-1)
 
 
     #FOR AR version....
@@ -521,7 +555,7 @@ class PaddedLobPredModel(nn.Module):
             raise NotImplementedError("Must double check before running rnn")
 
         x = self.decoder(x)
-        return (hiddens_m, hiddens_b, hiddens_fused, (fo,jnp.zeros_like(override))), nn.log_softmax(x, axis=-1)
+        return (hiddens_m, hiddens_b, hiddens_fused, (fo,jnp.zeros_like(override))), nn.log_softmax(x.astype(jnp.float32), axis=-1)
 
     def __call_ar__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):
         """
@@ -566,7 +600,7 @@ class PaddedLobPredModel(nn.Module):
         # jax.debug.print("x output shape after decoder {}, 1st five: \n {}",x.shape,x[:5,:5])
 
         
-        x=nn.log_softmax(x, axis=-1)
+        x = nn.log_softmax(x.astype(jnp.float32), axis=-1)
         return x
     
     @staticmethod
@@ -575,14 +609,32 @@ class PaddedLobPredModel(nn.Module):
                          n_book_pre_layers,
                          n_book_post_layers,
                          n_fused_layers,
-                         h_size_ema):
+                         h_size_ema,
+                         is_transformer=False,
+                         transformer_config=None,
+                         transformer_config_book=None,
+                         ssm_type='s5', **gdn_kwargs):
         # Use a dummy key since the default state init fn is just zeros.
-
-
-        h_tuple_init=(StackedEncoderModel.initialize_carry(batch_size,hidden_size,n_message_layers),
-                      LobBookModel.initialize_carry(batch_size,hidden_size,n_book_pre_layers,n_book_post_layers),
-                      StackedEncoderModel.initialize_carry(batch_size,hidden_size,n_fused_layers),
-                      (jnp.zeros((batch_size,1,h_size_ema)),jnp.ones((batch_size,1,1))))
+        h_tuple_init = (
+            StackedEncoderModel.initialize_carry(
+                batch_size, hidden_size, n_message_layers,
+                is_transformer=is_transformer,
+                transformer_config=transformer_config,
+                ssm_type=ssm_type, **gdn_kwargs),
+            LobBookModel.initialize_carry(
+                batch_size, hidden_size, n_book_pre_layers, n_book_post_layers,
+                is_transformer=is_transformer,
+                transformer_config=transformer_config,
+                transformer_config_book=transformer_config_book,
+                ssm_type=ssm_type, **gdn_kwargs),
+            StackedEncoderModel.initialize_carry(
+                batch_size, hidden_size, n_fused_layers,
+                is_transformer=is_transformer,
+                transformer_config=transformer_config,
+                ssm_type=ssm_type, **gdn_kwargs),
+            (jnp.zeros((batch_size, 1, h_size_ema)),
+             jnp.ones((batch_size, 1, 1))),
+        )
         return h_tuple_init
 
 split_rngs_args={"params": False, "dropout": True}
