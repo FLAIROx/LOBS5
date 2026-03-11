@@ -216,7 +216,9 @@ if [ "${SLURM_NNODES:-1}" -ge 8 ]; then
   # --- Existing resilience ---
   export FI_CXI_RDZV_RETRIES=100           # default=5, survive transient Slingshot fabric errors
   export FI_CXI_OFLOW_BUF_SIZE=8388608     # 8MB overflow buffer (prevent CXI ENOMEM under bursty traffic)
+  export FI_CXI_OFLOW_BUF_COUNT=6          # default=1, more overflow buffers for burst absorption
   export FI_CXI_REQ_BUF_SIZE=8388608       # 8MB request buffer (reduce flow control stalls)
+  export FI_CXI_REQ_BUF_COUNT=6            # default=1, more request buffers for 128+ GPU bursts
 
   # --- NEW: CXI hang prevention (CSCS + Isambard + ALCF consensus) ---
   # Disable eager messages to prevent CXI race condition under high concurrency.
