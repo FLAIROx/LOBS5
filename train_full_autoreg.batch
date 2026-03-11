@@ -357,10 +357,11 @@ echo "Training finished at: $(date)"
 echo "srun exit code: $SRUN_EXIT"
 echo "============================================"
 
-# Auto-resume on watchdog kill or NCCL deadlock
-# Exit codes: 0=success, 1=watchdog kill, 126=NCCL error, 137=SIGKILL
+# Auto-resume on watchdog kill, NCCL deadlock, OR graceful timeout save
+# Exit codes: 0=success/timeout-save, 1=watchdog kill, 126=NCCL error, 137=SIGKILL
+# Fires on non-zero exit (crash) OR zero exit with mid-epoch checkpoint (timeout save).
 # Only auto-resume for full training runs (no CURTAIL_EPOCHS) to avoid infinite loops
-if [ "$SRUN_EXIT" -ne 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RESUME:-}" ]; then
+if [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RESUME:-}" ]; then
   # Find latest checkpoint directory
   # Checkpoint layout: $WORKDIR/checkpoints/j<JOBID>_<WANDB>_<JOBID>/<step>/
   # Each step subdir contains the orbax checkpoint for that training step.
@@ -381,7 +382,7 @@ if [ "$SRUN_EXIT" -ne 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RES
       if [ -n "$LATEST_STEP" ]; then
         # This job saved a checkpoint — use it
         RESUME_RESTORE_PATH="$JOB_CKPT_DIR"
-        echo "[Auto-Resume] srun failed (exit=$SRUN_EXIT). Latest checkpoint: $JOB_CKPT_DIR step $LATEST_STEP"
+        echo "[Auto-Resume] srun exit=$SRUN_EXIT. Latest checkpoint: $JOB_CKPT_DIR step $LATEST_STEP"
 
         # Extract step_in_epoch from checkpoint metadata for mid-epoch resume.
         # Adjusts for BSZ change when node count differs between checkpoint and resubmit.
@@ -428,10 +429,12 @@ print(resume)
     fi
 
     # --- Resubmit if we have a restore path ---
-    if [ -n "$RESUME_RESTORE_PATH" ]; then
+    # On clean exit (0): only resubmit if RESUME_STEP is set (mid-epoch timeout save).
+    # On non-zero exit (crash): resubmit even without RESUME_STEP (fall back to restore).
+    if [ -n "$RESUME_RESTORE_PATH" ] && { [ -n "$RESUME_STEP" ] || [ "$SRUN_EXIT" -ne 0 ]; }; then
       NEXT_DEPTH=$((${NO_AUTO_RESUME_DEPTH:-0} + 1))
-      if [ "$NEXT_DEPTH" -gt 3 ]; then
-        echo "[Auto-Resume] WARNING: Reached 3 consecutive auto-resumes. Stopping to prevent infinite loop."
+      if [ "$NEXT_DEPTH" -gt 20 ]; then
+        echo "[Auto-Resume] WARNING: Reached 20 consecutive auto-resumes. Stopping to prevent infinite loop."
       else
         if [ -n "$RESUME_STEP" ]; then
           export RESUME_FROM_STEP="$RESUME_STEP"
