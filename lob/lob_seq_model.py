@@ -229,11 +229,22 @@ class LobBookModel(nn.Module):
                          ssm_type='s5', **gdn_kwargs):
         # Use a dummy key since the default state init fn is just zeros.
         pre_cfg = transformer_config_book if transformer_config_book else transformer_config
+        # GDN book pre-layers use H=d_book which auto-adjusts head count
+        pre_gdn_kwargs = gdn_kwargs
+        if ssm_type in ('gdn', 'kda') and 'd_book' in gdn_kwargs:
+            d_book = gdn_kwargs['d_book']
+            hd = gdn_kwargs['head_dim']
+            nh = gdn_kwargs['num_heads']
+            eff_nh = min(nh, max(1, d_book // hd))
+            eff_hd = min(hd, d_book)
+            eff_hvd = eff_hd * (gdn_kwargs['head_v_dim'] // hd)
+            pre_gdn_kwargs = dict(gdn_kwargs, num_heads=eff_nh,
+                                  head_dim=eff_hd, head_v_dim=eff_hvd)
         init_hidden = (
             [SequenceLayer.initialize_carry(
                 batch_size, hidden_size,
                 is_transformer=is_transformer, transformer_config=pre_cfg,
-                ssm_type=ssm_type, **gdn_kwargs)
+                ssm_type=ssm_type, **pre_gdn_kwargs)
              for _ in range(n_layers_pre)],
             [SequenceLayer.initialize_carry(
                 batch_size, hidden_size,

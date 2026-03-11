@@ -1336,7 +1336,8 @@ def sample_new(
                                             n_fused_layers=args.n_layers,
                                             h_size_ema=args.d_model,
                                             ssm_type=ssm_type,
-                                            num_heads=gdn_nh, head_dim=gdn_hd, head_v_dim=gdn_hvd)
+                                            num_heads=gdn_nh, head_dim=gdn_hd, head_v_dim=gdn_hvd,
+                                            d_book=getattr(args, 'd_book', 503))
         elif getattr(args, 'model_type', 's5') == 'transformer':
             n_heads = getattr(args, 'n_heads', 16)
             d_model = args.d_model
