@@ -390,7 +390,8 @@ class LOBSTER_Dataset(Dataset):
             # and hence the book state after the message is
             # already available (shifts by one)
             inference=False,
-            limit_seq_per_file=math.inf
+            limit_seq_per_file=math.inf,
+            wide_book_files=None,
             ) -> None:
 
 
@@ -410,6 +411,11 @@ class LOBSTER_Dataset(Dataset):
             self._book_cache = OrderedDict()
         else:
             self.use_book_data = False
+        # Optional wider book files for deeper simulator init
+        if wide_book_files is not None:
+            assert len(wide_book_files) == len(message_files)
+        self.wide_book_files = wide_book_files
+        self._wide_book_cache = OrderedDict()
         self.use_simple_book = use_simple_book
         self.book_transform = book_transform
         self.book_depth = book_depth
@@ -534,7 +540,20 @@ class LOBSTER_Dataset(Dataset):
             book = book[seq_start: seq_end + self.inference].copy()
     
             if self.return_raw_msgs:
-                book_l2_init = book[0, 3:].copy()
+                if self.wide_book_files is not None:
+                    # Load wider L2 init from separate (e.g. L100) book files
+                    if file_idx in self._wide_book_cache:
+                        wide_book = self._wide_book_cache[file_idx]
+                    else:
+                        wide_book = np.load(
+                            self.wide_book_files[file_idx], mmap_mode='r')
+                        if self.n_cache_files > 0:
+                            if len(self._wide_book_cache) >= self.n_cache_files:
+                                self._wide_book_cache.popitem(last=False)
+                            self._wide_book_cache[file_idx] = wide_book
+                    book_l2_init = wide_book[seq_start, 3:].copy()
+                else:
+                    book_l2_init = book[0, 3:].copy()
             # t0=time.time()
             # tranform from L2 (price volume) representation to fixed volume image 
             if self.book_transform:
