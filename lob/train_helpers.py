@@ -754,10 +754,13 @@ def train_epoch(
     auto_checkpoint_mode = (_ckpt_every_str == "auto")
     if auto_checkpoint_mode:
         _ckpt_every = 0
-        last_checkpoint_time = time.monotonic()
-        last_wandb_log_time = time.monotonic()
         AUTO_CKPT_INTERVAL = 1800   # 30 min
         AUTO_WANDB_INTERVAL = 600   # 10 min
+        # First checkpoint after ~10 min (not 30 min) to limit data loss on early NCCL deadlocks.
+        # Subsequent checkpoints revert to the normal 30-min interval.
+        EARLY_FIRST_CKPT_OFFSET = AUTO_CKPT_INTERVAL - 600  # triggers first save at ~10 min
+        last_checkpoint_time = time.monotonic() - EARLY_FIRST_CKPT_OFFSET
+        last_wandb_log_time = time.monotonic()
     else:
         _ckpt_every = int(_ckpt_every_str) if _ckpt_every_str != "0" else 0
 
