@@ -167,11 +167,13 @@ export SSM_LR_BASE=${SSM_LR_BASE:-5e-4}
 export LR_FACTOR=${LR_FACTOR:-1}
 export WARMUP_END=${WARMUP_END:-0.01}
 export OPT_CONFIG=${OPT_CONFIG:-standard}
-export WEIGHT_DECAY=${WEIGHT_DECAY:-0.05}
-# Muon-specific (only used when OPT_CONFIG=muon)
+# Muon needs WD=0.005 (not AdamW's 0.05) — mismatch causes NCCL deadlock within hundreds of steps.
 if [ "$OPT_CONFIG" = "muon" ]; then
+    export WEIGHT_DECAY=${WEIGHT_DECAY:-0.005}
     export MUON_LR=${MUON_LR:-0.02}
     export MUON_WD=${MUON_WD:-}  # defaults to WEIGHT_DECAY in Python if unset
+else
+    export WEIGHT_DECAY=${WEIGHT_DECAY:-0.05}
 fi
 
 echo "[*] Model config: 360M (24tok, padded_large)"
