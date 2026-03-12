@@ -205,8 +205,10 @@ if [ "$MINI_EPOCHS" -gt 1 ]; then
 fi
 
 # Local Steps: sync params across nodes every K steps (DiLoCo-style)
-# K=10 uses dual shard_map functions to avoid NCCL deadlock from conditional collectives
-LOCAL_STEPS_K=${LOCAL_STEPS_K:-10}
+# CAVEAT: K=10 was set for dual shard_map (6deff4cd) which was reverted (779fcf75)
+# for OOM. With jax.lax.cond path, pmean(params) runs every step anyway — K>0
+# only makes per-node gradients noisier with zero communication benefit.
+LOCAL_STEPS_K=${LOCAL_STEPS_K:-0}
 export LOCAL_STEPS_K
 
 # Gradient Accumulation: accumulate K micro-batches before cross-node AllReduce.
