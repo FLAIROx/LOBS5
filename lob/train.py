@@ -101,6 +101,7 @@ def train(args):
             use_simple_book=args.use_simple_book,
             book_transform=args.book_transform,
             n_data_workers=args.n_data_workers,
+            prefetch_factor=getattr(args, 'prefetch_factor', 2),
             shuffle_train=args.shuffle_train,
             rand_offset=args.random_offsets_train,
             debug_overfit=args.debug_overfit,

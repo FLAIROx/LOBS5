@@ -86,6 +86,8 @@ if __name__ == "__main__":
 						help="How many past messages to include in each sample")
 	parser.add_argument("--n_data_workers", type=int, default=0,
 		     			help="number of workers used in DataLoader")
+	parser.add_argument("--prefetch_factor", type=int, default=2,
+		     			help="DataLoader prefetch_factor (batches per worker to buffer)")
 
 	# Model Parameters
 	parser.add_argument("--n_message_layers", type=int, default=2,  # 2

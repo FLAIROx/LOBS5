@@ -331,7 +331,8 @@ python -u -B run_train.py \
     --book_transform=True \
     --masking=none \
     --num_devices="$GPUS_PER_NODE" \
-    --n_data_workers=12 \
+    --n_data_workers="${N_DATA_WORKERS:-12}" \
+    --prefetch_factor="${PREFETCH_FACTOR:-2}" \
     --debug_loading=False \
     --enable_profiler=False \
     --random_offsets_train=True \
