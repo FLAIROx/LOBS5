@@ -143,6 +143,11 @@ def train(args):
         if jax.process_count() > 1:
             mesh = initialize_mesh(jax.device_count(), hierarchical=use_hierarchical)
         else:
+            # Single-node: 1D mesh with 'data' axis — hierarchical 2D shard_map
+            # requires ('nodes', 'gpus') axes which don't exist in 1D mesh
+            if use_hierarchical:
+                print("[Sharding] Single-node: forcing hierarchical=False (1D mesh)")
+            use_hierarchical = False
             mesh = initialize_mesh(args.num_devices)
 
         restored_metrics = {}
