@@ -44,9 +44,9 @@ def transform_L2_state(
     book = jnp.where(book < 0, -price_levels-1, book)
 
     mybook = jnp.zeros(price_levels, dtype=jnp.int32)
-    mybook = mybook.at[book[:, 0]].set(book[:, 1])
+    mybook = mybook.at[book[:, 0].astype(jnp.int32)].set(book[:, 1])
 
-    # Norm seconds to be in [0,1] representing percent of day. 
+    # Norm seconds to be in [0,1] representing percent of day.
     delta_p_mid_and_time.at[1].set((delta_p_mid_and_time[1]-34200)/23400)
     # Norm nanoseconds to be fraction of a second
     delta_p_mid_and_time.at[2].set(delta_p_mid_and_time[2]/1e9)
@@ -91,9 +91,9 @@ def transform_L2_state_gpu(
     book = jnp.where(book < 0, -price_levels-1, book)
 
     mybook = jnp.zeros(price_levels, dtype=jnp.int32)
-    mybook = mybook.at[book[:, 0]].set(book[:, 1])
-    
-    # Norm seconds to be in [0,1] representing percent of day. 
+    mybook = mybook.at[book[:, 0].astype(jnp.int32)].set(book[:, 1])
+
+    # Norm seconds to be in [0,1] representing percent of day.
     delta_p_mid_and_time=delta_p_mid_and_time.astype(jnp.float32)
     delta_p_mid_and_time=delta_p_mid_and_time.at[1].set((delta_p_mid_and_time[1]-34200)/23400)
     # Norm nanoseconds to be fraction of a second

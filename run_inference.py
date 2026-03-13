@@ -164,7 +164,6 @@ if __name__ == "__main__":
     args = load_metadata(ckpt_path)
     args.num_devices=1
     args.bsz=1
-    args.micro_bsz=1
 
 
     new_train_state, model_cls = init_train_state(
