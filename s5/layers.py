@@ -199,7 +199,15 @@ class SequenceLayer(nn.Module):
             nh = gdn_kwargs['num_heads']
             hd = gdn_kwargs['head_dim']
             hvd = gdn_kwargs['head_v_dim']
-            return jax.numpy.zeros((batch_size, 1, nh, hvd, hd), dtype=jax.numpy.float32)
+            use_conv = gdn_kwargs.get('use_conv', True)
+            conv_k = gdn_kwargs.get('conv_kernel_size', 4)
+            S = jax.numpy.zeros((batch_size, 1, nh, hvd, hd), dtype=jax.numpy.float32)
+            if use_conv:
+                q_buf = jax.numpy.zeros((batch_size, conv_k - 1, nh * hd), dtype=jax.numpy.float32)
+                k_buf = jax.numpy.zeros((batch_size, conv_k - 1, nh * hd), dtype=jax.numpy.float32)
+                v_buf = jax.numpy.zeros((batch_size, conv_k - 1, nh * hvd), dtype=jax.numpy.float32)
+                return (S, (q_buf, k_buf, v_buf))
+            return S
         if is_transformer and transformer_config is not None:
             from s5.transformer import TransformerBlock
             cfg = transformer_config

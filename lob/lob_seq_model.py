@@ -510,7 +510,7 @@ class PaddedLobPredModel(nn.Module):
         elif self.mode in ["none"]:
             pass
         elif self.mode in ['ema']:
-            x,_=ewma_vectorized_safe(x,2 /(22 + 1.0),jnp.zeros((1,x.shape[1])),jnp.array(1))
+            x,_=ewma_vectorized_safe(x,2 /(24 + 1.0),jnp.zeros((1,x.shape[1])),jnp.array(1))
             #FIXME: Provide the ntoks argument for averaging as an arg.
         else:
             raise NotImplementedError("Mode must be in ['pool', 'last','none','ema']")
@@ -561,7 +561,7 @@ class PaddedLobPredModel(nn.Module):
         elif self.mode in ['ema']:
              print("x",x)
              print("ema",ema)
-             x,fo=ewma_vectorized_safe(x,2 /(22 + 1.0),fo,override)
+             x,fo=ewma_vectorized_safe(x,2 /(24 + 1.0),fo,override)
         else:
             raise NotImplementedError("Must double check before running rnn")
 
@@ -601,7 +601,7 @@ class PaddedLobPredModel(nn.Module):
         elif self.mode in ["none"]:
             pass
         elif self.mode in ['ema']:
-            x,_=ewma_vectorized_safe(x,2 /(22 + 1.0),jnp.zeros((1,x.shape[1])),jnp.array(1))
+            x,_=ewma_vectorized_safe(x,2 /(24 + 1.0),jnp.zeros((1,x.shape[1])),jnp.array(1))
             #FIXME: Provide the ntoks argument for averaging as an arg.
         else:
             raise NotImplementedError("Mode must be in ['pool', 'last','none','ema']")

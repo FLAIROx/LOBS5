@@ -1337,7 +1337,9 @@ def sample_new(
                                             h_size_ema=args.d_model,
                                             ssm_type=ssm_type,
                                             num_heads=gdn_nh, head_dim=gdn_hd, head_v_dim=gdn_hvd,
-                                            d_book=getattr(args, 'd_book', 503))
+                                            d_book=getattr(args, 'd_book', 503),
+                                            use_conv=getattr(args, 'gdn_use_conv', True),
+                                            conv_kernel_size=4)
         elif getattr(args, 'model_type', 's5') == 'transformer':
             n_heads = getattr(args, 'n_heads', 16)
             d_model = args.d_model

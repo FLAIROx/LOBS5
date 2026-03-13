@@ -37,29 +37,43 @@ class CausalDepthwiseConv1d(nn.Module):
     channels: int
     kernel_size: int = 4
 
-    @nn.compact
-    def __call__(self, x):
-        # x: (L, C)
+    def setup(self):
         k = self.kernel_size
         C = self.channels
-        kernel = self.param('kernel', lecun_normal(), (k, C))  # (k, C)
-        bias = self.param('bias', nn.initializers.zeros, (C,))
-        # Left-pad: (L, C) -> (L + k - 1, C)
-        x_padded = jnp.pad(x, ((k - 1, 0), (0, 0)))
-        # Depthwise conv: feature_group_count=C means each channel is convolved independently
-        # RHS shape for ('NTC', 'TIO', 'NTC'): (k, I_per_group=1, O=C)
-        kernel_reshaped = kernel[:, :, None]  # (k, C, 1)
-        # Transpose to (k, 1, C) for TIO format where I=1 per group, O=C
-        kernel_reshaped = kernel[:, None, :]  # (k, 1, C)
+        self.kernel = self.param('kernel', lecun_normal(), (k, C))
+        self.bias = self.param('bias', nn.initializers.zeros, (C,))
+
+    def _conv(self, x_with_context):
+        """Shared depthwise conv logic. x_with_context: (k-1+L, C) → (L, C)."""
+        kernel_reshaped = self.kernel[:, None, :]  # (k, 1, C)
         windows = jax.lax.conv_general_dilated(
-            x_padded[None, :, :],           # (1, L+k-1, C)
-            kernel_reshaped,                # (k, 1, C)
+            x_with_context[None, :, :],
+            kernel_reshaped,
             window_strides=(1,),
             padding='VALID',
             dimension_numbers=('NTC', 'TIO', 'NTC'),
-            feature_group_count=C,
-        )  # (1, L, C)
-        return windows[0] + bias
+            feature_group_count=self.channels,
+        )
+        return windows[0] + self.bias
+
+    def __call__(self, x):
+        # x: (L, C) — training path: zero-pad left
+        x_padded = jnp.pad(x, ((self.kernel_size - 1, 0), (0, 0)))
+        return self._conv(x_padded)
+
+    def step(self, buffer, x):
+        """Stateful forward for RNN inference: use buffer instead of zero-padding.
+
+        Args:
+            buffer: (k-1, C) — previous k-1 inputs
+            x: (L, C) — current input (typically L=1)
+        Returns:
+            new_buffer: (k-1, C), y: (L, C)
+        """
+        x_cat = jnp.concatenate([buffer, x], axis=0)  # (k-1+L, C)
+        y = self._conv(x_cat)
+        new_buffer = x_cat[-(self.kernel_size - 1):]
+        return new_buffer, y
 
 
 # ---------------------------------------------------------------------------
@@ -227,11 +241,13 @@ class GDNSSM(nn.Module):
         """Fused recurrent forward (inference mode).
 
         Args:
-            hidden: (1, nh, hvd, hd) float32 — the state matrix S
+            hidden: (S_carry, (q_buf, k_buf, v_buf)) if use_conv else S_carry
+                    S_carry: (1, nh, hvd, hd) float32
+                    q_buf/k_buf: (k-1, nh*hd), v_buf: (k-1, nh*hvd)
             input_sequence: (L, H)
             resets: (L,) or None — reset signals (unused for now, kept for interface)
         Returns:
-            new_hidden: (1, nh, hvd, hd) float32
+            new_hidden: same structure as hidden
             output: (L, H)
         """
         L = input_sequence.shape[0]
@@ -240,15 +256,25 @@ class GDNSSM(nn.Module):
         hd = self.eff_head_dim
         hvd = self.head_v_dim
 
+        # --- Unpack hidden state ---
+        if self.use_conv:
+            S_carry, (q_buf, k_buf, v_buf) = hidden
+        else:
+            S_carry = hidden
+
         # --- Projections ---
         q = self.q_proj(x)  # (L, nh*hd)
         k = self.k_proj(x)
         v = self.v_proj(x)  # (L, nh*hvd)
 
+        # --- Conv1d with stateful buffers (key fix for per-token inference) ---
         if self.use_conv:
-            q = nn.silu(self.q_conv(q))
-            k = nn.silu(self.k_conv(k))
-            v = nn.silu(self.v_conv(v))
+            q_buf, q = self.q_conv.step(q_buf, q)
+            k_buf, k = self.k_conv.step(k_buf, k)
+            v_buf, v = self.v_conv.step(v_buf, v)
+            q = nn.silu(q)
+            k = nn.silu(k)
+            v = nn.silu(v)
 
         # L2 normalize; scale q by 1/sqrt(head_dim) (per FLA/Qwen3 reference)
         q = q.reshape(L, nh, hd)
@@ -271,7 +297,7 @@ class GDNSSM(nn.Module):
         g = nn.silu(self.g_proj(x)).reshape(L, nh, hvd)
 
         # --- Sequential scan ---
-        S_init = hidden[0]  # (nh, hvd, hd)
+        S_init = S_carry[0]  # (nh, hvd, hd)
 
         def rnn_step(S, inp):
             q_t, k_t, v_t, beta_t, alpha_log_t, g_t = inp
@@ -292,7 +318,6 @@ class GDNSSM(nn.Module):
             o_t = jnp.einsum('nvk,nk->nv', S, q_t)  # (nh, hvd)
             return S, o_t
 
-        # beta: (L, nh) -> need (L, nh, 1) for elementwise with delta (nh, hvd)
         # Pack inputs for scan
         scan_inputs = (
             q,                 # (L, nh, hd)
@@ -318,7 +343,11 @@ class GDNSSM(nn.Module):
         Du = input_sequence * self.D[None, :]
         output = o_seq + Du
 
-        return S_final[None], output  # (1, nh, hvd, hd), (L, H)
+        # --- Pack hidden state ---
+        if self.use_conv:
+            return (S_final[None], (q_buf, k_buf, v_buf)), output
+        else:
+            return S_final[None], output
 
 
 # ---------------------------------------------------------------------------
