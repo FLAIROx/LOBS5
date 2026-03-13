@@ -270,6 +270,14 @@ def train(args):
 
     # Create LR schedule functions for wandb logging (optax manages LR inside JIT)
     total_steps = steps_per_epoch * args.epochs
+    # COSINE_STEPS override: decouple cosine period from dataset size.
+    # When training << 1 epoch, set COSINE_STEPS to your actual training budget
+    # so the LR decays meaningfully (e.g. COSINE_STEPS=200000 for ~200k steps).
+    cosine_steps_override = int(os.environ.get('COSINE_STEPS', '0'))
+    if cosine_steps_override > 0:
+        total_steps = cosine_steps_override
+        print(f"[Schedule] COSINE_STEPS override: cosine period = {total_steps} "
+              f"(dataset epoch = {steps_per_epoch * args.epochs})")
     warmup_end_step = int(steps_per_epoch * args.warmup_end)
 
     effective_lr_min = args.lr_min if args.lr_min > 0 else lr * LR_MIN_FRACTION

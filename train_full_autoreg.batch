@@ -211,6 +211,12 @@ fi
 LOCAL_STEPS_K=${LOCAL_STEPS_K:-0}
 export LOCAL_STEPS_K
 
+# Cosine LR period override: decouple cosine decay from dataset epoch length.
+# Default 0 = use dataset epoch (848k steps). Set to actual training budget
+# so LR decays meaningfully (e.g. COSINE_STEPS=200000 for ~200k-step runs).
+# Chinchilla convention: cosine period = compute budget, not dataset size.
+export COSINE_STEPS=${COSINE_STEPS:-0}
+
 # Gradient Accumulation: accumulate K micro-batches before cross-node AllReduce.
 # Effective BSZ = micro_bsz * gpus_per_node * nodes * GRAD_ACCUM_STEPS.
 # Use to match large-cluster BSZ with fewer nodes (e.g. 128N K=4 ≈ 512N K=1).
