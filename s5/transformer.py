@@ -154,8 +154,16 @@ class TransformerBlock(nn.Module):
 
         Accesses nn.MultiHeadDotProductAttention's projection weights
         directly via self.attn.variables (no param name changes needed).
+
+        hidden arrives as (k_cache, v_cache, pos) where shapes may carry
+        a leading-1 placeholder dim from initialize_cache (for inner vmap
+        compatibility).  We squeeze it so the attention logic works on 3D.
         """
         k_cache, v_cache, pos = hidden
+        # Squeeze leading-1 from initialize_cache: (1, nh, L, hd) → (nh, L, hd)
+        k_cache = jnp.squeeze(k_cache, axis=0) if k_cache.ndim == 4 else k_cache
+        v_cache = jnp.squeeze(v_cache, axis=0) if v_cache.ndim == 4 else v_cache
+        pos = jnp.squeeze(pos) if pos.ndim >= 1 else pos
         # k_cache: (nh, max_len, hd), v_cache: same, pos: () scalar
 
         L = input_sequence.shape[0]
@@ -228,9 +236,10 @@ class TransformerBlock(nn.Module):
         """Create empty KV cache for one Transformer layer.
 
         Returns 4D tensors with leading dim=1 — placeholder batch dim
-        for inner vmap compatibility (same pattern as S5's (1, 1, ssm_size)).
-        Inner vmap(in_axes=0) strips axis 0, __call_rnn__ works on 3D,
-        vmap re-adds axis 0 on return.
+        for the inner nn.vmap (BatchPaddedLobPredModel).  The outer vmap
+        (generate_batched) handles the real batch; the inner vmap maps
+        over this axis-0.  ``__call_rnn__`` squeezes the leading dim so
+        the attention logic works on 3D (n_heads, max_cache_len, head_dim).
         """
         k = jnp.zeros((1, n_heads, max_cache_len, head_dim), dtype=dtype)
         v = jnp.zeros((1, n_heads, max_cache_len, head_dim), dtype=dtype)
