@@ -116,6 +116,9 @@ if __name__ == "__main__":
 							 " pool: mean pooling \\" \
 							 "last: take last element \\" \
 							 "ema : take exponential moving avg across all")
+	parser.add_argument("--ssm_type", type=str, default="s5",
+						choices=["s5", "gdn", "mamba2"],
+						help="SSM backend: s5 (LTI), gdn (selective+delta), mamba2 (selective SSD)")
 	parser.add_argument("--activation_fn", default="half_glu1", type=str,
 						choices=["full_glu", "half_glu1", "half_glu2", "gelu"])
 	parser.add_argument("--conj_sym", type=str2bool, default=True,

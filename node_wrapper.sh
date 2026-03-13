@@ -353,6 +353,7 @@ python -u -B run_train.py \
     ${RESTORE_PATH:+--restore=$RESTORE_PATH} \
     ${RESTORE_STEP:+--restore_step=$RESTORE_STEP} \
     ${RESUME_FROM_STEP:+--resume_from_step=$RESUME_FROM_STEP} \
+    ${SSM_TYPE:+--ssm_type=$SSM_TYPE} \
     ${HIERARCHICAL:+--hierarchical=$HIERARCHICAL} \
     ${LOCAL_STEPS_K:+--local_steps_k=$LOCAL_STEPS_K} \
     ${GRAD_ACCUM_STEPS:+--grad_accum_steps=$GRAD_ACCUM_STEPS} \
