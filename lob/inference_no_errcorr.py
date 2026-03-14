@@ -1008,15 +1008,18 @@ def _sample_fields_1tok(field_logits_list, sample_top_n, rng):
         rng, rng_ = jax.random.split(rng)
         logits_i = jnp.squeeze(logits)  # (1, 1, V_i) or (1, V_i) → (V_i,)
         # Block special tokens during generation
-        logits_i = logits_i.at[:N_SPECIAL_TOKENS].set(-1e9)
+        # logits_i is already log_softmax from MultiFieldDecoder
+        logits_i = logits_i.at[:N_SPECIAL_TOKENS].set(-jnp.inf)
         if sample_top_n == 1:
             chosen = jnp.argmax(logits_i)
         elif sample_top_n > 0:
             top_k_vals, top_k_idx = jax.lax.top_k(logits_i, sample_top_n)
-            probs = jax.nn.softmax(top_k_vals)
+            probs = jnp.exp(top_k_vals)
+            probs = probs / probs.sum()  # renormalize after top-k
             chosen = jax.random.choice(rng_, top_k_idx, p=probs)
         else:
-            probs = jax.nn.softmax(logits_i)
+            probs = jnp.exp(logits_i)
+            probs = probs / probs.sum()  # renormalize after blocking specials
             chosen = jax.random.choice(rng_, jnp.arange(logits_i.shape[0]), p=probs)
         samples.append(chosen)
     return jnp.stack(samples), rng
@@ -1675,14 +1678,15 @@ def sample_new(
         print(m_seq.shape)
         # encoded data
         if is_1tok:
-            # Reshape flat global tokens → (batch, n_msgs, 24) → convert to local
-            # Dataset may have +1 overlap token; truncate to clean multiple of 24
-            n_clean = (m_seq.shape[1] // N_FIELDS) * N_FIELDS
+            # Dataset prepends a single START token → strip it before reshaping
+            # to (batch, n_msgs, 24) so field positions align correctly.
+            m_seq_flat = m_seq[:, 1:]  # drop START token at position 0
+            n_clean = (m_seq_flat.shape[1] // N_FIELDS) * N_FIELDS
             n_total_msgs = n_clean // N_FIELDS
-            m_seq_2d = m_seq[:, :n_clean].reshape(batch_size, n_total_msgs, N_FIELDS)
+            m_seq_2d = m_seq_flat[:, :n_clean].reshape(batch_size, n_total_msgs, N_FIELDS)
             m_seq_2d = global_to_local_jax(m_seq_2d)  # broadcasts over (batch, n_msgs, 24)
             m_seq_inp = m_seq_2d[:, :n_cond_msgs+1]   # (batch, n_cond+1, 24)
-            m_seq_eval = m_seq[:, (n_cond_msgs+1)*N_FIELDS:]  # keep flat for debug/save
+            m_seq_eval = m_seq_flat[:, (n_cond_msgs+1)*N_FIELDS:]  # keep flat for debug/save
         else:
             m_seq_inp = m_seq[:, : seq_len_cond+1]
             m_seq_eval = m_seq[:, (seq_len_cond+1): ]
