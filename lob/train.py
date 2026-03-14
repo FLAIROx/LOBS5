@@ -112,6 +112,7 @@ def train(args):
             data_root=getattr(args, 'data_root', None),
             train_date_range=getattr(args, 'train_date_range', None),
             test_date_range=getattr(args, 'test_date_range', None),
+            token_mode=getattr(args, 'token_mode', '24tok'),
         )
 
     # Extract per-ticker test loaders if available
@@ -204,13 +205,24 @@ def train(args):
                 state = remap_train_state_step(state, remapped_step)
 
         val_model = model_cls(training=False, step_rescale=1)
-        init_hidden=model_cls().initialize_carry(batch_size=args.micro_bsz,
-                                                hidden_size=(ssm_size // pow(2,int(args.conj_sym))),
-                                                n_message_layers=args.n_message_layers,
-                                                n_book_pre_layers=args.n_book_pre_layers ,
-                                                n_book_post_layers=args.n_book_post_layers,
-                                                n_fused_layers=args.n_layers,
-                                                h_size_ema=ssm_size)
+        token_mode = getattr(args, 'token_mode', '24tok')
+        if token_mode == '1tok':
+            init_hidden = model_cls().initialize_carry(
+                batch_size=args.micro_bsz,
+                hidden_size=(ssm_size // pow(2, int(args.conj_sym))),
+                n_book_pre_layers=args.n_book_pre_layers,
+                n_book_post_layers=args.n_book_post_layers,
+                n_fused_layers=args.n_layers,
+                h_size_ema=ssm_size)
+        else:
+            init_hidden = model_cls().initialize_carry(
+                batch_size=args.micro_bsz,
+                hidden_size=(ssm_size // pow(2, int(args.conj_sym))),
+                n_message_layers=args.n_message_layers,
+                n_book_pre_layers=args.n_book_pre_layers,
+                n_book_post_layers=args.n_book_post_layers,
+                n_fused_layers=args.n_layers,
+                h_size_ema=ssm_size)
 
         # Move state to host numpy (device-agnostic) then shard to global mesh.
         # This handles both init (jax array on local device) and restore (numpy from checkpoint).

@@ -104,6 +104,8 @@ if __name__ == "__main__":
     # Model code override (parsed early in sys.argv for path injection, declared here for --help)
     parser.add_argument("--model_code_dir", type=str, default=None,
                         help="Override s5/lob/preproc modules from this directory (injected at sys.path[0])")
+    parser.add_argument("--token_mode", type=str, default='24tok', choices=['24tok', '1tok'],
+                        help="Token mode: '24tok' (autoregressive per-token) or '1tok' (per-message)")
 
     run_args = parser.parse_args()
 
@@ -136,8 +138,15 @@ if __name__ == "__main__":
     n_gen_msgs = run_args.n_gen_msgs
     n_messages_conditional = run_args.n_cond_msgs
     n_eval_messages = n_gen_msgs  # how many to load from dataset
-    eval_seq_len = (n_eval_messages-1) * Message_Tokenizer.MSG_LEN
-    cond_seq_len = (n_messages_conditional) * Message_Tokenizer.MSG_LEN
+    token_mode = run_args.token_mode
+    if token_mode == '1tok':
+        # 1tok: seq lengths still in tokens for dataset loading (same data format)
+        # but cond_seq_len is only used for slicing in sample_new
+        eval_seq_len = (n_eval_messages-1) * Message_Tokenizer.MSG_LEN
+        cond_seq_len = n_messages_conditional * Message_Tokenizer.MSG_LEN
+    else:
+        eval_seq_len = (n_eval_messages-1) * Message_Tokenizer.MSG_LEN
+        cond_seq_len = (n_messages_conditional) * Message_Tokenizer.MSG_LEN
     data_levels = 10
     # TODO: deprecated - remove from functions
     sim_book_levels = 20 # 10  # order book simulator levels
@@ -250,7 +259,10 @@ if __name__ == "__main__":
         ckpt['model'] = _dedup.replace(params=_params)
 
     state = ckpt['model']
-    print(state.params['message_encoder']['encoder']['embedding'].shape)
+    if 'message_encoder' in state.params:
+        print(state.params['message_encoder']['encoder']['embedding'].shape)
+    else:
+        print(f"[1tok model] field_embedding keys: {list(state.params.get('field_embedding', {}).keys())}")
 
 
     import chex
@@ -351,5 +363,6 @@ if __name__ == "__main__":
         overfit_debug=overfit_debug,
         sample_indices=rank_indices,
         wide_levels=run_args.wide_levels,
+        token_mode=token_mode,
     )
     print(f"[Rank {rank}/{world_size}] Generation time for {n_samples} sequences across {batch_size} batch size: {time()-start}")

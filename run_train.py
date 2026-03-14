@@ -218,6 +218,10 @@ if __name__ == "__main__":
 				help="Gradient accumulation: accumulate K micro-batches before AllReduce. "
 				     "Effective BSZ = micro_bsz * num_devices * process_count * K. "
 				     "Default 1 (no accumulation). Mutually exclusive with local_steps_k>0.")
+	parser.add_argument("--token_mode", type=str, default="24tok",
+				choices=["24tok", "1tok"],
+				help="Token encoding mode: '24tok' = 24 tokens per message (12000-step seq), "
+				     "'1tok' = 1 token per message via per-field embedding sum (500-step seq)")
 
 	args = parser.parse_args()
 

@@ -18,6 +18,7 @@ from flax.training import checkpoints
 from flax import linen as nn
 from orbax import checkpoint
 from lob.encoding import Vocab
+from lob.encoding_1tok import FIELD_VOCAB_SIZES_WITH_SPECIAL
 from lob.lob_seq_model import BatchFullLobPredModel, BatchLobPredModel, BatchPaddedLobPredModel,OldBatchPaddedLobPredModel, FullLobPredModel#, ParFullLobPredModel
 
 #from lob.lob_seq_model import BatchLobPredModel
@@ -442,12 +443,44 @@ def init_train_state(
             bidirectional=args.bidirectional
         )
     
-    if args.use_book_data:
+    token_mode = getattr(args, 'token_mode', '24tok')
+
+    if token_mode == '1tok' and args.use_book_data:
+        from lob.lob_seq_model import BatchOneTokenPaddedLobPredModel
+        model_cls = partial(
+            BatchOneTokenPaddedLobPredModel,
+            ssm=ssm_init_fn,
+            field_vocab_sizes=FIELD_VOCAB_SIZES_WITH_SPECIAL,
+            d_model=args.d_model,
+            d_book=book_dim,
+            n_fused_layers=args.n_layers,
+            n_book_pre_layers=args.n_book_pre_layers,
+            n_book_post_layers=args.n_book_post_layers,
+            activation=args.activation_fn,
+            dropout=args.p_dropout,
+            mode=args.mode,
+            prenorm=args.prenorm,
+            batchnorm=args.batchnorm,
+            bn_momentum=args.bn_momentum,
+            # MoE parameters
+            use_moe=getattr(args, 'use_moe', False),
+            num_experts=getattr(args, 'num_experts', 128),
+            top_k=getattr(args, 'moe_top_k', 8),
+            d_ff=getattr(args, 'd_ff', None) or args.d_model,
+            num_shared_experts=getattr(args, 'num_shared_experts', 1),
+            moe_every_n=getattr(args, 'moe_every_n', 2),
+            moe_capacity_factor=getattr(args, 'moe_capacity_factor', 1.25),
+            moe_lb_weight=getattr(args, 'moe_lb_weight', 0.01),
+            moe_z_loss_weight=getattr(args, 'moe_z_loss_weight', 0.001),
+        )
+        padded = False
+
+    elif args.use_book_data:
         # if args.num_devices > 1:
         #     model_cls = ParFullLobPredModel
         # else:
         #     model_cls = BatchFullLobPredModel
-        
+
 
         if args.merging == 'projected':
             model_cls = partial(
@@ -585,6 +618,7 @@ def init_train_state(
         dt_global=args.dt_global,
         num_devices=args.num_devices,
         model_type=model_type,
+        token_mode=token_mode,
     )
 
     return state, model_cls

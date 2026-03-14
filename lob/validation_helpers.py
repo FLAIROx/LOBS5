@@ -346,6 +346,55 @@ def apply_model(
     return hidden_state,logits
 
 
+@partial(jax.jit, static_argnums=(4, 5, 6))
+def apply_model_1tok(
+        hidden_state: Tuple,
+        m_seq: jax.Array,
+        b_seq: jax.Array,
+        state: TrainState,
+        model: flax.linen.Module,
+        batchnorm: bool,
+        shift_start: bool,
+    ):
+    """apply_model variant for 1tok: handles (L, 24) message input and 2-done tuple."""
+    batch_inputs = (
+        np.expand_dims(m_seq, axis=0),
+        np.expand_dims(b_seq, axis=0))
+    batch_integration_timesteps = (
+        np.ones((1, m_seq.shape[0])),
+        np.ones((1, m_seq.shape[0]))
+    )
+    batch_inputs = repeat_book(*batch_inputs, shift_start)
+
+    # Explicit (1, L) dones — NOT zeros_like(batch_inputs[0]) which would be (1, L, 24)
+    L = m_seq.shape[0]
+    dones = (np.zeros((1, L), dtype=bool),) * 2  # d_b, d_f (no d_m for 1tok)
+
+    if batchnorm:
+        hidden_state, logits = model.apply(
+            {"params": state.params, "batch_stats": state.batch_stats},
+            hidden_state, *batch_inputs, *dones, *batch_integration_timesteps,
+            method="__call_rnn__")
+    else:
+        hidden_state, logits = model.apply(
+            {"params": state.params},
+            hidden_state, *batch_inputs, *dones, *batch_integration_timesteps,
+            method="__call_rnn__")
+
+    return hidden_state, logits
+
+
+def get_first_time_1tok(m_seq_cond, encoder):
+    """Extract time from last conditioning message (1tok format: local indices)."""
+    from lob.encoding_1tok import local_to_global_jax
+    last_msg_local = m_seq_cond[-1]  # (24,) local indices
+    last_msg_global = local_to_global_jax(last_msg_local)
+    # time fields at positions 10:15 (time_s_0, time_s_1, time_ns_0, time_ns_1, time_ns_2)
+    time_toks = last_msg_global[10:15]
+    time_s, time_ns = encoding.decode_time(time_toks, encoder)
+    return (time_s, time_ns)
+
+
 @jax.jit
 def filter_valid_pred(
         pred: jax.Array,

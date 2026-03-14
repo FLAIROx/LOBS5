@@ -176,7 +176,20 @@ class LOBSTER_Dataset(Dataset):
                             seq[:-1]])
         # ob_seq=ob_seq[:-1]
         return (seq,order_books), y
-    
+
+    @staticmethod
+    def no_mask_1tok(seq, order_books=None):
+        """1-token-per-message masking: shift by 1 message row, prepend START_ROW.
+
+        seq: (n_messages, 24) int32 local per-field indices
+        Returns: ((shifted_seq, order_books), labels)
+        """
+        seq = seq.copy()
+        y = seq.copy()
+        start_row = np.full((1, seq.shape[1]), Vocab.START_TOK, dtype=seq.dtype)
+        seq = np.concatenate([start_row, seq[:-1]], axis=0)
+        return (seq, order_books), y
+
     @staticmethod
     def inference_mask(seq,order_books=None):
         """ Identity function, shouldn't even return the labels.
@@ -392,6 +405,7 @@ class LOBSTER_Dataset(Dataset):
             inference=False,
             limit_seq_per_file=math.inf,
             wide_book_files=None,
+            token_mode='24tok',
             ) -> None:
 
 
@@ -422,13 +436,20 @@ class LOBSTER_Dataset(Dataset):
         self.return_raw_msgs = return_raw_msgs
         self.num_days = len(self.message_files)
         self.n_messages = n_messages
+        self.token_mode = token_mode
 
         self.n_cache_files = n_cache_files
         self._message_cache = OrderedDict()
         self.vocab = Vocab()
         self.mask_fn = mask_fn
-        if self.mask_fn==LOBSTER_Dataset.no_mask or self.mask_fn==LOBSTER_Dataset.inference_mask:
-            self.seq_len=self.n_messages* Message_Tokenizer.MSG_LEN
+        # Override mask_fn for 1tok mode
+        if self.token_mode == '1tok':
+            self.mask_fn = LOBSTER_Dataset.no_mask_1tok
+        if self.mask_fn in (LOBSTER_Dataset.no_mask, LOBSTER_Dataset.inference_mask, LOBSTER_Dataset.no_mask_1tok):
+            if self.token_mode == '1tok':
+                self.seq_len = self.n_messages
+            else:
+                self.seq_len = self.n_messages * Message_Tokenizer.MSG_LEN
         else:
             raise NotImplementedError("Need to confirm syntax for other mask funcs to ensure backward compat.")
         self.rng = np.random.default_rng(seed)
@@ -465,7 +486,7 @@ class LOBSTER_Dataset(Dataset):
             else:
                 b = np.load(self.book_files[0], mmap_mode='r', allow_pickle=True)
                 self.d_book = b.shape[1]
-            if self.mask_fn==LOBSTER_Dataset.no_mask or self.mask_fn==LOBSTER_Dataset.inference_mask:
+            if self.mask_fn in (LOBSTER_Dataset.no_mask, LOBSTER_Dataset.inference_mask, LOBSTER_Dataset.no_mask_1tok):
                 self.L_book=self.n_messages
             else:
                 raise NotImplementedError("Need to confirm syntax for other mask funcs to ensure backward compat.")
@@ -572,22 +593,33 @@ class LOBSTER_Dataset(Dataset):
             # apply mask and extract prediction target token
             
             
-            X = X.reshape(-1)
-            X, y = self.mask_fn(np.array(X), book)
-            X,book=X
-            # print(book[0])
-            y=y.reshape(-1)
-            
-            # TODO: look into aux_data (could we still use time when available?)
-            ret_tuple = X, y, book
-            
+            if self.token_mode == '1tok':
+                from lob.encoding_1tok import global_to_local
+                X = global_to_local(np.array(X))  # (n_messages, 24) local indices
+                X, y = self.mask_fn(X, book)
+                X, book = X
+                ret_tuple = X, y, book
+            else:
+                X = X.reshape(-1)
+                X, y = self.mask_fn(np.array(X), book)
+                X,book=X
+                # print(book[0])
+                y=y.reshape(-1)
+                ret_tuple = X, y, book
+
         else:
-            # # apply mask and extract prediction target token
-            X = X.reshape(-1)
-            X, y = self.mask_fn(X)
-            X,book=X
-            y=y.reshape(-1)
-            ret_tuple = X, y
+            if self.token_mode == '1tok':
+                from lob.encoding_1tok import global_to_local
+                X = global_to_local(np.array(X))
+                X, y = self.mask_fn(X)
+                X, book = X
+                ret_tuple = X, y
+            else:
+                X = X.reshape(-1)
+                X, y = self.mask_fn(X)
+                X,book=X
+                y=y.reshape(-1)
+                ret_tuple = X, y
 
         if self.return_raw_msgs:
             if self.use_book_data:
@@ -790,6 +822,7 @@ class LOBSTER(SequenceDataset):
             "data_root": None,
             "train_date_range": None,
             "test_date_range": None,
+            "token_mode": "24tok",
         }
 
     def setup(self):
@@ -945,6 +978,7 @@ class LOBSTER(SequenceDataset):
             book_transform=self.book_transform,
             book_depth=self.book_depth,
             return_raw_msgs=self.return_raw_msgs,
+            token_mode=self.token_mode,
         )
         #self.d_input = self.dataset_train.shape[-1]
         self.d_input = len(self.dataset_train.vocab)
@@ -971,6 +1005,7 @@ class LOBSTER(SequenceDataset):
                 book_transform=self.book_transform,
                 book_depth=self.book_depth,
                 return_raw_msgs=self.return_raw_msgs,
+                token_mode=self.token_mode,
                 )
         else:
             self.dataset_val = None
@@ -988,6 +1023,7 @@ class LOBSTER(SequenceDataset):
                 book_transform=self.book_transform,
                 book_depth=self.book_depth,
                 return_raw_msgs=self.return_raw_msgs,
+                token_mode=self.token_mode,
                 )
         else:
             self.dataset_test = None
@@ -1008,6 +1044,7 @@ class LOBSTER(SequenceDataset):
                     book_transform=self.book_transform,
                     book_depth=self.book_depth,
                     return_raw_msgs=self.return_raw_msgs,
+                    token_mode=self.token_mode,
                 )
             print(f"[*] Per-ticker test datasets: {list(self.per_ticker_test_datasets.keys())}")
 

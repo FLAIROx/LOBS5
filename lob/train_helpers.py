@@ -302,6 +302,7 @@ def create_train_state(model_cls,
                        dt_global=False,
                        num_devices=1,
                        model_type="s5",
+                       token_mode="24tok",
                        ):
     """
     Initializes the training state using optax.
@@ -322,18 +323,27 @@ def create_train_state(model_cls,
             integration_timesteps = np.ones((micro_bsz, seq_len,))
     else:
         if use_book_data:
-            dummy_input = (
-                # np.ones((micro_bsz, seq_len, in_dim), dtype=np.int32),  # messages
-                np.ones((micro_bsz, seq_len, ), dtype=np.int32),  # messages
-                np.ones((micro_bsz, seq_len, book_dim)),  # books
-            )
+            if token_mode == '1tok':
+                from lob.encoding_1tok import N_FIELDS
+                dummy_input = (
+                    np.ones((micro_bsz, seq_len, N_FIELDS), dtype=np.int32),  # (B, L, 24)
+                    np.ones((micro_bsz, seq_len, book_dim)),  # books
+                )
+            else:
+                dummy_input = (
+                    np.ones((micro_bsz, seq_len, ), dtype=np.int32),  # messages
+                    np.ones((micro_bsz, seq_len, book_dim)),  # books
+                )
             integration_timesteps = (
                 np.ones((micro_bsz, seq_len, )),
                 np.ones((micro_bsz, seq_len, )),
             )
         else:
-            # dummy_input = (np.ones((micro_bsz, seq_len, in_dim), dtype=np.int32) , )
-            dummy_input = (np.ones((micro_bsz, seq_len, ), dtype=np.int32) , )
+            if token_mode == '1tok':
+                from lob.encoding_1tok import N_FIELDS
+                dummy_input = (np.ones((micro_bsz, seq_len, N_FIELDS), dtype=np.int32), )
+            else:
+                dummy_input = (np.ones((micro_bsz, seq_len, ), dtype=np.int32) , )
             integration_timesteps = (np.ones((micro_bsz, seq_len, )), )
 
     model = model_cls(training=True)
@@ -539,6 +549,58 @@ def cross_entropy_loss_test(logits, label):
 @partial(np.vectorize, signature="(c),()->()")
 def compute_accuracy(logits, label):
     return np.argmax(logits) == label
+
+
+def _compute_ce_unified(logits, batch_labels, ignore_times):
+    """Unified CE computation for both 24tok and 1tok modes.
+
+    24tok: logits is (B, L, d_output), labels is (B, L)
+    1tok:  logits is list of 24 (B, L, V_i), labels is (B, L, 24)
+
+    Returns: ce of shape (B, flat_positions) compatible with existing validate().
+    """
+    if isinstance(logits, list):
+        # 1tok mode: per-field CE
+        field_ces = []
+        for i in range(len(logits)):
+            if ignore_times and 10 <= i <= 14:
+                continue
+            ce_i = cross_entropy_loss(logits[i], batch_labels[:, :, i])
+            field_ces.append(ce_i)
+        ce = np.stack(field_ces, axis=-1)  # (B, L, n_active_fields)
+        return ce.reshape(ce.shape[0], -1)  # (B, L * n_active_fields)
+    else:
+        # 24tok mode: standard CE with ignore_times reshape
+        ce = cross_entropy_loss(logits, batch_labels)
+        if ignore_times:
+            ce = ce.reshape(ce.shape[0], -1, Message_Tokenizer.MSG_LEN)
+            ce_1 = ce[:, :, :Message_Tokenizer.TIME_START_I]
+            ce_2 = ce[:, :, (Message_Tokenizer.TIME_END_I + 1):]
+            ce = np.concatenate([ce_1, ce_2], axis=2)
+            ce = ce.reshape(ce.shape[0], -1)
+        return ce
+
+
+def _compute_acc_unified(logits, batch_labels, ignore_times):
+    """Unified accuracy computation for both 24tok and 1tok modes."""
+    if isinstance(logits, list):
+        field_accs = []
+        for i in range(len(logits)):
+            if ignore_times and 10 <= i <= 14:
+                continue
+            acc_i = compute_accuracy(logits[i], batch_labels[:, :, i])
+            field_accs.append(acc_i)
+        accs = np.stack(field_accs, axis=-1)
+        return accs.reshape(accs.shape[0], -1)
+    else:
+        accs = compute_accuracy(logits, batch_labels)
+        if ignore_times:
+            accs = accs.reshape(accs.shape[0], -1, Message_Tokenizer.MSG_LEN)
+            a_1 = accs[:, :, :Message_Tokenizer.TIME_START_I]
+            a_2 = accs[:, :, (Message_Tokenizer.TIME_END_I + 1):]
+            accs = np.concatenate([a_1, a_2], axis=2)
+            accs = accs.reshape(accs.shape[0], -1)
+        return accs
 
 def prep_batch(
         batch: Union[
@@ -980,19 +1042,11 @@ def train_step(
         # jax.debug.print("Shape of Labels: {}", batch_labels.shape)
 
         
-        ce=cross_entropy_loss(logits, batch_labels)
-        if ignore_times:
-            ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
-            ce_1=ce[:,:,:Message_Tokenizer.TIME_START_I]
-            ce_2=ce[:,:,(Message_Tokenizer.TIME_END_I+1):]
-            ce=np.concatenate([ce_1,ce_2],axis=2)
-            ce=ce.reshape(ce.shape[0],-1)
+        ce = _compute_ce_unified(logits, batch_labels, ignore_times)
 
         ce=np.mean(ce,axis=0)
-        # jax.debug.print("Shape of CE: {}", ce.shape)
         # average cross-ent loss
         loss = np.mean(ce)
-        # jax.debug.print("Shape of loss: {}", loss.shape)
         return loss, (mod_vars, logits,ce)
 
     (loss, (mod_vars, logits,ce)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
@@ -1289,24 +1343,8 @@ def eval_step(
 
 
 
-    losses = cross_entropy_loss(logits, batch_labels)
-    if ignore_times:
-        ce=losses
-        ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
-        ce_1=ce[:,:,:Message_Tokenizer.TIME_START_I]
-        ce_2=ce[:,:,(Message_Tokenizer.TIME_END_I+1):]
-        ce=np.concatenate([ce_1,ce_2],axis=2)
-        ce=ce.reshape(ce.shape[0],-1)
-        losses=ce
-    accs = compute_accuracy(logits, batch_labels)
-    if ignore_times:
-        ce=accs
-        ce=ce.reshape(ce.shape[0],-1,Message_Tokenizer.MSG_LEN)
-        ce_1=ce[:,:,:Message_Tokenizer.TIME_START_I]
-        ce_2=ce[:,:,(Message_Tokenizer.TIME_END_I+1):]
-        ce=np.concatenate([ce_1,ce_2],axis=2)
-        ce=ce.reshape(ce.shape[0],-1)
-        accs=ce
+    losses = _compute_ce_unified(logits, batch_labels, ignore_times)
+    accs = _compute_acc_unified(logits, batch_labels, ignore_times)
 
     return losses, accs, logits
 
@@ -1467,13 +1505,7 @@ def _create_hierarchical_grad_accum_fns(mesh, has_book_data, batchnorm, ignore_t
                     method='__call_ar__'
                 )
 
-            ce = cross_entropy_loss(logits, batch_labels)
-            if ignore_times:
-                ce = ce.reshape(ce.shape[0], -1, Message_Tokenizer.MSG_LEN)
-                ce_1 = ce[:, :, :Message_Tokenizer.TIME_START_I]
-                ce_2 = ce[:, :, (Message_Tokenizer.TIME_END_I + 1):]
-                ce = np.concatenate([ce_1, ce_2], axis=2)
-                ce = ce.reshape(ce.shape[0], -1)
+            ce = _compute_ce_unified(logits, batch_labels, ignore_times)
 
             ce = np.mean(ce, axis=0)
             loss = np.mean(ce)
@@ -1587,13 +1619,7 @@ def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times
                     method='__call_ar__'
                 )
 
-            ce = cross_entropy_loss(logits, batch_labels)
-            if ignore_times:
-                ce = ce.reshape(ce.shape[0], -1, Message_Tokenizer.MSG_LEN)
-                ce_1 = ce[:, :, :Message_Tokenizer.TIME_START_I]
-                ce_2 = ce[:, :, (Message_Tokenizer.TIME_END_I + 1):]
-                ce = np.concatenate([ce_1, ce_2], axis=2)
-                ce = ce.reshape(ce.shape[0], -1)
+            ce = _compute_ce_unified(logits, batch_labels, ignore_times)
 
             ce = np.mean(ce, axis=0)
             loss = np.mean(ce)

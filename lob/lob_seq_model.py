@@ -5,6 +5,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from s5.layers import SequenceLayer
 from s5.seq_model import StackedEncoderModel, masked_meanpool
+from lob.encoding_1tok import FIELD_VOCAB_SIZES_WITH_SPECIAL
 
 
 class LobPredModel(nn.Module):
@@ -979,3 +980,240 @@ def ewma_vectorized_2d(data, alpha, axis=None, offset=None, dtype=None, order='C
     out += offset[:, jnp.newaxis] * scaling_factors[jnp.newaxis, 1:]
 
     return out
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 1-token-per-message model classes
+# ──────────────────────────────────────────────────────────────────────
+
+class FieldEmbedding(nn.Module):
+    """Sum of 24 per-field embeddings.
+
+    Each token position has its own embedding table of size (V_i + 4, d_model).
+    Input: (L, 24) int32 local indices
+    Output: (L, d_model) float32
+    """
+    field_vocab_sizes: Tuple[int, ...]  # FIELD_VOCAB_SIZES_WITH_SPECIAL
+    d_model: int
+
+    @nn.compact
+    def __call__(self, x):
+        # x: (L, 24) int32
+        out = jnp.zeros((x.shape[0], self.d_model))
+        for i, v_size in enumerate(self.field_vocab_sizes):
+            out = out + nn.Embed(v_size, self.d_model, name=f'field_{i}')(x[:, i])
+        return out
+
+
+class MultiFieldDecoder(nn.Module):
+    """24 independent classification heads, one per token field.
+
+    Input: (L, d_model) float32
+    Output: list of 24 (L, V_i) log-softmax arrays
+    """
+    field_vocab_sizes: Tuple[int, ...]  # FIELD_VOCAB_SIZES_WITH_SPECIAL
+
+    @nn.compact
+    def __call__(self, x):
+        field_logits = []
+        for i, v_size in enumerate(self.field_vocab_sizes):
+            logits = nn.Dense(v_size, name=f'head_{i}')(x)
+            logits = nn.log_softmax(logits.astype(jnp.float32), axis=-1)
+            field_logits.append(logits)
+        return field_logits
+
+
+class OneTokenPaddedLobPredModel(nn.Module):
+    """1-token-per-message S5 model.
+
+    Per-field embedding sum → book encoder → fused S5 → per-field decode.
+    No message_encoder (embedding IS the message representation).
+    """
+    ssm: nn.Module
+    field_vocab_sizes: Tuple[int, ...] = FIELD_VOCAB_SIZES_WITH_SPECIAL
+    d_model: int = 64
+    d_book: int = 40
+    n_fused_layers: int = 6
+    n_book_pre_layers: int = 1
+    n_book_post_layers: int = 1
+    activation: str = "gelu"
+    dropout: float = 0.2
+    training: bool = True
+    mode: str = "pool"
+    prenorm: bool = False
+    batchnorm: bool = False
+    bn_momentum: float = 0.9
+    step_rescale: float = 1.0
+    # MoE parameters (only applied to fused_s5)
+    use_moe: bool = False
+    num_experts: int = 128
+    top_k: int = 8
+    d_ff: int = 1024
+    num_shared_experts: int = 1
+    moe_every_n: int = 2
+    moe_capacity_factor: float = 1.25
+    moe_lb_weight: float = 0.01
+    moe_z_loss_weight: float = 0.001
+
+    def setup(self):
+        self.field_embedding = FieldEmbedding(
+            field_vocab_sizes=self.field_vocab_sizes,
+            d_model=self.d_model,
+        )
+
+        self.book_encoder = LobBookModel(
+            ssm=self.ssm,
+            d_book=self.d_book,
+            d_model=self.d_model,
+            n_pre_layers=self.n_book_pre_layers,
+            n_post_layers=self.n_book_post_layers,
+            activation=self.activation,
+            dropout=self.dropout,
+            training=self.training,
+            prenorm=self.prenorm,
+            batchnorm=self.batchnorm,
+            bn_momentum=self.bn_momentum,
+            step_rescale=self.step_rescale,
+        )
+
+        self.fused_s5 = StackedEncoderModel(
+            ssm=self.ssm,
+            d_model=self.d_model,
+            n_layers=self.n_fused_layers,
+            activation=self.activation,
+            dropout=self.dropout,
+            training=self.training,
+            prenorm=self.prenorm,
+            batchnorm=self.batchnorm,
+            bn_momentum=self.bn_momentum,
+            step_rescale=self.step_rescale,
+            use_moe=self.use_moe,
+            num_experts=self.num_experts,
+            top_k=self.top_k,
+            d_ff=self.d_ff,
+            num_shared_experts=self.num_shared_experts,
+            moe_every_n=self.moe_every_n,
+            moe_capacity_factor=self.moe_capacity_factor,
+            moe_lb_weight=self.moe_lb_weight,
+            moe_z_loss_weight=self.moe_z_loss_weight,
+        )
+
+        self.decoder = MultiFieldDecoder(
+            field_vocab_sizes=self.field_vocab_sizes,
+        )
+
+    def __call__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):
+        x_m = self.field_embedding(x_m)
+        x_b = self.book_encoder(x_b, book_integration_timesteps)
+        x = jnp.concatenate([x_m, x_b], axis=1)
+        x = self.fused_s5(x, jnp.ones(x.shape[0]))
+
+        if self.mode in ["pool"]:
+            x = jnp.mean(x, axis=0)
+        elif self.mode in ["last"]:
+            x = x[-1]
+        elif self.mode in ["none"]:
+            pass
+        else:
+            raise NotImplementedError("Mode must be in ['pool', 'last', 'none']")
+
+        return self.decoder(x)
+
+    def __call_rnn__(self, hiddens_tuple,
+                      x_m, x_b,
+                      d_b, d_f,
+                      message_integration_timesteps, book_integration_timesteps):
+        """RNN-mode forward for step-by-step inference.
+
+        Args:
+            hiddens_tuple: 3-tuple (hiddens_b, hiddens_fused, ema)
+            x_m: message input (L, 24) local field indices
+            x_b: book state (L_b, book_dim)
+            d_b, d_f: done flags for book and fused encoders
+            message_integration_timesteps, book_integration_timesteps: timesteps
+        Returns:
+            (new_hiddens_tuple, field_logits) where field_logits is list of 24 arrays
+        """
+        hiddens_b, hiddens_fused, ema = hiddens_tuple
+        fo, override = ema
+
+        # FieldEmbedding is algebraic — no hidden state
+        x_m = self.field_embedding(x_m)            # (L, 24) → (L, d_model)
+
+        # Book encoder RNN step
+        hiddens_b, x_b = self.book_encoder.__call_rnn__(hiddens_b, x_b, d_b, book_integration_timesteps)
+
+        x = jnp.concatenate([x_m, x_b], axis=1)
+        hiddens_fused, x = self.fused_s5.__call_rnn__(hiddens_fused, x, d_f, jnp.ones(x.shape[0]))
+
+        if self.mode in ["pool"]:
+            x = jnp.mean(x, axis=0)
+        elif self.mode in ["last"]:
+            x = x[-1]
+        elif self.mode in ["none"]:
+            pass
+        elif self.mode in ['ema']:
+            x, fo = ewma_vectorized_safe(x, 2 / (22 + 1.0), fo, override)
+        else:
+            raise NotImplementedError("Mode must be in ['pool', 'last', 'none', 'ema']")
+
+        field_logits = self.decoder(x)  # list of 24 log-softmax arrays
+        return (hiddens_b, hiddens_fused, (fo, jnp.zeros_like(override))), field_logits
+
+    def __call_ar__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):
+        """Autoregressive forward: full sequence output, no pooling."""
+        x_m = self.field_embedding(x_m)
+        x_b = self.book_encoder(x_b, book_integration_timesteps)
+        x = jnp.concatenate([x_m, x_b], axis=1)
+        x = self.fused_s5(x, jnp.ones(x.shape[0]))
+        return self.decoder(x)
+
+    @staticmethod
+    def initialize_carry(batch_size, hidden_size,
+                         n_book_pre_layers=1, n_book_post_layers=1,
+                         n_fused_layers=6, h_size_ema=512,
+                         ssm_type='s5', **kwargs):
+        """Initialize hidden state carry for 1tok model (no message_encoder)."""
+        # 3-tuple: book, fused, ema (no message_encoder carry)
+        h_tuple_init = (
+            LobBookModel.initialize_carry(
+                batch_size, hidden_size, n_book_pre_layers, n_book_post_layers,
+                ssm_type=ssm_type, **kwargs),
+            StackedEncoderModel.initialize_carry(
+                batch_size, hidden_size, n_fused_layers,
+                ssm_type=ssm_type, **kwargs),
+            (jnp.zeros((batch_size, 1, h_size_ema)),
+             jnp.ones((batch_size, 1, 1))),
+        )
+        return h_tuple_init
+
+
+BatchOneTokenPaddedLobPredModel = nn.vmap(
+    OneTokenPaddedLobPredModel,
+    in_axes=(0, 0, 0, 0),
+    out_axes=0,
+    variable_axes=variable_axes_args,
+    split_rngs=split_rngs_args, axis_name='batch',
+    methods={
+        '__call__': {
+            'in_axes': (0, 0, 0, 0),
+            'out_axes': 0,
+            'variable_axes': variable_axes_args,
+            'split_rngs': split_rngs_args,
+            'axis_name': 'batch',
+        },
+        '__call_rnn__': {
+            'in_axes': (0, 0, 0, 0, 0, 0, 0),  # hiddens, x_m, x_b, d_b, d_f, msg_ts, book_ts
+            'out_axes': 0,
+            'variable_axes': variable_axes_args,
+            'split_rngs': split_rngs_args,
+            'axis_name': 'batch',
+        },
+        '__call_ar__': {
+            'in_axes': (0, 0, 0, 0),
+            'out_axes': 0,
+            'variable_axes': variable_axes_args,
+            'split_rngs': split_rngs_args,
+            'axis_name': 'batch',
+        },
+    })

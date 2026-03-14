@@ -33,6 +33,9 @@ import preproc as preproc
 import lob.encoding as encoding
 from lob.encoding import Message_Tokenizer, Vocab
 from lob.lobster_dataloader import LOBSTER_Dataset
+from lob.encoding_1tok import (
+    local_to_global_jax, global_to_local_jax, N_FIELDS, N_SPECIAL_TOKENS,
+)
 import chex
 
 # add git submodule to path to allow imports to work
@@ -985,6 +988,236 @@ def _make_generate_msg_scannable(
         return (m_seq, b_seq, n_msg_todo, p_mid, sim_state, rng,hidden, time), (msg_decoded, book_l2, msg_token)
     return _generate_msg_scannable
 
+
+# ─────────────────────────────────────────────────────────────────────
+# 1tok inference path: one model call per message → 24 field logits
+# ─────────────────────────────────────────────────────────────────────
+
+def _sample_fields_1tok(field_logits_list, sample_top_n, rng):
+    """Sample from 24 per-field logit distributions independently.
+
+    Args:
+        field_logits_list: list of 24 arrays, each (1, V_i) log-softmax
+        sample_top_n: 1 for argmax, >1 for top-k, -1 for full distribution
+        rng: JAX PRNG key
+    Returns:
+        (sampled_local, rng) where sampled_local is (24,) int32 local indices
+    """
+    samples = []
+    for i, logits in enumerate(field_logits_list):
+        rng, rng_ = jax.random.split(rng)
+        logits_i = logits[0]  # squeeze (1, V_i) → (V_i,)
+        # Block special tokens during generation
+        logits_i = logits_i.at[:N_SPECIAL_TOKENS].set(-1e9)
+        if sample_top_n == 1:
+            chosen = jnp.argmax(logits_i)
+        elif sample_top_n > 0:
+            top_k_vals, top_k_idx = jax.lax.top_k(logits_i, sample_top_n)
+            probs = jax.nn.softmax(top_k_vals)
+            chosen = jax.random.choice(rng_, top_k_idx, p=probs)
+        else:
+            probs = jax.nn.softmax(logits_i)
+            chosen = jax.random.choice(rng_, jnp.arange(logits_i.shape[0]), p=probs)
+        samples.append(chosen)
+    return jnp.stack(samples), rng
+
+
+def _generate_msg_1tok(
+        sim: OrderBook,
+        train_state: TrainState,
+        model: nn.Module,
+        batchnorm: bool,
+        encoder: Dict[str, Tuple[jax.Array, jax.Array]],
+        sample_top_n: int,
+        tick_size: int,
+        debug_book: bool,
+
+        m_init: jax.Array,      # (1, 24) local indices — last generated or last cond msg
+        b_init: jax.Array,      # (1, book_dim) — last book state
+        n_msg_todo: int,
+        p_mid: jax.Array,
+        sim_state: LobState,
+        rng: jax.dtypes.prng_key,
+        hidden: Tuple,
+        time_i: jax.Array,
+        b_seq_real: Optional[jax.Array] = None,
+    ) -> Tuple:
+    """Generate one complete message in a single model call (1tok mode)."""
+    rng, rng_ = jax.random.split(rng)
+
+    with jax.ensure_compile_time_eval():
+        time_s_start_i, time_s_end_i = valh.get_idx_from_field('time_s')
+        time_ns_start_i, time_ns_end_i = valh.get_idx_from_field('time_ns')
+        delta_t_s_start_i, delta_t_s_end_i = valh.get_idx_from_field('delta_t_s')
+        delta_t_ns_start_i, delta_t_ns_end_i = valh.get_idx_from_field('delta_t_ns')
+
+    time_init_s = time_i[0]
+    time_init_ns = time_i[1]
+
+    if debug_book:
+        b_init = jnp.expand_dims(b_seq_real, 0)
+
+    # One model call → all 24 field logits
+    hidden, field_logits = valh.apply_model_1tok(
+        hidden, m_init, b_init, train_state, model, batchnorm, False)
+
+    # Sample all 24 fields at once
+    sampled_local, rng_ = _sample_fields_1tok(field_logits, sample_top_n, rng_)
+
+    # Convert to global token IDs (same space as 24tok)
+    sampled_global = local_to_global_jax(sampled_local)
+
+    # Compute absolute time from delta_t + previous time (override model's time prediction)
+    time_tokens, time_s, time_ns = _add_time_tokens(
+        sampled_global,  # full message — _add_time_tokens indexes into it
+        encoder,
+        time_init_s, time_init_ns,
+        delta_t_s_start_i, delta_t_s_end_i,
+        delta_t_ns_start_i, delta_t_ns_end_i,
+    )
+    # Overwrite absolute time fields with computed values
+    sampled_global = sampled_global.at[time_s_start_i:time_ns_end_i].set(time_tokens)
+    time_f = jnp.array([time_s, time_ns])
+
+    order_id = n_msg_todo
+
+    # Decode and process through simulator (same as 24tok from here)
+    sim_msg, msg_decoded = get_sim_msg(
+        sampled_global,
+        sim,
+        sim_state,
+        mid_price=p_mid,
+        new_order_id=order_id,
+        tick_size=tick_size,
+        encoder=encoder,
+    )
+
+    sim_state = sim.process_order_array(sim_state, sim_msg)
+
+    p_mid_new = _get_new_mid_price(sim, sim_state, p_mid, tick_size)
+    p_change = ((p_mid_new - p_mid) // tick_size)
+
+    book_l2 = sim.get_L2_state(sim_state, l2_state_n)
+    new_book_raw = jnp.concatenate([jnp.array([p_change]), time_f, book_l2[0:40]]).reshape(1, -1)
+    b_final = preproc.transform_L2_state_gpu(new_book_raw, 500, 100)
+
+    # Next step input: convert back to local for the model
+    sampled_local_out = global_to_local_jax(sampled_global)
+    m_final = sampled_local_out.reshape(1, N_FIELDS)  # (1, 24)
+
+    n_msg_todo -= 1
+
+    return msg_decoded, sim_state, m_final, sampled_global, b_final, book_l2, p_mid_new, n_msg_todo, hidden, time_f
+
+
+def _make_generate_msg_1tok_scannable(
+        sim: OrderBook,
+        train_state: TrainState,
+        model: nn.Module,
+        batchnorm: bool,
+        encoder: Dict[str, Tuple[jax.Array, jax.Array]],
+        sample_top_n: int,
+        tick_size: int,
+        debug_book: bool,
+    ):
+    __generate_msg = jax.jit(functools.partial(
+        _generate_msg_1tok, sim, train_state, model, batchnorm,
+        encoder, sample_top_n, tick_size, debug_book
+    ), device=jax.devices()[0])
+
+    def _generate_msg_scannable(gen_state, input):
+        b_seq_real = input
+        m_seq, b_seq, n_msg_todo, p_mid, sim_state, rng, hidden, time = gen_state
+        rng, rng_ = jax.random.split(rng)
+
+        msg_decoded, sim_state, m_seq, msg_token, b_seq, book_l2, p_mid, n_msg_todo, hidden, time = __generate_msg(
+            m_seq, b_seq, n_msg_todo, p_mid, sim_state, rng_, hidden, time, b_seq_real
+        )
+        return (m_seq, b_seq, n_msg_todo, p_mid, sim_state, rng, hidden, time), (msg_decoded, book_l2, msg_token)
+    return _generate_msg_scannable
+
+
+@partial(jax.jit, static_argnums=(0, 2, 3, 5, 6, 9, 13, 15), backend='gpu')
+def generate_1tok(
+        sim: OrderBook,              # static
+        train_state: TrainState,
+        model: nn.Module,            # static
+        batchnorm: bool,             # static
+        encoder: Dict[str, Tuple[jax.Array, jax.Array]],
+        sample_top_n: int,           # static
+        tick_size: int,              # static
+        m_seq_cond: jax.Array,       # (n_cond_msgs+1, 24) local indices
+        b_seq_cond: jax.Array,       # (n_cond_msgs+1, book_dim)
+        n_msg_todo: int,             # static
+        sim_state: LobState,
+        rng: jax.dtypes.prng_key,
+        init_hidden: Tuple,
+        conditional: bool,           # static
+        init_time: jax.Array,
+        debug_book: bool = False,
+        b_seq_real: Optional[jax.Array] = None,
+        valid_mask_array: Optional[jax.Array] = None,  # unused for 1tok, kept for API compat
+    ) -> Tuple[jax.Array, jax.Array, jax.Array]:
+    print("WARNING: Compiling generate_1tok, you should only see this once.")
+
+    if not debug_book:
+        b_seq_real = None
+
+    if conditional:
+        def roll_hidden_scan_1tok(carry, xs):
+            m_seq, b_seq = xs
+            h = carry
+            h, _ = valh.apply_model_1tok(
+                h, m_seq, b_seq, train_state, model, batchnorm, True)
+            return h, None
+
+        # Split conditioning: one message per scan step
+        N = m_seq_cond[:-1].shape[0]  # n_cond_msgs
+        m_seq_cond_split = m_seq_cond[:-1].reshape((N, 1, N_FIELDS))
+        b_seq_cond_split = b_seq_cond[:-1].reshape((N, 1) + b_seq_cond.shape[1:])
+
+        hidden_state, _ = jax.lax.scan(
+            roll_hidden_scan_1tok, init_hidden, (m_seq_cond_split, b_seq_cond_split))
+        init_token = m_seq_cond[-1:]   # (1, 24)
+        init_book = b_seq_cond[-1:]    # (1, book_dim)
+        init_time = jnp.asarray(valh.get_first_time_1tok(m_seq_cond, encoder))
+    else:
+        hidden_state = init_hidden
+        init_token = m_seq_cond
+        init_book = b_seq_cond
+
+    p_mid = _get_safe_mid_price(sim, sim_state, tick_size)
+
+    generate_msg_scannable = _make_generate_msg_1tok_scannable(
+        sim, train_state, model, batchnorm,
+        encoder, sample_top_n, tick_size, debug_book,
+    )
+    gen_state, (msgs_decoded, l2_book_states, msgs_tokens) = jax.lax.scan(
+        generate_msg_scannable,
+        (init_token, init_book, n_msg_todo, p_mid, sim_state, rng, hidden_state, init_time),
+        length=n_msg_todo,
+        xs=b_seq_real,
+    )
+
+    num_errors = (l2_book_states[1:] == l2_book_states[:-1]).all(axis=1).sum()
+
+    return msgs_decoded, l2_book_states, num_errors, msgs_tokens
+
+
+generate_batched_1tok = jax.jit(
+    jax.vmap(
+        generate_1tok,
+        in_axes=(
+            None, None, None, None, None,
+            None, None,    0,    0, None,
+            0,       0,    0, None,    0,
+            None,    0, None,
+        )
+    ),
+    static_argnums=(0, 2, 3, 5, 6, 9, 13, 15), backend='gpu'
+)
+
+
 @partial(jax.jit, static_argnums=(0, 2, 3, 5, 6, 9,13,15),backend='gpu')
 def generate(
         sim: OrderBook,  # static
@@ -1292,13 +1525,16 @@ def sample_new(
         overfit_debug: bool = False,
         sample_indices: Optional[List[int]] = None,
         wide_levels: int = 10,
+        token_mode: str = '24tok',
     ):
     """
     """
+    is_1tok = (token_mode == '1tok')
     assert n_samples % batch_size == 0, 'n_samples must be divisible by batch_size'
     if conditional is False:
         assert n_cond_msgs==0, "If conditional flag is false then cannot expect to have any messages for conditioning."
-        assert seq_len_cond==0, "If conditional flag is false, then cannot have any tokens for conditioning."
+        if not is_1tok:
+            assert seq_len_cond==0, "If conditional flag is false, then cannot have any tokens for conditioning."
 
     rng, rng_ = jax.random.split(rng)
     if sample_indices is not None:
@@ -1323,62 +1559,69 @@ def sample_new(
 
 
     if (init_hidden == None):
-        ssm_type = getattr(args, 'ssm_type', 's5')
-        if ssm_type in ('gdn', 'kda'):
-            gdn_hd = getattr(args, 'gdn_head_dim', 128)
-            gdn_nh = getattr(args, 'gdn_num_heads', None) or max(1, args.d_model // gdn_hd)
-            gdn_hvd = gdn_hd * getattr(args, 'gdn_expand_v', 2)
+        if is_1tok:
+            # 1tok: 3-tuple carry (book, fused, ema) — no message_encoder
             init_hidden = model.initialize_carry(1,
-                                            hidden_size=0,
-                                            n_message_layers=args.n_message_layers,
+                                            hidden_size=(args.ssm_size_base // pow(2, int(args.conj_sym))),
                                             n_book_pre_layers=args.n_book_pre_layers,
-                                            n_book_post_layers=args.n_book_post_layers,
-                                            n_fused_layers=args.n_layers,
-                                            h_size_ema=args.d_model,
-                                            ssm_type=ssm_type,
-                                            num_heads=gdn_nh, head_dim=gdn_hd, head_v_dim=gdn_hvd,
-                                            d_book=getattr(args, 'd_book', 503),
-                                            use_conv=getattr(args, 'gdn_use_conv', True),
-                                            conv_kernel_size=4)
-        elif getattr(args, 'model_type', 's5') == 'transformer':
-            n_heads = getattr(args, 'n_heads', 16)
-            d_model = args.d_model
-            msg_len = Message_Tokenizer.MSG_LEN
-            max_cache_len = seq_len_cond + n_gen_msgs * msg_len + msg_len
-            nh = n_heads
-            while nh > 1 and d_model % nh != 0:
-                nh -= 1
-            head_dim = d_model // nh
-            transformer_config = {
-                'n_heads': nh, 'head_dim': head_dim,
-                'max_cache_len': max_cache_len, 'dtype': jnp.float32,
-            }
-            d_book = getattr(args, 'd_book', 503)
-            nh_book = n_heads
-            while nh_book > 1 and d_book % nh_book != 0:
-                nh_book -= 1
-            transformer_config_book = {
-                'n_heads': nh_book, 'head_dim': d_book // nh_book,
-                'max_cache_len': max_cache_len, 'dtype': jnp.float32,
-            }
-            init_hidden = model.initialize_carry(1,
-                                            hidden_size=0,
-                                            n_message_layers=args.n_message_layers,
-                                            n_book_pre_layers=args.n_book_pre_layers,
-                                            n_book_post_layers=args.n_book_post_layers,
-                                            n_fused_layers=args.n_layers,
-                                            h_size_ema=args.ssm_size_base,
-                                            is_transformer=True,
-                                            transformer_config=transformer_config,
-                                            transformer_config_book=transformer_config_book)
-        else:
-            init_hidden=model.initialize_carry(1,
-                                            hidden_size=(args.ssm_size_base // pow(2,int(args.conj_sym))),
-                                            n_message_layers=args.n_message_layers,
-                                            n_book_pre_layers=args.n_book_pre_layers ,
                                             n_book_post_layers=args.n_book_post_layers,
                                             n_fused_layers=args.n_layers,
                                             h_size_ema=args.ssm_size_base)
+        else:
+            ssm_type = getattr(args, 'ssm_type', 's5')
+            if ssm_type in ('gdn', 'kda'):
+                gdn_hd = getattr(args, 'gdn_head_dim', 128)
+                gdn_nh = getattr(args, 'gdn_num_heads', None) or max(1, args.d_model // gdn_hd)
+                gdn_hvd = gdn_hd * getattr(args, 'gdn_expand_v', 2)
+                init_hidden = model.initialize_carry(1,
+                                                hidden_size=0,
+                                                n_message_layers=args.n_message_layers,
+                                                n_book_pre_layers=args.n_book_pre_layers,
+                                                n_book_post_layers=args.n_book_post_layers,
+                                                n_fused_layers=args.n_layers,
+                                                h_size_ema=args.d_model,
+                                                ssm_type=ssm_type,
+                                                num_heads=gdn_nh, head_dim=gdn_hd, head_v_dim=gdn_hvd,
+                                                d_book=getattr(args, 'd_book', 503))
+            elif getattr(args, 'model_type', 's5') == 'transformer':
+                n_heads = getattr(args, 'n_heads', 16)
+                d_model = args.d_model
+                msg_len = Message_Tokenizer.MSG_LEN
+                max_cache_len = seq_len_cond + n_gen_msgs * msg_len + msg_len
+                nh = n_heads
+                while nh > 1 and d_model % nh != 0:
+                    nh -= 1
+                head_dim = d_model // nh
+                transformer_config = {
+                    'n_heads': nh, 'head_dim': head_dim,
+                    'max_cache_len': max_cache_len, 'dtype': jnp.float32,
+                }
+                d_book = getattr(args, 'd_book', 503)
+                nh_book = n_heads
+                while nh_book > 1 and d_book % nh_book != 0:
+                    nh_book -= 1
+                transformer_config_book = {
+                    'n_heads': nh_book, 'head_dim': d_book // nh_book,
+                    'max_cache_len': max_cache_len, 'dtype': jnp.float32,
+                }
+                init_hidden = model.initialize_carry(1,
+                                                hidden_size=0,
+                                                n_message_layers=args.n_message_layers,
+                                                n_book_pre_layers=args.n_book_pre_layers,
+                                                n_book_post_layers=args.n_book_post_layers,
+                                                n_fused_layers=args.n_layers,
+                                                h_size_ema=args.ssm_size_base,
+                                                is_transformer=True,
+                                                transformer_config=transformer_config,
+                                                transformer_config_book=transformer_config_book)
+            else:
+                init_hidden=model.initialize_carry(1,
+                                                hidden_size=(args.ssm_size_base // pow(2,int(args.conj_sym))),
+                                                n_message_layers=args.n_message_layers,
+                                                n_book_pre_layers=args.n_book_pre_layers ,
+                                                n_book_post_layers=args.n_book_post_layers,
+                                                n_fused_layers=args.n_layers,
+                                                h_size_ema=args.ssm_size_base)
 
     # jax.debug.print("Init hidden is: \n {}",len(init_hidden))
     # Assumes only a single hidden state is given and needs to be duplicated. TODO Add a flag. 
@@ -1431,19 +1674,27 @@ def sample_new(
 
         print(m_seq.shape)
         # encoded data
-        m_seq_inp = m_seq[:, : seq_len_cond+1]
-        m_seq_eval = m_seq[:, (seq_len_cond+1): ]
+        if is_1tok:
+            # Reshape flat global tokens → (batch, n_msgs, 24) → convert to local
+            n_total_msgs = m_seq.shape[1] // N_FIELDS
+            m_seq_2d = m_seq.reshape(batch_size, n_total_msgs, N_FIELDS)
+            m_seq_2d = global_to_local_jax(m_seq_2d)  # broadcasts over (batch, n_msgs, 24)
+            m_seq_inp = m_seq_2d[:, :n_cond_msgs+1]   # (batch, n_cond+1, 24)
+            m_seq_eval = m_seq[:, (n_cond_msgs+1)*N_FIELDS:]  # keep flat for debug/save
+        else:
+            m_seq_inp = m_seq[:, : seq_len_cond+1]
+            m_seq_eval = m_seq[:, (seq_len_cond+1): ]
         # Debug prints to file
         # Set print options to show all array elements
         if overfit_debug:
             with open(f'debug_m_seq_inp_batch_{batch_i[0]}.txt', 'w') as f:
                 print(f"m_seq_inp shape: {m_seq_inp.shape}", file=f)
                 print(f"m_seq_inp:\n{m_seq_inp}", file=f)
-            
+
             with open(f'debug_m_seq_eval_batch_{batch_i[0]}.txt', 'w') as f:
                 print(f"m_seq_eval shape: {m_seq_eval.shape}", file=f)
                 print(f"m_seq_eval:\n{m_seq_eval}", file=f)
-        
+
         # Reset print options to default
         b_seq_inp = b_seq[: , : n_cond_msgs+1]
         b_seq_eval = b_seq[:, (n_cond_msgs+1):] 
@@ -1504,53 +1755,69 @@ def sample_new(
 
         print('Before generation, real book is (should be none):', real_book)
         if initial:
-            is_transformer = getattr(args, 'model_type', 's5') == 'transformer'
-            valid_mask_array = valh.syntax_validation_matrix(
-                block_start_tok=is_transformer)
-            initial=False
-            generate_traced=generate_batched.trace(
-                sim_init, # static
-                train_state,  # None map, static?
-                model, # static
-                batchnorm, # static
-                encoder, # None map, static?
-                sample_top_n,  # sample from entire distribution # static
-                tick_size, # static
-                m_seq_inp[:], # in_axis = 0
-                b_seq_inp, # in_axis = 0
-                n_gen_msgs, # static
-                sim_states_init, # in_axis = 0
-                jax.random.split(rng_, batch_size), # in_axis = 0
-                init_hidden_batched,
-                conditional,  # static
-                init_time_batched,
-                # init_token_batched,
-                # init_book_batched,
-                debug_book, # static
-                real_book,
-                valid_mask_array,  # pre-computed syntax mask
-            )
-            # print("trace complete")
-            # print(generate_traced.jaxpr)
-            generate_lowered=generate_traced.lower()
-            # print("lowering complete")
-            # print(generate_lowered.as_text())
+            initial = False
+            if is_1tok:
+                # 1tok: no syntax mask needed, use generate_batched_1tok
+                valid_mask_array = None
+                generate_traced = generate_batched_1tok.trace(
+                    sim_init,
+                    train_state,
+                    model,
+                    batchnorm,
+                    encoder,
+                    sample_top_n,
+                    tick_size,
+                    m_seq_inp[:],       # (batch, n_cond+1, 24)
+                    b_seq_inp,
+                    n_gen_msgs,
+                    sim_states_init,
+                    jax.random.split(rng_, batch_size),
+                    init_hidden_batched,
+                    conditional,
+                    init_time_batched,
+                    debug_book,
+                    real_book,
+                    valid_mask_array,
+                )
+            else:
+                is_transformer = getattr(args, 'model_type', 's5') == 'transformer'
+                valid_mask_array = valh.syntax_validation_matrix(
+                    block_start_tok=is_transformer)
+                generate_traced = generate_batched.trace(
+                    sim_init,
+                    train_state,
+                    model,
+                    batchnorm,
+                    encoder,
+                    sample_top_n,
+                    tick_size,
+                    m_seq_inp[:],
+                    b_seq_inp,
+                    n_gen_msgs,
+                    sim_states_init,
+                    jax.random.split(rng_, batch_size),
+                    init_hidden_batched,
+                    conditional,
+                    init_time_batched,
+                    debug_book,
+                    real_book,
+                    valid_mask_array,
+                )
+            generate_lowered = generate_traced.lower()
+            generate_compiled = generate_lowered.compile()
 
-            generate_compiled=generate_lowered.compile()
-            # print("Cost analysis:",generate_compiled.cost_analysis())
-
-        start_time = time.time()        
-        msgs_decoded, l2_book_states, num_errors,mgs_tokens = generate_compiled(
-            train_state,  # None map, static?
-            encoder, # None map, static?
-            m_seq_inp[:], # in_axis = 0
-            b_seq_inp, # in_axis = 0
-            sim_states_init, # in_axis = 0
-            jax.random.split(rng_, batch_size), # in_axis = 0
+        start_time = time.time()
+        msgs_decoded, l2_book_states, num_errors, mgs_tokens = generate_compiled(
+            train_state,
+            encoder,
+            m_seq_inp[:],
+            b_seq_inp,
+            sim_states_init,
+            jax.random.split(rng_, batch_size),
             init_hidden_batched,
             init_time_batched,
             real_book,
-            valid_mask_array,  # pre-computed syntax mask
+            valid_mask_array,
         )
         end_time = time.time()
         print(f"Generation time for batch of size {batch_size}: {(end_time - start_time):.2f} seconds")

@@ -47,6 +47,7 @@ def create_lobster_prediction_dataset(
 		data_root: Optional[str] = None,
 		train_date_range: Optional[tuple] = None,
 		test_date_range: Optional[tuple] = None,
+		token_mode: str = '24tok',
 	) -> ReturnType:
 	""" 
 	"""
@@ -80,6 +81,7 @@ def create_lobster_prediction_dataset(
 		data_root=data_root,
 		train_date_range=train_date_range,
 		test_date_range=test_date_range,
+		token_mode=token_mode,
 	)
 	dataset_obj.setup()
  
