@@ -1676,8 +1676,10 @@ def sample_new(
         # encoded data
         if is_1tok:
             # Reshape flat global tokens → (batch, n_msgs, 24) → convert to local
-            n_total_msgs = m_seq.shape[1] // N_FIELDS
-            m_seq_2d = m_seq.reshape(batch_size, n_total_msgs, N_FIELDS)
+            # Dataset may have +1 overlap token; truncate to clean multiple of 24
+            n_clean = (m_seq.shape[1] // N_FIELDS) * N_FIELDS
+            n_total_msgs = n_clean // N_FIELDS
+            m_seq_2d = m_seq[:, :n_clean].reshape(batch_size, n_total_msgs, N_FIELDS)
             m_seq_2d = global_to_local_jax(m_seq_2d)  # broadcasts over (batch, n_msgs, 24)
             m_seq_inp = m_seq_2d[:, :n_cond_msgs+1]   # (batch, n_cond+1, 24)
             m_seq_eval = m_seq[:, (n_cond_msgs+1)*N_FIELDS:]  # keep flat for debug/save
