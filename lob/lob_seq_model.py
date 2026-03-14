@@ -1023,6 +1023,66 @@ class MultiFieldDecoder(nn.Module):
         return field_logits
 
 
+class CrossFieldAttentionDecoder(nn.Module):
+    """Decoder with non-causal self-attention across 24 field positions.
+
+    Per-field projections give implicit positional encoding (the model knows
+    which field is which). Self-attention allows fields to condition on each
+    other bidirectionally — no ordering imposed.
+
+    Input: (L, d_model) float32
+    Output: list of 24 (L, V_i) log-softmax arrays (same as MultiFieldDecoder)
+    """
+    field_vocab_sizes: Tuple[int, ...]
+    d_field: int = 128
+    n_attn_layers: int = 2
+    n_heads: int = 4
+    d_ff: int = 256
+    dropout: float = 0.1
+    training: bool = True
+
+    @nn.compact
+    def __call__(self, x):
+        is_1d = (x.ndim == 1)
+        if is_1d:
+            x = x[None, :]  # (1, d_model)
+
+        # Step 1: per-field projections → (L, 24, d_field)
+        field_queries = []
+        for i in range(len(self.field_vocab_sizes)):
+            q_i = nn.Dense(self.d_field, name=f'proj_{i}')(x)  # (L, d_field)
+            field_queries.append(q_i)
+        Q = jnp.stack(field_queries, axis=-2)  # (L, 24, d_field)
+
+        # Step 2: self-attention across field dimension (non-causal)
+        for layer_i in range(self.n_attn_layers):
+            Q_norm = nn.LayerNorm(name=f'ln_attn_{layer_i}')(Q)
+            attn_out = nn.MultiHeadDotProductAttention(
+                num_heads=self.n_heads,
+                deterministic=not self.training,
+                name=f'attn_{layer_i}',
+            )(Q_norm, Q_norm)
+            Q = Q + nn.Dropout(rate=self.dropout, deterministic=not self.training)(attn_out)
+
+            Q_norm = nn.LayerNorm(name=f'ln_ffn_{layer_i}')(Q)
+            ffn_out = nn.Dense(self.d_ff, name=f'ffn1_{layer_i}')(Q_norm)
+            ffn_out = nn.gelu(ffn_out)
+            ffn_out = nn.Dense(self.d_field, name=f'ffn2_{layer_i}')(ffn_out)
+            Q = Q + nn.Dropout(rate=self.dropout, deterministic=not self.training)(ffn_out)
+
+        # Step 3: per-field classification heads
+        field_logits = []
+        for i, v_size in enumerate(self.field_vocab_sizes):
+            logits = nn.Dense(v_size, name=f'head_{i}')(Q[..., i, :])  # (..., V_i)
+            logits = nn.log_softmax(logits.astype(jnp.float32), axis=-1)
+            field_logits.append(logits)
+
+        if is_1d:
+            field_logits = [lg.squeeze(0) for lg in field_logits]
+
+        return field_logits
+
+
 class OneTokenPaddedLobPredModel(nn.Module):
     """1-token-per-message S5 model.
 
@@ -1054,6 +1114,12 @@ class OneTokenPaddedLobPredModel(nn.Module):
     moe_capacity_factor: float = 1.25
     moe_lb_weight: float = 0.01
     moe_z_loss_weight: float = 0.001
+    # Decoder config
+    decoder_type: str = 'independent'  # 'independent' or 'cross_attn'
+    d_field: int = 128
+    n_attn_layers: int = 2
+    decoder_n_heads: int = 4
+    d_ff_decoder: int = 256
 
     def setup(self):
         self.field_embedding = FieldEmbedding(
@@ -1098,9 +1164,20 @@ class OneTokenPaddedLobPredModel(nn.Module):
             moe_z_loss_weight=self.moe_z_loss_weight,
         )
 
-        self.decoder = MultiFieldDecoder(
-            field_vocab_sizes=self.field_vocab_sizes,
-        )
+        if self.decoder_type == 'cross_attn':
+            self.decoder = CrossFieldAttentionDecoder(
+                field_vocab_sizes=self.field_vocab_sizes,
+                d_field=self.d_field,
+                n_attn_layers=self.n_attn_layers,
+                n_heads=self.decoder_n_heads,
+                d_ff=self.d_ff_decoder,
+                dropout=self.dropout,
+                training=self.training,
+            )
+        else:
+            self.decoder = MultiFieldDecoder(
+                field_vocab_sizes=self.field_vocab_sizes,
+            )
 
     def __call__(self, x_m, x_b, message_integration_timesteps, book_integration_timesteps):
         x_m = self.field_embedding(x_m)

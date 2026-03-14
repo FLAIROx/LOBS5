@@ -222,6 +222,19 @@ if __name__ == "__main__":
 				choices=["24tok", "1tok"],
 				help="Token encoding mode: '24tok' = 24 tokens per message (12000-step seq), "
 				     "'1tok' = 1 token per message via per-field embedding sum (500-step seq)")
+	# 1tok decoder config
+	parser.add_argument("--decoder_type", type=str, default="independent",
+				choices=["independent", "cross_attn"],
+				help="1tok decoder: 'independent' = 24 separate heads, "
+				     "'cross_attn' = non-causal self-attention across fields")
+	parser.add_argument("--d_field", type=int, default=128,
+				help="Per-field hidden dim in cross_attn decoder")
+	parser.add_argument("--n_decoder_attn_layers", type=int, default=2,
+				help="Number of self-attention layers in cross_attn decoder")
+	parser.add_argument("--decoder_n_heads", type=int, default=4,
+				help="Attention heads in cross_attn decoder")
+	parser.add_argument("--d_ff_decoder", type=int, default=256,
+				help="FFN hidden dim in cross_attn decoder")
 
 	args = parser.parse_args()
 
