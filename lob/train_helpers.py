@@ -365,7 +365,8 @@ def create_train_state(model_cls,
         params = variables["params"]#.unfreeze()
         # Note: `unfreeze()` is for using Optax.
 
-    print(params['message_encoder']['encoder']['embedding'].shape)
+    if 'message_encoder' in params:
+        print(params['message_encoder']['encoder']['embedding'].shape)
 
     # Determine whether to use optax schedules (new) or inject_hyperparams (legacy)
     use_schedules = ssm_lr_schedule is not None and lr_schedule is not None
@@ -519,7 +520,8 @@ def create_train_state(model_cls,
         state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
     
     # jit+sharding: state replication handled in train.py via create_state_shardings
-    print(f"[*] State params embedding shape: {state.params['message_encoder']['encoder']['embedding'].shape}")
+    if 'message_encoder' in state.params:
+        print(f"[*] State params embedding shape: {state.params['message_encoder']['encoder']['embedding'].shape}")
 
     return state
 
