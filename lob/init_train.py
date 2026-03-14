@@ -472,12 +472,6 @@ def init_train_state(
             moe_capacity_factor=getattr(args, 'moe_capacity_factor', 1.25),
             moe_lb_weight=getattr(args, 'moe_lb_weight', 0.01),
             moe_z_loss_weight=getattr(args, 'moe_z_loss_weight', 0.001),
-            # Decoder config
-            decoder_type=getattr(args, 'decoder_type', 'independent'),
-            d_field=getattr(args, 'd_field', 128),
-            n_attn_layers=getattr(args, 'n_decoder_attn_layers', 2),
-            decoder_n_heads=getattr(args, 'decoder_n_heads', 4),
-            d_ff_decoder=getattr(args, 'd_ff_decoder', 256),
         )
         padded = False
 
