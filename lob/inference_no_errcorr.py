@@ -1006,7 +1006,7 @@ def _sample_fields_1tok(field_logits_list, sample_top_n, rng):
     samples = []
     for i, logits in enumerate(field_logits_list):
         rng, rng_ = jax.random.split(rng)
-        logits_i = logits[0]  # squeeze (1, V_i) → (V_i,)
+        logits_i = jnp.squeeze(logits)  # (1, 1, V_i) or (1, V_i) → (V_i,)
         # Block special tokens during generation
         logits_i = logits_i.at[:N_SPECIAL_TOKENS].set(-1e9)
         if sample_top_n == 1:
