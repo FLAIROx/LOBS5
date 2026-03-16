@@ -246,8 +246,9 @@ if [ -n "$RESUME_FROM_STEP" ]; then
     echo "[*] Resume from batch_idx=$RESUME_FROM_STEP within epoch"
 fi
 
-# Create logs directory
-mkdir -p logs_lobs5
+# Create logs directory (NODE_LOG_DIR allows override for permission issues)
+export NODE_LOG_DIR="${NODE_LOG_DIR:-${SLURM_SUBMIT_DIR:-.}/logs_lobs5}"
+mkdir -p "$NODE_LOG_DIR"
 
 # Change to working directory (WORKDIR allows git worktree experiments)
 WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-/lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5}}"

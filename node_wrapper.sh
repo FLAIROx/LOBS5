@@ -11,7 +11,7 @@ export WANDB_MODE=online
 
 # Per-node logging: all nodes write to individual log files for debugging
 # Uses exec (process-local redirect), NOT srun --output (which overflows at 32N+)
-LOG_DIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-.}}/logs_lobs5"
+LOG_DIR="${NODE_LOG_DIR:-${WORKDIR:-${SLURM_SUBMIT_DIR:-.}}/logs_lobs5}"
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 exec > "$LOG_DIR/training_${SLURM_JOB_ID}_node${SLURM_PROCID:-0}.log" 2>&1
 
