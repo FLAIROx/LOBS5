@@ -298,8 +298,9 @@ def train(args):
     # Use SLURM_JOB_ID for consistent path across ranks (wandb run names differ per rank).
     # Orbax primary_host=0 ensures only rank 0 writes; others just participate in barriers.
     slurm_jid = os.environ.get("SLURM_JOB_ID", "local")
-    ckpt_dir = os.path.abspath(f'checkpoints/{run.name}_{run.id}_{slurm_jid}/') if is_main_process else \
-               os.path.abspath(f'checkpoints/job_{slurm_jid}/')
+    ckpt_base = os.environ.get('CHECKPOINT_BASE_DIR', 'checkpoints')
+    ckpt_dir = os.path.abspath(f'{ckpt_base}/{run.name}_{run.id}_{slurm_jid}/') if is_main_process else \
+               os.path.abspath(f'{ckpt_base}/job_{slurm_jid}/')
     if process_count > 1:
         # Multi-node: broadcast rank 0's checkpoint dir to all ranks
         if is_main_process:
