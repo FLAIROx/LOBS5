@@ -202,6 +202,7 @@ def get_dataset(
         day_indeces: Optional[List[int]] = None,
         limit_seq: int = math.inf,
         test_split: float = 0.1,
+        wide_book_dir: Optional[str] = None,
     ):
     msg_files = sorted(glob(str(data_dir) + '/*message*.npy'))
     book_files = sorted(glob(str(data_dir) + '/*book*.npy'))
