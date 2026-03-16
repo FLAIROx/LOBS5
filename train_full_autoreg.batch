@@ -10,6 +10,8 @@
 #SBATCH --time=09:00:00
 #SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid010655,nid010052,nid010442,nid010093,nid010990,nid010499,nid011290,nid011263,nid010993,nid[010226-010255],nid[010340-010347]
 
+# Group-writable by default: new files/dirs (logs, checkpoints) are g+rw
+umask 002
 
 # --- 32-node 24h production submit command ---
 # sbatch --nodes=32 --time=24:00:00 train_full_autoreg.batch

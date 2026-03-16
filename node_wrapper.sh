@@ -3,6 +3,9 @@
 # Called by srun with --export=ALL: all env vars from batch script are available.
 # 1 process per node, all GPUs visible.
 
+# Group-writable by default: new files/dirs (checkpoints, wandb, logs) are g+rw
+umask 002
+
 # TMPDIR: must be set BEFORE any Python import (wandb creates tempdir at import time)
 export TMPDIR=/tmp
 
