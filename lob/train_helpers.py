@@ -769,8 +769,9 @@ def train_epoch(
     # so DataLoader never loads skipped batches (zero IO overhead).
     batch_offset = resume_from_step if resume_from_step is not None else 0
 
-    # ── Gradient accumulation setup ──
+    # ── Gradient accumulation / Local Steps (scan) setup ──
     use_grad_accum = isinstance(jit_train_step_fn, tuple)
+    use_local_steps_scan = isinstance(jit_train_step_fn, dict) and jit_train_step_fn.get('mode') == 'local_steps_scan'
     if use_grad_accum:
         micro_step_fn, apply_step_fn, grad_K = jit_train_step_fn
         accum_grads = None
@@ -778,6 +779,10 @@ def train_epoch(
         micro_idx = 0
     else:
         grad_K = 1
+    if use_local_steps_scan:
+        scan_step_fn = jit_train_step_fn['step_fn']
+        scan_K = jit_train_step_fn['K']
+        scan_batch_buffer = []  # accumulate K batches before calling scan_step_fn
 
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     total_steps = len(trainloader) + batch_offset
@@ -849,6 +854,37 @@ def train_epoch(
                 micro_idx = 0
                 accum_grads = None
                 accum_loss = 0.0
+
+            elif use_local_steps_scan:
+                # ── Local Steps (lax.scan) Mode ──
+                # Buffer K batches, then call scan_step_fn which does K local
+                # steps + one cross-node AllReduce via lax.scan.
+                scan_batch_buffer.append((inputs, labels, integration_times))
+
+                if len(scan_batch_buffer) >= scan_K:
+                    if batch_idx % 1000 < scan_K:
+                        print(f"\n=== Epoch {epoch}, Batch {batch_idx} (scan K={scan_K}) ===")
+                        print_memory_usage()
+
+                    # Stack K batches: each tensor gets a leading K dimension
+                    inputs_k = tuple(
+                        np.stack([b[0][i] for b in scan_batch_buffer])
+                        for i in range(len(scan_batch_buffer[0][0]))
+                    )
+                    labels_k = np.stack([b[1] for b in scan_batch_buffer])
+                    times_k = tuple(
+                        np.stack([b[2][i] for b in scan_batch_buffer])
+                        for i in range(len(scan_batch_buffer[0][2]))
+                    )
+
+                    state, loss, ce, logits = scan_step_fn(
+                        state, drop_rng, inputs_k, labels_k, times_k,
+                        batchnorm, ignore_times,
+                    )
+                    scan_batch_buffer = []
+                else:
+                    # Still buffering — skip loss logging for intermediate steps
+                    continue
 
             else:
                 # ── Standard Mode (K=1) ──
@@ -1663,22 +1699,13 @@ def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times
 
         if local_steps_k > 0:
             # ── Local Steps mode ──
-            # Skip cross-node grad sync. Each node applies its own grads.
+            # Each node applies its own intra-node averaged grads.
+            # NO cross-node communication here — param sync happens once
+            # after K steps via lax.scan in the outer sharded_k_steps function.
             if batchnorm:
                 state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
             else:
                 state = state.apply_gradients(grads=grads)
-
-            # Every K steps, average params across nodes via Slingshot.
-            # state.step was incremented by apply_gradients above.
-            should_sync = (state.step % local_steps_k == 0)
-            synced_params = jax.lax.pmean(state.params, axis_name='nodes')
-            new_params = jax.lax.cond(
-                should_sync,
-                lambda: synced_params,
-                lambda: state.params,
-            )
-            state = state.replace(params=new_params)
         else:
             # ── Standard hierarchical AllReduce ──
             # Level 2: Slingshot across nodes — grads only
@@ -1708,12 +1735,100 @@ def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times
                          batch_integration_timesteps)
 
     if local_steps_k > 0:
-        print(f"[JIT] Created hierarchical shard_map train_step — Local Steps mode "
-              f"(pmean('gpus') every step, pmean(params, 'nodes') every {local_steps_k} steps)")
+        # ── Option 2: lax.scan over K local steps + single AllReduce ──
+        # The inner sharded_step does fwd+bwd+pmean('gpus')+apply_gradients only.
+        # We wrap K calls in lax.scan, then do ONE pmean(params, 'nodes') at the end.
+        # This truly skips cross-node communication for K-1 out of K steps.
+
+        def sharded_k_steps(state, rng, batch_inputs_k, batch_labels_k,
+                            batch_integration_timesteps_k):
+            """K local steps via lax.scan + single cross-node param sync.
+
+            batch_*_k tensors have leading dim K (stacked K batches).
+            """
+            def scan_body(carry, batch_slice):
+                state, rng = carry
+                # Advance RNG per step to avoid correlated dropout
+                rng, step_rng = jax.random.split(rng)
+
+                # Unpack the batch slice
+                if has_book_data:
+                    inputs = (batch_slice[0], batch_slice[1])
+                    labels = batch_slice[2]
+                    times = (batch_slice[3], batch_slice[4])
+                else:
+                    inputs = (batch_slice[0],)
+                    labels = batch_slice[1]
+                    times = (batch_slice[2],)
+
+                state, loss, ce, _ = sharded_step(
+                    state, step_rng, inputs, labels, times)
+                return (state, rng), loss
+
+            # Stack batch data for scan: each element has leading dim K
+            if has_book_data:
+                scan_data = (
+                    batch_inputs_k[0],    # [K, B, seq, ...]
+                    batch_inputs_k[1],    # [K, B, seq, ...]
+                    batch_labels_k,       # [K, B, ...]
+                    batch_integration_timesteps_k[0],  # [K, B, ...]
+                    batch_integration_timesteps_k[1],  # [K, B, ...]
+                )
+            else:
+                scan_data = (
+                    batch_inputs_k[0],    # [K, B, seq, ...]
+                    batch_labels_k,       # [K, B, ...]
+                    batch_integration_timesteps_k[0],  # [K, B, ...]
+                )
+
+            (state, _rng), losses = jax.lax.scan(scan_body, (state, rng), scan_data)
+
+            # Single cross-node AllReduce after K local steps
+            state = state.replace(
+                params=jax.lax.pmean(state.params, axis_name='nodes'))
+
+            # Return mean loss across K steps
+            return state, np.mean(losses), np.mean(losses), np.float32(0.0)
+
+        # Shard specs: same as single step but batch dims have extra leading K
+        if has_book_data:
+            in_data_k = (P(None, batch_axis, None), P(None, batch_axis, None))
+            in_times_k = (P(None, batch_axis, None), P(None, batch_axis, None))
+        else:
+            in_data_k = (P(None, batch_axis, None),)
+            in_times_k = (P(None, batch_axis, None),)
+
+        in_specs_k = (
+            P(),                    # state — replicated
+            P(),                    # rng — replicated
+            in_data_k,              # batch_inputs_k — [K, sharded, ...]
+            P(None, batch_axis),    # batch_labels_k — [K, sharded]
+            in_times_k,             # batch_integration_timesteps_k — [K, sharded, ...]
+        )
+        out_specs_k = (P(), P(), P(), P())
+
+        mapped_k_fn = shard_map(sharded_k_steps, mesh=mesh,
+                                in_specs=in_specs_k, out_specs=out_specs_k,
+                                check_rep=False)
+        jitted_k_fn = jax.jit(mapped_k_fn, donate_argnums=(0,))
+
+        def k_steps_compatible(state, rng, batch_inputs_k, batch_labels_k,
+                               batch_integration_timesteps_k, _batchnorm, _ignore_times):
+            return jitted_k_fn(state, rng, batch_inputs_k, batch_labels_k,
+                               batch_integration_timesteps_k)
+
+        print(f"[JIT] Created hierarchical shard_map train_step — Local Steps (lax.scan) "
+              f"(K={local_steps_k}: {local_steps_k} local pmean('gpus') steps + "
+              f"1 pmean(params, 'nodes') per group)")
+        return {
+            'step_fn': k_steps_compatible,
+            'K': local_steps_k,
+            'mode': 'local_steps_scan',
+        }
     else:
         print(f"[JIT] Created hierarchical shard_map train_step "
               f"(2D mesh, pmean('gpus') + pmean('nodes'))")
-    return compatible_fn
+        return compatible_fn
 
 
 def create_jit_eval_step(mesh, state, has_book_data=True):
