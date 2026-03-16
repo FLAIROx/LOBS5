@@ -780,8 +780,9 @@ def train_epoch(
     # so DataLoader never loads skipped batches (zero IO overhead).
     batch_offset = resume_from_step if resume_from_step is not None else 0
 
-    # ── Gradient accumulation setup ──
+    # ── Gradient accumulation / Local Steps setup ──
     use_grad_accum = isinstance(jit_train_step_fn, tuple)
+    use_local_steps = isinstance(jit_train_step_fn, dict) and jit_train_step_fn.get('mode') == 'local_steps'
     if use_grad_accum:
         micro_step_fn, apply_step_fn, grad_K = jit_train_step_fn
         accum_grads = None
@@ -789,6 +790,11 @@ def train_epoch(
         micro_idx = 0
     else:
         grad_K = 1
+    if use_local_steps:
+        local_step_fn = jit_train_step_fn['step_fn']
+        sync_params_fn_local = jit_train_step_fn['sync_fn']
+        local_K = jit_train_step_fn['K']
+        local_step_counter = 0
 
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     total_steps = len(trainloader) + batch_offset
@@ -862,16 +868,26 @@ def train_epoch(
                 accum_loss = 0.0
 
             else:
-                # ── Standard Mode (K=1) ──
+                # ── Standard Mode or Local Steps ──
                 if batch_idx % 1000 == 0:
                     print(f"\n=== Epoch {epoch}, Batch {batch_idx} ===")
                     print_memory_usage()
 
-                train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
+                if use_local_steps:
+                    train_fn = local_step_fn
+                else:
+                    train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
                 state, loss, ce, logits = train_fn(
                     state, drop_rng, inputs, labels, integration_times,
                     batchnorm, ignore_times,
                 )
+
+                # Local Steps: sync params across nodes every K steps (Python-level dispatch)
+                if use_local_steps:
+                    local_step_counter += 1
+                    if local_step_counter >= local_K:
+                        state = state.replace(params=sync_params_fn_local(state.params))
+                        local_step_counter = 0
 
             if debug_profiler:
                 if not use_grad_accum:
@@ -1638,22 +1654,14 @@ def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times
 
         if local_steps_k > 0:
             # ── Local Steps mode ──
-            # Skip cross-node grad sync. Each node applies its own grads.
+            # Each node applies its own intra-node averaged grads.
+            # NO cross-node communication here — param sync is a separate
+            # compiled function called from the Python training loop every K steps.
+            # (lax.cond can't skip collectives: XLA executes both branches unconditionally)
             if batchnorm:
                 state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
             else:
                 state = state.apply_gradients(grads=grads)
-
-            # Every K steps, average params across nodes via Slingshot.
-            # state.step was incremented by apply_gradients above.
-            should_sync = (state.step % local_steps_k == 0)
-            synced_params = jax.lax.pmean(state.params, axis_name='nodes')
-            new_params = jax.lax.cond(
-                should_sync,
-                lambda: synced_params,
-                lambda: state.params,
-            )
-            state = state.replace(params=new_params)
         else:
             # ── Standard hierarchical AllReduce ──
             # Level 2: Slingshot across nodes — grads only
@@ -1683,12 +1691,29 @@ def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times
                          batch_integration_timesteps)
 
     if local_steps_k > 0:
+        # ── Separate sync function: pmean(params, 'nodes') via Slingshot ──
+        # Called from Python loop every K steps — truly skips cross-node comm
+        # for the other K-1 steps (unlike lax.cond which runs both branches).
+        def sync_params_body(params):
+            return jax.lax.pmean(params, axis_name='nodes')
+
+        sync_mapped = shard_map(sync_params_body, mesh=mesh,
+                                in_specs=P(), out_specs=P(),
+                                check_rep=False)
+        sync_params_fn = jax.jit(sync_mapped)
+
         print(f"[JIT] Created hierarchical shard_map train_step — Local Steps mode "
-              f"(pmean('gpus') every step, pmean(params, 'nodes') every {local_steps_k} steps)")
+              f"(pmean('gpus') every step, separate pmean(params, 'nodes') every {local_steps_k} steps)")
+        return {
+            'step_fn': compatible_fn,
+            'sync_fn': sync_params_fn,
+            'K': local_steps_k,
+            'mode': 'local_steps',
+        }
     else:
         print(f"[JIT] Created hierarchical shard_map train_step "
               f"(2D mesh, pmean('gpus') + pmean('nodes'))")
-    return compatible_fn
+        return compatible_fn
 
 
 def create_jit_eval_step(mesh, state, has_book_data=True):
