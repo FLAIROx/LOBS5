@@ -89,7 +89,7 @@ if [ -z "${MEM_FRACTION}" ]; then
   if [ "${NNODES}" -ge 32 ] && [ "${HIERARCHICAL}" = "True" ]; then
     export XLA_PYTHON_CLIENT_MEM_FRACTION=0.80
   elif [ "${NNODES}" -ge 8 ] && [ "${HIERARCHICAL}" = "True" ]; then
-    export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
+    export XLA_PYTHON_CLIENT_MEM_FRACTION=0.80  # was 0.85, OOM on NCCL buffer alloc (job 2898567)
   else
     export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
   fi
