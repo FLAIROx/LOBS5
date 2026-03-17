@@ -1,4 +1,5 @@
 from __future__ import annotations
+import inspect
 import json
 import os
 from argparse import Namespace
@@ -171,13 +172,13 @@ def load_checkpoint(
     restore_state = deduplicate_trainstate(state)
 
     try:
+        _sr_kwargs = dict(item=restore_state)
+        if 'strict' in inspect.signature(ocp.args.StandardRestore).parameters:
+            _sr_kwargs['strict'] = not partial_restore
         loaded = mngr.restore(
             step,
             args=ocp.args.Composite(
-                state=ocp.args.StandardRestore(
-                    restore_state,
-                    strict=(not partial_restore),
-                ),
+                state=ocp.args.StandardRestore(**_sr_kwargs),
                 metadata=ocp.args.JsonRestore()
             )
         )
