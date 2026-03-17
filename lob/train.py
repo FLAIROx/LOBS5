@@ -372,9 +372,26 @@ def train(args):
     job_start_time = time.monotonic()
     resume_from_step = getattr(args, 'resume_from_step', None)
 
-    # Pre-compiled reshard function for checkpoints (reuses single JIT cache entry)
+    # Reshard via host roundtrip — avoids creating a new NCCL clique that can
+    # deadlock on CXI (Slingshot) when memory registrations go stale.
+    # Cherry-picked from K3 Mamba2 (dbb1e445).
     if is_distributed:
-        _reshard_for_ckpt = jax.jit(lambda s: s, out_shardings=state_shardings)
+        def _reshard_for_ckpt(s):
+            return jax.device_put(jax.device_get(s), state_shardings)
+
+        # On resume: force a dummy checkpoint save while Orbax CXI endpoints
+        # are still warm from the restore.  Without this, the first real save
+        # (even at 5 min) can hit stale CXI registrations → SIGABRT (RC:265).
+        # Cherry-picked from K3 Mamba2 (0721c624).
+        if args.restore is not None and args.restore != '':
+            _warm_ckpt = {
+                'model': _reshard_for_ckpt(state),
+                'config': vars(args) if is_main_process else {},
+                'metrics': {'loss_train': 0.0, 'epoch': 0, 'step_in_epoch': 0}
+            }
+            save_checkpoint(ckpt_mgr, _warm_ckpt, int(state.step))
+            if is_main_process:
+                print("[*] CXI warm: dummy checkpoint save completed")
 
     def step_checkpoint_callback(cb_state, cb_epoch, cb_batch_idx, cb_loss, save_flag=True):
         """Mid-epoch: log to wandb and optionally save checkpoint."""
