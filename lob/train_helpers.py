@@ -1,4 +1,5 @@
 from functools import partial
+import math
 import os
 import numpy as onp
 import jax
@@ -984,7 +985,20 @@ def train_epoch(
                     loss.block_until_ready()
 
             # jit+sharding: loss is already a scalar (no device dimension)
-            batch_losses.append(float(loss))
+            loss_float = float(loss)
+            batch_losses.append(loss_float)
+
+            # NaN detection: save emergency checkpoint and abort
+            if math.isnan(loss_float):
+                print(f"\n[NaN] FATAL: NaN loss detected at epoch {epoch}, "
+                      f"batch {batch_idx}, global_step {step}. "
+                      f"Saving emergency checkpoint and aborting.")
+                if checkpoint_callback is not None:
+                    checkpoint_callback(state, epoch, batch_idx, 0.0, save_flag=True)
+                watchdog.stop()
+                loss_mean = sum(b for b in batch_losses if not math.isnan(b)) / max(1, sum(1 for b in batch_losses if not math.isnan(b)))
+                return state, loss_mean, None, batch_idx
+
             if log_ce_tables and not use_grad_accum:
                 cross_entropies.append(ce)
 
