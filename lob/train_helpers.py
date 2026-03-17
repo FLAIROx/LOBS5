@@ -1382,8 +1382,11 @@ def validate(state,
     print(f"Concat Loss is {concat_loss.shape}")
     print(f"Concat Acc is {concat_acc.shape}")
     if log_ce_tables:
-        acc_means=onp.mean(concat_acc,axis=(0,1))
-        ce_means=onp.mean(concat_loss,axis=(0,1))
+        # Per-position: reshape flat (N, n_orders*tpm) → (N, n_orders, tpm), mean over (0,1)
+        tpm_per = (Message_Tokenizer.MSG_LEN - (TIME_END_I - TIME_START_I + 1)
+                   if ignore_times else Message_Tokenizer.MSG_LEN)
+        ce_means = onp.mean(concat_loss.reshape(concat_loss.shape[0], -1, tpm_per), axis=(0, 1))
+        acc_means = onp.mean(concat_acc.reshape(concat_acc.shape[0], -1, tpm_per), axis=(0, 1))
     else:
         ce_means=None
         acc_means=None
