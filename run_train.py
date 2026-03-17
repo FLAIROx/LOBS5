@@ -169,12 +169,18 @@ if __name__ == "__main__":
 	parser.add_argument("--opt_config", type=str, default="standard", choices=['standard',
 																			   'BandCdecay',
 																			   'BfastandCdecay',
-																			   'noBCdecay'],
+																			   'noBCdecay',
+																			   'muon'],
 						help="Opt configurations: \\ " \
 			   "standard:       no weight decay on B (ssm lr), weight decay on C (global lr) \\" \
 	  	       "BandCdecay:     weight decay on B (ssm lr), weight decay on C (global lr) \\" \
 	  	       "BfastandCdecay: weight decay on B (global lr), weight decay on C (global lr) \\" \
-	  	       "noBCdecay:      no weight decay on B (ssm lr), no weight decay on C (ssm lr) \\")
+	  	       "noBCdecay:      no weight decay on B (ssm lr), no weight decay on C (ssm lr) \\" \
+	  	       "muon:           Muon (Newton-Schulz) for 2D kernel weights, Adam for SSM, AdamW for rest")
+	parser.add_argument("--muon_lr", type=float, default=0.02,
+						help="Learning rate for Muon kernel weights (paper default 0.02)")
+	parser.add_argument("--muon_wd", type=float, default=None,
+						help="Weight decay for Muon params (default: same as --weight_decay)")
 	parser.add_argument("--jax_seed", type=int, default=1919,
 						help="seed randomness")
 	parser.add_argument("--debug_loading", type=str2bool, default=False,

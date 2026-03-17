@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
 #SBATCH --time=09:00:00
-#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid010655,nid010052,nid010442,nid010093,nid010990,nid010499,nid011290,nid011263,nid010993
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid010655,nid010052,nid010442,nid010093,nid010990,nid010499,nid011290,nid011263,nid010993,nid[010226-010255],nid[010340-010347]
 
 
 # --- 32-node 24h production submit command ---
@@ -96,6 +96,24 @@
 #   PER_GPU_BSZ=<optimal> sbatch train_full_autoreg.batch
 # ============================================
 
+# ============================================
+# Muon Optimizer (Newton-Schulz for 2D kernel weights)
+# ============================================
+# Routes: SSM params -> Adam, 2D kernels -> Muon NS, rest -> AdamW
+# Paper default: MUON_LR=0.02, WEIGHT_DECAY=0.01 (for <500M models)
+#
+# Quick test (2N, 30min, 75M):
+#   OPT_CONFIG=muon MUON_LR=0.02 WEIGHT_DECAY=0.01 \
+#     D_MODEL=1024 N_LAYERS=12 BLOCKS=16 SSM_SIZE_BASE=1024 PER_GPU_BSZ=10 \
+#     CURTAIL_EPOCHS=300 IGNORE_TIMES=True \
+#     sbatch --nodes=2 --time=00:30:00 --job-name=muon-75m-2n-30m train_full_autoreg.batch
+#
+# Full training (32N, 24h, 75M):
+#   OPT_CONFIG=muon MUON_LR=0.02 WEIGHT_DECAY=0.01 \
+#     D_MODEL=1024 N_LAYERS=12 BLOCKS=16 SSM_SIZE_BASE=1024 PER_GPU_BSZ=10 \
+#     IGNORE_TIMES=True EPOCHS=40 \
+#     sbatch --nodes=32 --time=24:00:00 --job-name=muon-75m-32n-24h train_full_autoreg.batch
+
 # Default per-GPU batch size — set in model config section below
 # (can be overridden via environment variable: PER_GPU_BSZ=N sbatch ...)
 # NOTE: do NOT set a default here — model config section handles it
@@ -148,11 +166,23 @@ export PER_GPU_BSZ=${PER_GPU_BSZ:-2}
 export SSM_LR_BASE=${SSM_LR_BASE:-5e-4}
 export LR_FACTOR=${LR_FACTOR:-1}
 export WARMUP_END=${WARMUP_END:-0.01}
+export OPT_CONFIG=${OPT_CONFIG:-standard}
+# Muon needs WD=0.005 (not AdamW's 0.05) — mismatch causes NCCL deadlock within hundreds of steps.
+if [ "$OPT_CONFIG" = "muon" ]; then
+    export WEIGHT_DECAY=${WEIGHT_DECAY:-0.005}
+    export MUON_LR=${MUON_LR:-0.02}
+    export MUON_WD=${MUON_WD:-}  # defaults to WEIGHT_DECAY in Python if unset
+else
+    export WEIGHT_DECAY=${WEIGHT_DECAY:-0.05}
+fi
 
 echo "[*] Model config: 360M (24tok, padded_large)"
 echo "    d_model=$D_MODEL, n_layers=$N_LAYERS, blocks=$BLOCKS"
 echo "    ssm_size_base=$SSM_SIZE_BASE, ssm_lr_base=$SSM_LR_BASE"
-echo "    per_gpu_bsz=$PER_GPU_BSZ"
+echo "    per_gpu_bsz=$PER_GPU_BSZ, opt_config=$OPT_CONFIG"
+if [ "$OPT_CONFIG" = "muon" ]; then
+    echo "    muon_lr=$MUON_LR, weight_decay=$WEIGHT_DECAY"
+fi
 
 # XLA thunk init timeout for large models (360M+)
 # 128 GPUs: thunk initialization can exceed default 30s, GPU 3 (last NCCL channel) gets SIGABRT
@@ -175,9 +205,17 @@ if [ "$MINI_EPOCHS" -gt 1 ]; then
 fi
 
 # Local Steps: sync params across nodes every K steps (DiLoCo-style)
-# K=10 uses dual shard_map functions to avoid NCCL deadlock from conditional collectives
-LOCAL_STEPS_K=${LOCAL_STEPS_K:-10}
+# CAVEAT: K=10 was set for dual shard_map (6deff4cd) which was reverted (779fcf75)
+# for OOM. With jax.lax.cond path, pmean(params) runs every step anyway — K>0
+# only makes per-node gradients noisier with zero communication benefit.
+LOCAL_STEPS_K=${LOCAL_STEPS_K:-0}
 export LOCAL_STEPS_K
+
+# Cosine LR period override: decouple cosine decay from dataset epoch length.
+# Default 0 = use dataset epoch (848k steps). Set to actual training budget
+# so LR decays meaningfully (e.g. COSINE_STEPS=200000 for ~200k-step runs).
+# Chinchilla convention: cosine period = compute budget, not dataset size.
+export COSINE_STEPS=${COSINE_STEPS:-0}
 
 # Gradient Accumulation: accumulate K micro-batches before cross-node AllReduce.
 # Effective BSZ = micro_bsz * gpus_per_node * nodes * GRAD_ACCUM_STEPS.
@@ -208,8 +246,9 @@ if [ -n "$RESUME_FROM_STEP" ]; then
     echo "[*] Resume from batch_idx=$RESUME_FROM_STEP within epoch"
 fi
 
-# Create logs directory
-mkdir -p logs_lobs5
+# Create logs directory (NODE_LOG_DIR allows override for permission issues)
+export NODE_LOG_DIR="${NODE_LOG_DIR:-${SLURM_SUBMIT_DIR:-.}/logs_lobs5}"
+mkdir -p "$NODE_LOG_DIR"
 
 # Change to working directory (WORKDIR allows git worktree experiments)
 WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-/lus/lfs1aip2/projects/s5e/quant/AlphaTrade/LOBS5}}"
@@ -329,10 +368,11 @@ echo "Training finished at: $(date)"
 echo "srun exit code: $SRUN_EXIT"
 echo "============================================"
 
-# Auto-resume on watchdog kill or NCCL deadlock
-# Exit codes: 0=success, 1=watchdog kill, 126=NCCL error, 137=SIGKILL
+# Auto-resume on watchdog kill, NCCL deadlock, OR graceful timeout save
+# Exit codes: 0=success/timeout-save, 1=watchdog kill, 126=NCCL error, 137=SIGKILL
+# Fires on non-zero exit (crash) OR zero exit with mid-epoch checkpoint (timeout save).
 # Only auto-resume for full training runs (no CURTAIL_EPOCHS) to avoid infinite loops
-if [ "$SRUN_EXIT" -ne 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RESUME:-}" ]; then
+if [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RESUME:-}" ]; then
   # Find latest checkpoint directory
   # Checkpoint layout: $WORKDIR/checkpoints/j<JOBID>_<WANDB>_<JOBID>/<step>/
   # Each step subdir contains the orbax checkpoint for that training step.
@@ -353,7 +393,7 @@ if [ "$SRUN_EXIT" -ne 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ -z "${NO_AUTO_RES
       if [ -n "$LATEST_STEP" ]; then
         # This job saved a checkpoint — use it
         RESUME_RESTORE_PATH="$JOB_CKPT_DIR"
-        echo "[Auto-Resume] srun failed (exit=$SRUN_EXIT). Latest checkpoint: $JOB_CKPT_DIR step $LATEST_STEP"
+        echo "[Auto-Resume] srun exit=$SRUN_EXIT. Latest checkpoint: $JOB_CKPT_DIR step $LATEST_STEP"
 
         # Extract step_in_epoch from checkpoint metadata for mid-epoch resume.
         # Adjusts for BSZ change when node count differs between checkpoint and resubmit.
@@ -400,10 +440,12 @@ print(resume)
     fi
 
     # --- Resubmit if we have a restore path ---
-    if [ -n "$RESUME_RESTORE_PATH" ]; then
+    # On clean exit (0): only resubmit if RESUME_STEP is set (mid-epoch timeout save).
+    # On non-zero exit (crash): resubmit even without RESUME_STEP (fall back to restore).
+    if [ -n "$RESUME_RESTORE_PATH" ] && { [ -n "$RESUME_STEP" ] || [ "$SRUN_EXIT" -ne 0 ]; }; then
       NEXT_DEPTH=$((${NO_AUTO_RESUME_DEPTH:-0} + 1))
-      if [ "$NEXT_DEPTH" -gt 3 ]; then
-        echo "[Auto-Resume] WARNING: Reached 3 consecutive auto-resumes. Stopping to prevent infinite loop."
+      if [ "$NEXT_DEPTH" -gt 20 ]; then
+        echo "[Auto-Resume] WARNING: Reached 20 consecutive auto-resumes. Stopping to prevent infinite loop."
       else
         if [ -n "$RESUME_STEP" ]; then
           export RESUME_FROM_STEP="$RESUME_STEP"
@@ -430,13 +472,12 @@ else
   fi
 fi
 
+exit ${SRUN_EXIT:-0}
 
 
 
 
-
-
-'''
+# '''
 
 CAVEAT NOT UPDATED YET MAY BE WRONG !!!
 
@@ -1032,6 +1073,6 @@ this branch from train_full_autoreg.batch (32N).  **Bold** = differs from argpar
 
 
 #SBATCH --contiguous
-#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid010655,nid010052,nid010442,nid010093,nid010990,nid010499,nid011290,nid011263,nid010993,nid011108
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid010655,nid010052,nid010442,nid010093,nid010990,nid010499,nid011290,nid011263,nid010993,nid[010226-010255],nid[010340-010347],nid011108
 
-'''
+# '''

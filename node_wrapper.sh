@@ -11,7 +11,7 @@ export WANDB_MODE=online
 
 # Per-node logging: all nodes write to individual log files for debugging
 # Uses exec (process-local redirect), NOT srun --output (which overflows at 32N+)
-LOG_DIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-.}}/logs_lobs5"
+LOG_DIR="${NODE_LOG_DIR:-${WORKDIR:-${SLURM_SUBMIT_DIR:-.}}/logs_lobs5}"
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 exec > "$LOG_DIR/training_${SLURM_JOB_ID}_node${SLURM_PROCID:-0}.log" 2>&1
 
@@ -216,7 +216,9 @@ if [ "${SLURM_NNODES:-1}" -ge 8 ]; then
   # --- Existing resilience ---
   export FI_CXI_RDZV_RETRIES=100           # default=5, survive transient Slingshot fabric errors
   export FI_CXI_OFLOW_BUF_SIZE=8388608     # 8MB overflow buffer (prevent CXI ENOMEM under bursty traffic)
+  export FI_CXI_OFLOW_BUF_COUNT=6          # default=1, more overflow buffers for burst absorption
   export FI_CXI_REQ_BUF_SIZE=8388608       # 8MB request buffer (reduce flow control stalls)
+  export FI_CXI_REQ_BUF_COUNT=6            # default=1, more request buffers for 128+ GPU bursts
 
   # --- NEW: CXI hang prevention (CSCS + Isambard + ALCF consensus) ---
   # Disable eager messages to prevent CXI race condition under high concurrency.
@@ -316,10 +318,10 @@ python -u -B run_train.py \
     --dt_global=False \
     --epochs="${EPOCHS:-1}" \
     --jax_seed=42 \
-    --opt_config=standard \
+    --opt_config="${OPT_CONFIG:-standard}" \
     --p_dropout=0.0 \
     --warmup_end="$WARMUP_END" \
-    --weight_decay=0.05 \
+    --weight_decay="${WEIGHT_DECAY:-0.05}" \
     --msg_seq_len="${MSG_SEQ_LEN:-500}" \
     --use_book_data=True \
     --use_simple_book=False \
@@ -353,5 +355,7 @@ python -u -B run_train.py \
     ${DATA_ROOT:+--data_root="$DATA_ROOT"} \
     ${TRAIN_DATE_RANGE:+--train_date_range=$TRAIN_DATE_RANGE} \
     ${TEST_DATE_RANGE:+--test_date_range=$TEST_DATE_RANGE} \
+    ${MUON_LR:+--muon_lr=$MUON_LR} \
+    ${MUON_WD:+--muon_wd=$MUON_WD} \
     --checkpoint_every_n_steps="$CHECKPOINT_EVERY" \
     --max_job_hours="$MAX_JOB_HOURS"

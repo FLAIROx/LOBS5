@@ -282,6 +282,14 @@ def train(args):
 
     # Create LR schedule functions for wandb logging (optax manages LR inside JIT)
     total_steps = steps_per_epoch * args.epochs
+    # COSINE_STEPS override: decouple cosine period from dataset size.
+    # When training << 1 epoch, set COSINE_STEPS to your actual training budget
+    # so the LR decays meaningfully (e.g. COSINE_STEPS=200000 for ~200k steps).
+    cosine_steps_override = int(os.environ.get('COSINE_STEPS', '0'))
+    if cosine_steps_override > 0:
+        total_steps = cosine_steps_override
+        print(f"[Schedule] COSINE_STEPS override: cosine period = {total_steps} "
+              f"(dataset epoch = {steps_per_epoch * args.epochs})")
     warmup_end_step = int(steps_per_epoch * args.warmup_end)
 
     effective_lr_min = args.lr_min if args.lr_min > 0 else lr * LR_MIN_FRACTION
@@ -302,8 +310,9 @@ def train(args):
     # Use SLURM_JOB_ID for consistent path across ranks (wandb run names differ per rank).
     # Orbax primary_host=0 ensures only rank 0 writes; others just participate in barriers.
     slurm_jid = os.environ.get("SLURM_JOB_ID", "local")
-    ckpt_dir = os.path.abspath(f'checkpoints/{run.name}_{run.id}_{slurm_jid}/') if is_main_process else \
-               os.path.abspath(f'checkpoints/job_{slurm_jid}/')
+    ckpt_base = os.environ.get('CHECKPOINT_BASE_DIR', 'checkpoints')
+    ckpt_dir = os.path.abspath(f'{ckpt_base}/{run.name}_{run.id}_{slurm_jid}/') if is_main_process else \
+               os.path.abspath(f'{ckpt_base}/job_{slurm_jid}/')
     if process_count > 1:
         # Multi-node: broadcast rank 0's checkpoint dir to all ranks
         if is_main_process:
