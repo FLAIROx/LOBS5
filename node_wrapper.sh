@@ -172,8 +172,8 @@ export NCCL_LAUNCH_ORDER_IMPLICIT=1         # Implicit ordering for multi-commun
 # injection bandwidth. 2MB reduces per-chunk size, improving pipeline efficiency.
 # This is the sole cause of the previous 16N<32N efficiency anomaly.
 if [ "${NNODES}" -ge 2 ]; then
-  export NCCL_BUFFSIZE=2097152
-  echo "[NCCL] Multi-node: NCCL_BUFFSIZE=2MB (verified 2.4x speedup at 16N)"
+  export NCCL_BUFFSIZE=${NCCL_BUFFSIZE:-2097152}
+  echo "[NCCL] Multi-node: NCCL_BUFFSIZE=${NCCL_BUFFSIZE} ($((NCCL_BUFFSIZE / 1048576))MB)"
 fi
 
 # Isambard GH200 Slingshot best practices (ref: docs.isambard.ac.uk, NCCL Issue #1272)
