@@ -963,7 +963,7 @@ def train_epoch(
                     print(f"\n=== Epoch {epoch}, Batch {batch_idx} ===")
                     print_memory_usage()
 
-                if use_local_steps:
+                if use_local_steps_scan:
                     train_fn = local_step_fn
                 else:
                     train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
@@ -973,7 +973,7 @@ def train_epoch(
                 )
 
                 # Local Steps: sync params across nodes every K steps (Python-level dispatch)
-                if use_local_steps:
+                if use_local_steps_scan:
                     local_step_counter += 1
                     if local_step_counter >= local_K:
                         state = state.replace(params=sync_params_fn_local(state.params))
