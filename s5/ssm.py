@@ -76,7 +76,55 @@ def binary_operator_reset(q_i, q_j):
     )
 
 
-def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional):
+# Chunk length for the 'chunked' scan implementation. Must be a power of two.
+CHUNKED_SCAN_CHUNK = 128
+
+
+def _chunked_linear_scan(Lambda_bar, Bu, reverse=False, chunk_size=CHUNKED_SCAN_CHUNK):
+    """Inclusive scan of x_t = Lambda * x_{t-1} + Bu_t for time-constant diagonal
+    Lambda, using dense contiguous ops instead of associative_scan's stride-2
+    odd/even splits: (L, P) is reshaped to (n_chunks, C, P), each chunk is
+    scanned with log2(C) shift+multiply-add passes, a small carry scan links
+    chunks, and one correction pass applies the carries via a Lambda-power
+    table. Matches associative_scan to float32 precision.
+    """
+    if reverse:
+        return np.flip(_chunked_linear_scan(Lambda_bar, np.flip(Bu, 0),
+                                            chunk_size=chunk_size), 0)
+    L, P = Bu.shape
+    # for short sequences use a single chunk of the next power of two
+    C = min(chunk_size, max(2, 1 << (L - 1).bit_length()))
+    n_chunks = -(-L // C)
+    pad = n_chunks * C - L
+
+    x = np.pad(Bu, ((0, pad), (0, 0))).reshape(n_chunks, C, P)
+
+    # within-chunk inclusive scan (Hillis-Steele with constant Lambda)
+    A_pow = Lambda_bar
+    offset = 1
+    while offset < C:
+        shifted = np.pad(x[:, :-offset, :], ((0, 0), (offset, 0), (0, 0)))
+        x = x + A_pow * shifted
+        A_pow = A_pow * A_pow
+        offset *= 2
+    # loop invariant: A_pow == Lambda ** C on exit (C is a power of two)
+
+    # cross-chunk carries: s_j = Lambda^C * s_{j-1} + x[j, -1]
+    carries = x[:, -1, :]
+    A_chunk = np.broadcast_to(A_pow, carries.shape)
+    _, states = jax.lax.associative_scan(binary_operator, (A_chunk, carries))
+    prev_state = np.concatenate(
+        [np.zeros((1, P), dtype=x.dtype), states[:-1]], axis=0)
+
+    # correction: x[j, t] += Lambda^(t+1) * s_{j-1}
+    powers = np.cumprod(np.broadcast_to(Lambda_bar, (C, P)), axis=0)
+    x = x + powers[None] * prev_state[:, None, :]
+
+    return x.reshape(n_chunks * C, P)[:L]
+
+
+def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectional,
+              scan_impl="associative"):
     """ Compute the LxH output of discretized SSM given an LxH input.
         Args:
             Lambda_bar (complex64): discretized diagonal state matrix    (P,)
@@ -86,6 +134,8 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
             conj_sym (bool):         whether conjugate symmetry is enforced
             bidirectional (bool):    whether bidirectional setup is used,
                                   Note for this case C_tilde will have 2P cols
+            scan_impl (str):         'associative' (jax.lax.associative_scan)
+                                  or 'chunked' (dense chunked shift-scan)
         Returns:
             ys (float32): the SSM outputs (S5 layer preactivations)      (L, H)
     """
@@ -98,13 +148,19 @@ def apply_ssm(Lambda_bar, B_bar, C_tilde, input_sequence, conj_sym, bidirectiona
     Bu_elements = jax.vmap(lambda u: B_bar @ u)(input_sequence)
 
 
-    _, xs = jax.lax.associative_scan(binary_operator, (Lambda_elements, Bu_elements))
-    
+    if scan_impl == "chunked":
+        xs = _chunked_linear_scan(Lambda_bar, Bu_elements)
+    else:
+        _, xs = jax.lax.associative_scan(binary_operator, (Lambda_elements, Bu_elements))
+
 
     if bidirectional:
-        _, xs2 = jax.lax.associative_scan(binary_operator,
-                                          (Lambda_elements, Bu_elements),
-                                          reverse=True)
+        if scan_impl == "chunked":
+            xs2 = _chunked_linear_scan(Lambda_bar, Bu_elements, reverse=True)
+        else:
+            _, xs2 = jax.lax.associative_scan(binary_operator,
+                                              (Lambda_elements, Bu_elements),
+                                              reverse=True)
         xs = np.concatenate((xs, xs2), axis=-1)
 
     if conj_sym:
@@ -182,6 +238,7 @@ class S5SSM(nn.Module):
     clip_eigs: bool = False
     bidirectional: bool = False
     step_rescale: float = 1.0
+    scan_impl: str = "associative"  # 'associative' | 'chunked' (see apply_ssm)
 
     """ The S5 SSM
         Args:
@@ -332,7 +389,8 @@ class S5SSM(nn.Module):
                        self.C_tilde,
                        input_sequence,
                        self.conj_sym,
-                       self.bidirectional)
+                       self.bidirectional,
+                       scan_impl=self.scan_impl)
 
         Du = jax.vmap(lambda u: self.D * u)(input_sequence)
         return ys + Du
@@ -376,7 +434,8 @@ def init_S5SSM(H,
                dt_max,
                conj_sym,
                clip_eigs,
-               bidirectional
+               bidirectional,
+               scan_impl="associative",
                ):
     """Convenience function that will be used to initialize the SSM.
        Same arguments as defined in S5SSM above."""
@@ -393,4 +452,5 @@ def init_S5SSM(H,
                    dt_max=dt_max,
                    conj_sym=conj_sym,
                    clip_eigs=clip_eigs,
-                   bidirectional=bidirectional)
+                   bidirectional=bidirectional,
+                   scan_impl=scan_impl)

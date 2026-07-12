@@ -160,6 +160,11 @@ if __name__ == "__main__":
 						     "(jax.checkpoint per layer). Caps activation memory at ~1 layer, "
 						     "making peak HBM predictable and enabling larger micro batch "
 						     "sizes, for ~1 extra forward pass of recompute.")
+	parser.add_argument("--scan_impl", type=str, default="associative",
+						choices=["associative", "chunked"],
+						help="S5 recurrence implementation: 'associative' = "
+						     "jax.lax.associative_scan (default), 'chunked' = chunked "
+						     "shift-scan with dense contiguous ops (TPU-friendly A/B option)")
 	parser.add_argument("--dt_min", type=float, default=0.001,
 						help="min value to sample initial timescale params from")
 	parser.add_argument("--dt_max", type=float, default=0.1,

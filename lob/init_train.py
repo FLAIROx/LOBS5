@@ -442,6 +442,7 @@ def init_train_state(
             conj_sym=args.conj_sym,
             clip_eigs=args.clip_eigs,
             bidirectional=args.bidirectional,
+            scan_impl=getattr(args, 'scan_impl', 'associative'),
         )
     
     token_mode = getattr(args, 'token_mode', '24tok')
