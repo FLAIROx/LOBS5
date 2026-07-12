@@ -736,6 +736,16 @@ def _prep_batch_par(
     # CAVE: squeeze very important for training!
     return full_inputs, np.squeeze(targets.astype(np.int32)), integration_timesteps
 
+def _finalize_losses(batch_losses):
+    """Resolve any still-on-device loss scalars to Python floats."""
+    return [x if isinstance(x, float) else float(x) for x in batch_losses]
+
+
+def _mean_loss(batch_losses):
+    vals = _finalize_losses(batch_losses)
+    return sum(vals) / len(vals) if vals else float('nan')
+
+
 def print_memory_usage():
     """Print GPU and system memory usage"""
     process = psutil.Process(os.getpid())
@@ -881,12 +891,13 @@ def train_epoch(
                         batchnorm, ignore_times,
                     )
 
+                # accumulate on device: float() here would sync every micro-batch
                 if micro_idx == 0:
                     accum_grads = grads
-                    accum_loss = float(micro_loss)
+                    accum_loss = micro_loss
                 else:
                     accum_grads = jax.tree.map(np.add, accum_grads, grads)
-                    accum_loss += float(micro_loss)
+                    accum_loss = accum_loss + micro_loss
 
                 micro_idx += 1
 
@@ -907,7 +918,7 @@ def train_epoch(
                                   f"({micro_idx}/{grad_K}). Saving and exiting.")
                             checkpoint_callback(state, epoch, batch_idx, micro_loss, True)
                             watchdog.stop()
-                            loss_mean = sum(batch_losses) / len(batch_losses) if batch_losses else float('nan')
+                            loss_mean = _mean_loss(batch_losses)
                             return state, loss_mean, None, batch_idx + 1
                     continue
 
@@ -972,10 +983,11 @@ def train_epoch(
                         batchnorm, ignore_times,
                     )
 
-                    # Experiment A: Eliminate Step Bleed
-                    loss.block_until_ready()
-                    # Safest way to block on state update (Backward + Optimizer)
-                    jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else None, state.params)
+                    if debug_profiler:
+                        # Experiment A: Eliminate Step Bleed (profiling only: serializes host and device)
+                        loss.block_until_ready()
+                        # Safest way to block on state update (Backward + Optimizer)
+                        jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else None, state.params)
 
                 # Local Steps: sync params across nodes every K steps (Python-level dispatch)
                 if use_local_steps_scan:
@@ -987,22 +999,30 @@ def train_epoch(
             if debug_profiler:
                 if not use_grad_accum:
                     loss.block_until_ready()
+                print(f"[Step {batch_idx}] Step time: {time.monotonic() - _step_t0:.3f} s "
+                      f"(loss={float(loss):.4f})", flush=True)
 
-            # jit+sharding: loss is already a scalar (no device dimension)
-            loss_float = float(loss)
-            print(f"[Step {batch_idx}] Step time: {time.monotonic() - _step_t0:.3f} s (loss={loss_float:.4f})", flush=True)
-            batch_losses.append(loss_float)
+            # keep the loss on device: async D2H now, read one step later (no sync stall)
+            if hasattr(loss, "copy_to_host_async"):
+                loss.copy_to_host_async()
+            batch_losses.append(loss)
 
-            # NaN detection: save emergency checkpoint and abort
-            if math.isnan(loss_float):
-                print(f"\n[NaN] FATAL: NaN loss detected at epoch {epoch}, "
-                      f"batch {batch_idx}, global_step {step}. "
-                      f"Saving emergency checkpoint and aborting.")
-                if checkpoint_callback is not None:
-                    checkpoint_callback(state, epoch, batch_idx, 0.0, save_flag=True)
-                watchdog.stop()
-                loss_mean = sum(b for b in batch_losses if not math.isnan(b)) / max(1, sum(1 for b in batch_losses if not math.isnan(b)))
-                return state, loss_mean, None, batch_idx
+            # NaN detection (delayed by one step by the async read above)
+            if len(batch_losses) >= 2:
+                prev_loss = batch_losses[-2]
+                if not isinstance(prev_loss, float):
+                    prev_loss = float(prev_loss)
+                    batch_losses[-2] = prev_loss
+                if math.isnan(prev_loss):
+                    print(f"\n[NaN] FATAL: NaN loss detected at epoch {epoch}, "
+                          f"batch {batch_idx - 1}, global_step {step}. "
+                          f"Saving emergency checkpoint and aborting.")
+                    if checkpoint_callback is not None:
+                        checkpoint_callback(state, epoch, batch_idx, 0.0, save_flag=True)
+                    watchdog.stop()
+                    finite = [b for b in _finalize_losses(batch_losses) if not math.isnan(b)]
+                    loss_mean = sum(finite) / max(1, len(finite))
+                    return state, loss_mean, None, batch_idx
 
             if log_ce_tables and not use_grad_accum:
                 cross_entropies.append(ce)
@@ -1082,7 +1102,7 @@ def train_epoch(
                     print(f"[Checkpoint] Timeout imminent! Saved at epoch={epoch}, step={batch_idx}")
                     print(f"[Checkpoint] Resume: RESTORE_STEP={step} RESUME_FROM_STEP={batch_idx+1}")
                     watchdog.stop()
-                    loss_mean = sum(batch_losses) / len(batch_losses) if batch_losses else float('nan')
+                    loss_mean = _mean_loss(batch_losses)
                     return state, loss_mean, None, batch_idx + 1
 
             # ── Mini-epoch validation ──
@@ -1094,7 +1114,7 @@ def train_epoch(
                 should_stop = validate_callback(state, epoch, batch_idx)
                 if should_stop:
                     watchdog.stop()
-                    loss_mean = sum(batch_losses) / len(batch_losses) if batch_losses else float('nan')
+                    loss_mean = _mean_loss(batch_losses)
                     ce_means = onp.mean(onp.concatenate(cross_entropies, axis=0), axis=0) if log_ce_tables else None
                     return state, loss_mean, ce_means, None
 
@@ -1109,7 +1129,7 @@ def train_epoch(
     else:
         ce_means=None
     # jax.debug.print("CE of epoch by token: {}",ce_means.shape)
-    loss_mean = sum(batch_losses) / len(batch_losses)
+    loss_mean = _mean_loss(batch_losses)
     return state, loss_mean, ce_means, None
 
 
