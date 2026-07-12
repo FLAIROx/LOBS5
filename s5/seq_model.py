@@ -33,6 +33,7 @@ class StackedEncoderModel(nn.Module):
     step_rescale: float = 1.0
     use_embed_layer: bool = False
     vocab_size: int = -1  # only used if use_encode_layer is True
+    remat: bool = False  # recompute layer activations in backward (saves HBM)
     # MoE parameters
     use_moe: bool = False
     num_experts: int = 128
@@ -53,10 +54,12 @@ class StackedEncoderModel(nn.Module):
         else:
             self.encoder = nn.Dense(self.d_model)
 
-        #NOTE:  popjaxrl S5 doesn't have an encoding layer, tbd if this makes a differnce. 
+        #NOTE:  popjaxrl S5 doesn't have an encoding layer, tbd if this makes a differnce.
 
+        layer_cls = (nn.remat(SequenceLayer, prevent_cse=False)
+                     if self.remat else SequenceLayer)
         self.layers = [
-            SequenceLayer(
+            layer_cls(
                 ssm=self.ssm,
                 dropout=self.dropout,
                 d_model=self.d_model,
