@@ -129,6 +129,11 @@ if __name__ == "__main__":
 						help="whether to enforce the left-half plane condition")
 	parser.add_argument("--bidirectional", type=str2bool, default=False,  #False,
 						help="whether to use bidirectional model")
+	parser.add_argument("--remat", type=str2bool, default=False,
+						help="rematerialize sequence-layer activations in the backward pass "
+						     "(jax.checkpoint per layer). Caps activation memory at ~1 layer, "
+						     "making peak HBM predictable and enabling larger micro batch "
+						     "sizes, for ~1 extra forward pass of recompute.")
 	parser.add_argument("--dt_min", type=float, default=0.001,
 						help="min value to sample initial timescale params from")
 	parser.add_argument("--dt_max", type=float, default=0.1,

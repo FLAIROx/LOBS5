@@ -150,13 +150,16 @@ class LobBookModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    remat: bool = False  # recompute layer activations in backward (saves HBM)
 
     def setup(self):
         """
         Initializes ...
         """
+        layer_cls = (nn.remat(SequenceLayer, prevent_cse=False)
+                     if self.remat else SequenceLayer)
         self.pre_layers = tuple(
-            SequenceLayer(
+            layer_cls(
                 # fix ssm init to correct shape (different than other layers)
                 ssm=partial(self.ssm, H=self.d_book),
                 dropout=self.dropout,
@@ -170,7 +173,7 @@ class LobBookModel(nn.Module):
             ) for _ in range(self.n_pre_layers))
         self.projection = nn.Dense(self.d_model)  # project to d_model
         self.post_layers = tuple(
-            SequenceLayer(
+            layer_cls(
                 ssm=self.ssm,
                 dropout=self.dropout,
                 d_model=self.d_model,
@@ -274,6 +277,7 @@ class FullLobPredModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    remat: bool = False  # recompute layer activations in backward (saves HBM)
 
     def setup(self):
         """
@@ -292,6 +296,7 @@ class FullLobPredModel(nn.Module):
             step_rescale=self.step_rescale,
             use_embed_layer=True,
             vocab_size=self.d_output,
+            remat=self.remat,
         )
         # applied to transposed message output to get seq len for fusion
         self.message_out_proj = nn.Dense(self.d_model)  
@@ -308,6 +313,7 @@ class FullLobPredModel(nn.Module):
             batchnorm=self.batchnorm,
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
+            remat=self.remat,
         )
         # applied to transposed book output to get seq len for fusion
         self.book_out_proj = nn.Dense(self.d_model)
@@ -322,6 +328,7 @@ class FullLobPredModel(nn.Module):
             batchnorm=self.batchnorm,
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
+            remat=self.remat,
         )
         self.decoder = nn.Dense(self.d_output)
 
@@ -387,6 +394,7 @@ class PaddedLobPredModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    remat: bool = False  # recompute layer activations in backward (saves HBM)
     # MoE parameters (only applied to fused_s5)
     use_moe: bool = False
     num_experts: int = 128
@@ -416,6 +424,7 @@ class PaddedLobPredModel(nn.Module):
             step_rescale=self.step_rescale,
             use_embed_layer=True,
             vocab_size=self.d_output,
+            remat=self.remat,
         )
 
         # applied to transposed message output to get seq len for fusion
@@ -434,6 +443,7 @@ class PaddedLobPredModel(nn.Module):
             batchnorm=self.batchnorm,
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
+            remat=self.remat,
         )
 
 
@@ -452,6 +462,7 @@ class PaddedLobPredModel(nn.Module):
             batchnorm=self.batchnorm,
             bn_momentum=self.bn_momentum,
             step_rescale=self.step_rescale,
+            remat=self.remat,
             # MoE only on fused layers (message/book encoders are too shallow)
             use_moe=self.use_moe,
             num_experts=self.num_experts,
