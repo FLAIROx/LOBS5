@@ -1164,9 +1164,9 @@ def train_step(
         ce=np.mean(ce,axis=0)
         # average cross-ent loss
         loss = np.mean(ce)
-        return loss, (mod_vars, logits,ce)
+        return loss, (mod_vars, ce)
 
-    (loss, (mod_vars, logits,ce)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
+    (loss, (mod_vars, ce)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
 
 
@@ -1176,7 +1176,7 @@ def train_step(
     else:
         state = state.apply_gradients(grads=grads)
 
-    return state, loss, ce, logits
+    return state, loss, ce, np.float32(0.0)
 
 @partial(
     jax.jit,
@@ -1466,7 +1466,7 @@ def eval_step(
     losses = _compute_ce_unified(logits, batch_labels, ignore_times)
     accs = _compute_acc_unified(logits, batch_labels, ignore_times)
 
-    return losses, accs, logits
+    return losses, accs, np.float32(0.0)
 
 
 def eval_rnn_scan(apply_fn,hiddens,state,batch_inputs,batch_dones,batch_inttimes,batchnorm):
