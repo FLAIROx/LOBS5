@@ -736,6 +736,72 @@ def _prep_batch_par(
     # CAVE: squeeze very important for training!
     return full_inputs, np.squeeze(targets.astype(np.int32)), integration_timesteps
 
+def _prep_and_shard(batch, seq_len, num_devices, mesh):
+    """prep_batch + device placement for one batch (host-side work)."""
+    inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
+    if mesh is not None:
+        from lob.sharding_utils import get_data_shardings_for_batch
+        inputs_sh, labels_sh, times_sh = get_data_shardings_for_batch(
+            mesh, has_book_data=(len(inputs) > 1))
+        inputs = tuple(jax.make_array_from_process_local_data(sh, inp)
+                       for inp, sh in zip(inputs, inputs_sh))
+        labels = jax.make_array_from_process_local_data(labels_sh, labels)
+        integration_times = tuple(jax.make_array_from_process_local_data(sh, ts)
+                                  for ts, sh in zip(integration_times, times_sh))
+    return inputs, labels, integration_times
+
+
+def _prefetch_batches(loader, prep_fn, depth=2):
+    """Iterate `loader` with `prep_fn` applied in a background thread, keeping up to `depth` batches ready."""
+    import queue
+    q = queue.Queue(maxsize=max(1, depth))
+    _sentinel = object()
+    stop = threading.Event()
+    error = []
+
+    def _put_blocking(item):
+        """Put unless the consumer has gone away; never drops the item."""
+        while not stop.is_set():
+            try:
+                q.put(item, timeout=0.5)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _producer():
+        try:
+            for item in loader:
+                if stop.is_set():
+                    return
+                if not _put_blocking(prep_fn(item)):
+                    return
+        except BaseException as e:
+            error.append(e)
+        finally:
+            _put_blocking(_sentinel)
+
+    thread = threading.Thread(target=_producer, daemon=True,
+                              name="lobs5-data-prefetch")
+    thread.start()
+    try:
+        while True:
+            item = q.get()
+            if item is _sentinel:
+                if error:
+                    raise error[0]
+                return
+            yield item
+    finally:
+        stop.set()
+        # unblock a producer waiting on a full queue
+        try:
+            while True:
+                q.get_nowait()
+        except queue.Empty:
+            pass
+
+
 def _finalize_losses(batch_losses):
     """Resolve any still-on-device loss scalars to Python floats."""
     return [x if isinstance(x, float) else float(x) for x in batch_losses]
@@ -863,21 +929,20 @@ def train_epoch(
 
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     total_steps = len(trainloader) + batch_offset
-    for local_idx, batch in enumerate(tqdm(trainloader, initial=batch_offset, total=total_steps)):
+    if debug_loading:
+        batch_iter = iter(trainloader)
+    else:
+        batch_iter = _prefetch_batches(
+            trainloader,
+            lambda b: _prep_and_shard(b, seq_len, num_devices, mesh),
+            depth=int(os.environ.get('DATA_PREFETCH_DEPTH', '2')))
+    for local_idx, batch in enumerate(tqdm(batch_iter, initial=batch_offset, total=total_steps)):
         batch_idx = local_idx + batch_offset
         watchdog.kick(epoch, batch_idx)
         if not debug_loading:
             if (step>1) & (step<3) & debug_profiler:
                 jax.profiler.start_trace("/tmp/tensorboard")
-            inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
-
-            # jit+sharding: place data on devices with correct sharding
-            if mesh is not None:
-                from lob.sharding_utils import get_data_shardings_for_batch
-                inputs_sh, labels_sh, times_sh = get_data_shardings_for_batch(mesh, has_book_data=(len(inputs) > 1))
-                inputs = tuple(jax.make_array_from_process_local_data(sh, inp) for inp, sh in zip(inputs, inputs_sh))
-                labels = jax.make_array_from_process_local_data(labels_sh, labels)
-                integration_times = tuple(jax.make_array_from_process_local_data(sh, ts) for ts, sh in zip(integration_times, times_sh))
+            inputs, labels, integration_times = batch
 
             rng, drop_rng = jax.random.split(rng)
 
