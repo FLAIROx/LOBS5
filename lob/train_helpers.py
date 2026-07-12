@@ -592,24 +592,18 @@ def get_slices(dims):
     return slices
 
 # Train and eval steps
-# @partial(np.vectorize, signature="(c),()->()")
-# def cross_entropy_loss(logits, label):
-#     one_hot_label = jax.nn.one_hot(label, num_classes=logits.shape[-1])
-#     return -np.sum(one_hot_label * logits)
-
-@partial(np.vectorize, signature="(c),()->()")
 def cross_entropy_loss(logits, label):
-    one_hot_label = jax.nn.one_hot(label, num_classes=logits.shape[-1])
-    return -np.sum(one_hot_label * logits)
+    """CE for log-probability logits: (..., C), (...) int -> (...)."""
+    one_hot_label = jax.nn.one_hot(label, logits.shape[-1], dtype=logits.dtype)
+    return -np.sum(one_hot_label * logits, axis=-1)
 
 
 @partial(np.vectorize, signature="(c),()->()")
 def cross_entropy_loss_test(logits, label):
     return -np.sum(logits)
 
-@partial(np.vectorize, signature="(c),()->()")
 def compute_accuracy(logits, label):
-    return np.argmax(logits) == label
+    return np.argmax(logits, axis=-1) == label
 
 
 def _compute_ce_unified(logits, batch_labels, ignore_times):
