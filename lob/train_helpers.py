@@ -874,10 +874,11 @@ def train_epoch(
             if use_grad_accum:
                 # ── Gradient Accumulation Mode ──
                 # micro_step: fwd-bwd + pmean('gpus') only (no cross-node comm)
-                grads, micro_loss = micro_step_fn(
-                    state, drop_rng, inputs, labels, integration_times,
-                    batchnorm, ignore_times,
-                )
+                with jax.profiler.StepTraceAnnotation("train", step_num=batch_idx):
+                    grads, micro_loss = micro_step_fn(
+                        state, drop_rng, inputs, labels, integration_times,
+                        batchnorm, ignore_times,
+                    )
 
                 if micro_idx == 0:
                     accum_grads = grads
@@ -944,10 +945,11 @@ def train_epoch(
                         for i in range(len(scan_batch_buffer[0][2]))
                     )
 
-                    state, loss, ce, logits = scan_step_fn(
-                        state, drop_rng, inputs_k, labels_k, times_k,
-                        batchnorm, ignore_times,
-                    )
+                    with jax.profiler.StepTraceAnnotation("train", step_num=batch_idx):
+                        state, loss, ce, logits = scan_step_fn(
+                            state, drop_rng, inputs_k, labels_k, times_k,
+                            batchnorm, ignore_times,
+                        )
                     scan_batch_buffer = []
                 else:
                     # Still buffering — skip loss logging for intermediate steps
@@ -963,10 +965,11 @@ def train_epoch(
                     train_fn = local_step_fn
                 else:
                     train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
-                state, loss, ce, logits = train_fn(
-                    state, drop_rng, inputs, labels, integration_times,
-                    batchnorm, ignore_times,
-                )
+                with jax.profiler.StepTraceAnnotation("train", step_num=batch_idx):
+                    state, loss, ce, logits = train_fn(
+                        state, drop_rng, inputs, labels, integration_times,
+                        batchnorm, ignore_times,
+                    )
 
                 # Local Steps: sync params across nodes every K steps (Python-level dispatch)
                 if use_local_steps_scan:
