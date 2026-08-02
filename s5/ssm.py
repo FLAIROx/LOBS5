@@ -4,6 +4,7 @@ import jax.numpy as np
 from flax import linen as nn
 from jax.nn.initializers import lecun_normal, normal
 
+from . import pallas_ssm
 from .ssm_init import init_CV, init_VinvB, init_log_steps, trunc_standard_normal
 
 
@@ -312,6 +313,20 @@ class S5SSM(nn.Module):
         Returns:
             output sequence (float32): (L, H)
         """
+        if pallas_ssm.use_pallas_ssm():
+            # Fused Pallas-TPU kernel: same math (incl. the D*u skip), one kernel, no (L,P)
+            # complex state materialised in HBM. Only the conj_sym unidirectional config the
+            # LOB model trains is supported.
+            # NOT an `assert`: `python -O` strips those, and a conj_sym=False checkpoint has
+            # IDENTICAL param shapes, so the kernel's hardcoded factor of 2 would silently
+            # produce 2x-wrong outputs and gradients rather than failing.
+            if not self.conj_sym or self.bidirectional:
+                raise ValueError(
+                    "the fused Pallas S5 kernel assumes conj_sym=True, bidirectional=False "
+                    f"(got conj_sym={self.conj_sym}, bidirectional={self.bidirectional})")
+            return pallas_ssm.s5_pallas_apply(
+                self.Lambda_bar, self.B_bar, self.C_tilde, self.D, input_sequence)
+
         ys,Bu_elements_call,Lambda_elements_call,xs_call= apply_ssm(self.Lambda_bar,
                        self.B_bar,
                        self.C_tilde,

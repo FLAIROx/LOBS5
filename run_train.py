@@ -121,6 +121,32 @@ if __name__ == "__main__":
 	parser.add_argument("--ssm_type", type=str, default="s5",
 						choices=["s5", "gdn", "mamba2"],
 						help="SSM backend: s5 (LTI), gdn (selective+delta), mamba2 (selective SSD)")
+	# Default honours LOBS5_PALLAS_SSM so `LOBS5_PALLAS_SSM=1 python run_train.py` works (the
+	# same env var run_eval.py / any other entry point reads); the CLI flag still overrides.
+	parser.add_argument("--use_pallas_ssm", type=str2bool,
+						default=os.environ.get("LOBS5_PALLAS_SSM", "0").lower() in ("1", "true", "yes"),
+						help="replace the S5 associative_scan with the fused Pallas TPU kernel "
+							 "(s5/pallas_ssm.py). Requires ssm_type=s5, conj_sym=True, "
+							 "bidirectional=False; off-TPU it falls back to Pallas interpret "
+							 "mode, which is correct but very slow.")
+	parser.add_argument("--pallas_fused_bwd", type=str2bool, default=True,
+						help="[--use_pallas_ssm] use the fused reverse-grid backward KERNEL. "
+							 "False selects the pure-XLA analytic adjoint: same gradients, but "
+							 "it runs two sequential length-L scans and materialises three "
+							 "(b,L,P) complex arrays in HBM, which alone makes the step slower "
+							 "than the stock scan. Only turn this off to isolate a bug.")
+	parser.add_argument("--pallas_chunk", type=int, default=240,
+						help="[--use_pallas_ssm] upper bound on the kernel's chunk length. The "
+							 "value used is the largest multiple of 8 <= this that divides the "
+							 "sequence length. Bounded above by the Lambda_bar**-t f32-overflow "
+							 "ceiling (~1650 at S5's HiPPO init) and by VMEM.")
+	parser.add_argument("--pallas_vmem_mb", type=int, default=64,
+						help="[--use_pallas_ssm] scoped-VMEM budget granted to the kernel, in "
+							 "MiB. A compile-time ceiling, not an allocation and not a hardware "
+							 "query: raising it permits a bigger working set (i.e. a bigger "
+							 "--pallas_chunk), it does not by itself use more. Mosaic's own "
+							 "default of 16 is too small at these widths. Exceeding it fails at "
+							 "compile with CompileTimeScopedVmemOom.")
 	parser.add_argument("--activation_fn", default="half_glu1", type=str,
 						choices=["full_glu", "half_glu1", "half_glu2", "gelu"])
 	parser.add_argument("--conj_sym", type=str2bool, default=True,
@@ -221,7 +247,10 @@ if __name__ == "__main__":
 	parser.add_argument("--hierarchical", type=str2bool, default=True,
 				help="Use hierarchical AllReduce via shard_map with 2D mesh (nodes, gpus). "
 				     "Decomposes flat AllReduce(N*4) into pmean(gpus)+pmean(nodes).")
-	parser.add_argument("--local_steps_k", type=int, default=10,
+	# A single-node run forcibly disables the hierarchical 2D mesh (lob/train.py), which K>0
+	# requires -- so with the old default of 10 the stock single-node config was internally
+	# contradictory and asserted out. Local Steps must be opt-in.
+	parser.add_argument("--local_steps_k", type=int, default=0,
 				help="Local Steps: each node trains independently for K steps, "
 				     "then params averaged via pmean('nodes'). 0=disabled (standard AllReduce). "
 				     "K>0 requires --hierarchical=True. Inner optimizer (Adam/AdamW) is unchanged.")
@@ -241,6 +270,35 @@ if __name__ == "__main__":
 				     "Set to 0 to use all data for training.")
 
 	args = parser.parse_args()
+
+	# The fused Pallas S5 kernel is selected inside s5/ssm.py via this env var, because the
+	# flax module is constructed deep inside lob/init_train.py and does not see `args`.
+	if args.use_pallas_ssm:
+		if args.ssm_type != "s5":
+			parser.error(f"--use_pallas_ssm requires --ssm_type=s5 (got {args.ssm_type})")
+		if not args.conj_sym or args.bidirectional:
+			parser.error("--use_pallas_ssm requires --conj_sym=True --bidirectional=False")
+		# The kernel needs a chunk that is a multiple of 8 and divides the sequence length.
+		_seq_len = args.msg_seq_len if getattr(args, 'token_mode', '24tok') == '1tok' \
+			else args.msg_seq_len * 24
+		if _seq_len % 8 != 0:
+			parser.error(f"--use_pallas_ssm needs a sequence length divisible by 8, got "
+						 f"{_seq_len} (msg_seq_len={args.msg_seq_len}, "
+						 f"token_mode={getattr(args, 'token_mode', '24tok')})")
+		os.environ["LOBS5_PALLAS_SSM"] = "1"
+		os.environ["LOBS5_PALLAS_FUSED_BWD"] = "1" if args.pallas_fused_bwd else "0"
+		os.environ["LOBS5_PALLAS_CHUNK"] = str(args.pallas_chunk)
+		os.environ["LOBS5_PALLAS_VMEM_MB"] = str(args.pallas_vmem_mb)
+		# Do NOT add --xla_tpu_scoped_vmem_limit_kib to XLA_FLAGS here, however tempting: it is
+		# TPU-only, an unknown XLA flag is a fatal abort, and the DataLoader workers this script
+		# spawns run with JAX_PLATFORMS=cpu and inherit XLA_FLAGS. See docs/pallas_ssm.md.
+		# Validate now, so a bad knob fails here and not 10 minutes into model construction.
+		from s5.pallas_ssm import config as _pallas_config
+		_cfg = _pallas_config()
+		print(f"[*] S5 SSM backend: FUSED PALLAS KERNEL (s5/pallas_ssm.py) -- "
+			  f"fused_bwd={_cfg.fused_bwd} chunk<={_cfg.max_chunk} vmem={_cfg.vmem_mb}MiB")
+	else:
+		os.environ["LOBS5_PALLAS_SSM"] = "0"
 
 	# Mutual exclusion: grad_accum and local_steps cannot be used together
 	if getattr(args, 'grad_accum_steps', 1) > 1 and getattr(args, 'local_steps_k', 0) > 0:

@@ -599,7 +599,8 @@ def get_slices(dims):
 
 @partial(np.vectorize, signature="(c),()->()")
 def cross_entropy_loss(logits, label):
-    return -np.sum(logits[label])
+    one_hot_label = jax.nn.one_hot(label, num_classes=logits.shape[-1])
+    return -np.sum(one_hot_label * logits)
 
 
 @partial(np.vectorize, signature="(c),()->()")
@@ -861,8 +862,9 @@ def train_epoch(
     for local_idx, batch in enumerate(tqdm(trainloader, initial=batch_offset, total=total_steps)):
         batch_idx = local_idx + batch_offset
         watchdog.kick(epoch, batch_idx)
+        _step_t0 = time.monotonic()
         if not debug_loading:
-            if (step>1) & (step<3) & debug_profiler:
+            if (batch_idx == 1) & debug_profiler:
                 jax.profiler.start_trace("/tmp/tensorboard")
             inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
 
@@ -968,10 +970,16 @@ def train_epoch(
                     train_fn = local_step_fn
                 else:
                     train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
-                state, loss, ce, logits = train_fn(
-                    state, drop_rng, inputs, labels, integration_times,
-                    batchnorm, ignore_times,
-                )
+                with jax.profiler.StepTraceAnnotation("train", step_num=batch_idx):
+                    state, loss, ce, logits = train_fn(
+                        state, drop_rng, inputs, labels, integration_times,
+                        batchnorm, ignore_times,
+                    )
+                    
+                    # Experiment A: Eliminate Step Bleed
+                    loss.block_until_ready()
+                    # Safest way to block on state update (Backward + Optimizer)
+                    jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else None, state.params)
 
                 # Local Steps: sync params across nodes every K steps (Python-level dispatch)
                 if use_local_steps_scan:
@@ -986,6 +994,7 @@ def train_epoch(
 
             # jit+sharding: loss is already a scalar (no device dimension)
             loss_float = float(loss)
+            print(f"[Step {batch_idx}] Step time: {time.monotonic() - _step_t0:.3f} s (loss={loss_float:.4f})", flush=True)
             batch_losses.append(loss_float)
 
             # NaN detection: save emergency checkpoint and abort
@@ -1020,7 +1029,7 @@ def train_epoch(
                 lr_params = (decay_function, ssm_lr, lr, step, end_step, opt_config, lr_min)
                 state, step = update_learning_rate_per_step(lr_params, state, mesh=mesh)
 
-            if (step>20) & (step<=21) & debug_profiler:
+            if (batch_idx >= 2) & debug_profiler:
                 jax.profiler.stop_trace()
                 break
             if (curtail_epochs is not None) and (batch_idx>=curtail_epochs):
@@ -1131,11 +1140,6 @@ def train_step(
         batchnorm: bool, # 5
         ignore_times:bool, #6
     ):
-
-    # Print hash values of static arguments
-    # print(f"batchnorm hash: {batchnorm.__hash__()}")
-    # print(f"ignore_times hash: {ignore_times.__hash__()}")
-    # print('checking for compile in train_step')
 
     batch_inputs=repeat_book(*batch_inputs,True)
     # batch_integration_timesteps=repeat_book(*batch_integration_timesteps)
@@ -1918,6 +1922,33 @@ def _create_hierarchical_train_step(mesh, has_book_data, batchnorm, ignore_times
 def create_jit_eval_step(mesh, state, has_book_data=True):
     """Create JIT-compiled eval_step with explicit sharding."""
     from lob.sharding_utils import create_state_shardings, get_data_shardings_for_batch
+
+    if len(mesh.shape) == 2:
+        from jax.experimental.shard_map import shard_map
+        from jax.sharding import PartitionSpec as P
+        batch_axis = "gpus"
+        if has_book_data:
+            in_specs = ((P(batch_axis), P(batch_axis)), P(batch_axis), (P(batch_axis), P(batch_axis)), P(), P())
+        else:
+            in_specs = ((P(batch_axis),), P(batch_axis), (P(batch_axis),), P(), P())
+        out_specs = (P(), P(), P())
+
+        def sharded_eval(batch_inputs, batch_labels, batch_integration_timesteps, state, init_hiddens, apply_fn, batchnorm, apply_method, ignore_times):
+            loss, acc, ce_mean = eval_step(batch_inputs, batch_labels, batch_integration_timesteps, state, apply_fn, batchnorm, apply_method, init_hiddens, ignore_times)
+            loss = jax.lax.pmean(jax.lax.pmean(loss, "gpus"), "nodes")
+            acc = jax.lax.pmean(jax.lax.pmean(acc, "gpus"), "nodes")
+            ce_mean = jax.lax.pmean(jax.lax.pmean(ce_mean, "gpus"), "nodes")
+            return loss, acc, ce_mean
+
+        def eval_wrapper(batch_inputs, batch_labels, batch_integration_timesteps, state, apply_fn, batchnorm, apply_method, init_hiddens, ignore_times):
+            mapped_fn = shard_map(
+                lambda inp, lbl, ts, st, hid: sharded_eval(inp, lbl, ts, st, hid, apply_fn, batchnorm, apply_method, ignore_times),
+                mesh=mesh, in_specs=in_specs, out_specs=out_specs, check_rep=False
+            )
+            return jax.jit(mapped_fn)(batch_inputs, batch_labels, batch_integration_timesteps, state, init_hiddens)
+
+        print("[JIT] Created hierarchical shard_map eval_step")
+        return eval_wrapper
 
     state_shardings = create_state_shardings(state, mesh)
     inputs_shardings, labels_sharding, timesteps_shardings = get_data_shardings_for_batch(mesh, has_book_data=has_book_data)
