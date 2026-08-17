@@ -592,23 +592,18 @@ def get_slices(dims):
     return slices
 
 # Train and eval steps
-# @partial(np.vectorize, signature="(c),()->()")
-# def cross_entropy_loss(logits, label):
-#     one_hot_label = jax.nn.one_hot(label, num_classes=logits.shape[-1])
-#     return -np.sum(one_hot_label * logits)
-
-@partial(np.vectorize, signature="(c),()->()")
 def cross_entropy_loss(logits, label):
-    return -np.sum(logits[label])
+    """CE for log-probability logits: (..., C), (...) int -> (...)."""
+    one_hot_label = jax.nn.one_hot(label, logits.shape[-1], dtype=logits.dtype)
+    return -np.sum(one_hot_label * logits, axis=-1)
 
 
 @partial(np.vectorize, signature="(c),()->()")
 def cross_entropy_loss_test(logits, label):
     return -np.sum(logits)
 
-@partial(np.vectorize, signature="(c),()->()")
 def compute_accuracy(logits, label):
-    return np.argmax(logits) == label
+    return np.argmax(logits, axis=-1) == label
 
 
 def _compute_ce_unified(logits, batch_labels, ignore_times):
@@ -741,6 +736,82 @@ def _prep_batch_par(
     # CAVE: squeeze very important for training!
     return full_inputs, np.squeeze(targets.astype(np.int32)), integration_timesteps
 
+def _prep_and_shard(batch, seq_len, num_devices, mesh):
+    """prep_batch + device placement for one batch (host-side work)."""
+    inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
+    if mesh is not None:
+        from lob.sharding_utils import get_data_shardings_for_batch
+        inputs_sh, labels_sh, times_sh = get_data_shardings_for_batch(
+            mesh, has_book_data=(len(inputs) > 1))
+        inputs = tuple(jax.make_array_from_process_local_data(sh, inp)
+                       for inp, sh in zip(inputs, inputs_sh))
+        labels = jax.make_array_from_process_local_data(labels_sh, labels)
+        integration_times = tuple(jax.make_array_from_process_local_data(sh, ts)
+                                  for ts, sh in zip(integration_times, times_sh))
+    return inputs, labels, integration_times
+
+
+def _prefetch_batches(loader, prep_fn, depth=2):
+    """Iterate `loader` with `prep_fn` applied in a background thread, keeping up to `depth` batches ready."""
+    import queue
+    q = queue.Queue(maxsize=max(1, depth))
+    _sentinel = object()
+    stop = threading.Event()
+    error = []
+
+    def _put_blocking(item):
+        """Put unless the consumer has gone away; never drops the item."""
+        while not stop.is_set():
+            try:
+                q.put(item, timeout=0.5)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _producer():
+        try:
+            for item in loader:
+                if stop.is_set():
+                    return
+                if not _put_blocking(prep_fn(item)):
+                    return
+        except BaseException as e:
+            error.append(e)
+        finally:
+            _put_blocking(_sentinel)
+
+    thread = threading.Thread(target=_producer, daemon=True,
+                              name="lobs5-data-prefetch")
+    thread.start()
+    try:
+        while True:
+            item = q.get()
+            if item is _sentinel:
+                if error:
+                    raise error[0]
+                return
+            yield item
+    finally:
+        stop.set()
+        # unblock a producer waiting on a full queue
+        try:
+            while True:
+                q.get_nowait()
+        except queue.Empty:
+            pass
+
+
+def _finalize_losses(batch_losses):
+    """Resolve any still-on-device loss scalars to Python floats."""
+    return [x if isinstance(x, float) else float(x) for x in batch_losses]
+
+
+def _mean_loss(batch_losses):
+    vals = _finalize_losses(batch_losses)
+    return sum(vals) / len(vals) if vals else float('nan')
+
+
 def print_memory_usage():
     """Print GPU and system memory usage"""
     process = psutil.Process(os.getpid())
@@ -858,38 +929,39 @@ def train_epoch(
 
     #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
     total_steps = len(trainloader) + batch_offset
-    for local_idx, batch in enumerate(tqdm(trainloader, initial=batch_offset, total=total_steps)):
+    if debug_loading:
+        batch_iter = iter(trainloader)
+    else:
+        batch_iter = _prefetch_batches(
+            trainloader,
+            lambda b: _prep_and_shard(b, seq_len, num_devices, mesh),
+            depth=int(os.environ.get('DATA_PREFETCH_DEPTH', '2')))
+    for local_idx, batch in enumerate(tqdm(batch_iter, initial=batch_offset, total=total_steps)):
         batch_idx = local_idx + batch_offset
         watchdog.kick(epoch, batch_idx)
         if not debug_loading:
             if (step>1) & (step<3) & debug_profiler:
                 jax.profiler.start_trace("/tmp/tensorboard")
-            inputs, labels, integration_times = prep_batch(batch, seq_len, num_devices)
-
-            # jit+sharding: place data on devices with correct sharding
-            if mesh is not None:
-                from lob.sharding_utils import get_data_shardings_for_batch
-                inputs_sh, labels_sh, times_sh = get_data_shardings_for_batch(mesh, has_book_data=(len(inputs) > 1))
-                inputs = tuple(jax.make_array_from_process_local_data(sh, inp) for inp, sh in zip(inputs, inputs_sh))
-                labels = jax.make_array_from_process_local_data(labels_sh, labels)
-                integration_times = tuple(jax.make_array_from_process_local_data(sh, ts) for ts, sh in zip(integration_times, times_sh))
+            inputs, labels, integration_times = batch
 
             rng, drop_rng = jax.random.split(rng)
 
             if use_grad_accum:
                 # ── Gradient Accumulation Mode ──
                 # micro_step: fwd-bwd + pmean('gpus') only (no cross-node comm)
-                grads, micro_loss = micro_step_fn(
-                    state, drop_rng, inputs, labels, integration_times,
-                    batchnorm, ignore_times,
-                )
+                with jax.profiler.StepTraceAnnotation("train", step_num=batch_idx):
+                    grads, micro_loss = micro_step_fn(
+                        state, drop_rng, inputs, labels, integration_times,
+                        batchnorm, ignore_times,
+                    )
 
+                # accumulate on device: float() here would sync every micro-batch
                 if micro_idx == 0:
                     accum_grads = grads
-                    accum_loss = float(micro_loss)
+                    accum_loss = micro_loss
                 else:
                     accum_grads = jax.tree.map(np.add, accum_grads, grads)
-                    accum_loss += float(micro_loss)
+                    accum_loss = accum_loss + micro_loss
 
                 micro_idx += 1
 
@@ -910,7 +982,7 @@ def train_epoch(
                                   f"({micro_idx}/{grad_K}). Saving and exiting.")
                             checkpoint_callback(state, epoch, batch_idx, micro_loss, True)
                             watchdog.stop()
-                            loss_mean = sum(batch_losses) / len(batch_losses) if batch_losses else float('nan')
+                            loss_mean = _mean_loss(batch_losses)
                             return state, loss_mean, None, batch_idx + 1
                     continue
 
@@ -949,10 +1021,11 @@ def train_epoch(
                         for i in range(len(scan_batch_buffer[0][2]))
                     )
 
-                    state, loss, ce, logits = scan_step_fn(
-                        state, drop_rng, inputs_k, labels_k, times_k,
-                        batchnorm, ignore_times,
-                    )
+                    with jax.profiler.StepTraceAnnotation("train", step_num=batch_idx):
+                        state, loss, ce, logits = scan_step_fn(
+                            state, drop_rng, inputs_k, labels_k, times_k,
+                            batchnorm, ignore_times,
+                        )
                     scan_batch_buffer = []
                 else:
                     # Still buffering — skip loss logging for intermediate steps
@@ -968,10 +1041,11 @@ def train_epoch(
                     train_fn = local_step_fn
                 else:
                     train_fn = jit_train_step_fn if jit_train_step_fn is not None else train_step
-                state, loss, ce, logits = train_fn(
-                    state, drop_rng, inputs, labels, integration_times,
-                    batchnorm, ignore_times,
-                )
+                with jax.profiler.StepTraceAnnotation("train", step_num=batch_idx):
+                    state, loss, ce, logits = train_fn(
+                        state, drop_rng, inputs, labels, integration_times,
+                        batchnorm, ignore_times,
+                    )
 
                 # Local Steps: sync params across nodes every K steps (Python-level dispatch)
                 if use_local_steps_scan:
@@ -984,20 +1058,27 @@ def train_epoch(
                 if not use_grad_accum:
                     loss.block_until_ready()
 
-            # jit+sharding: loss is already a scalar (no device dimension)
-            loss_float = float(loss)
-            batch_losses.append(loss_float)
+            # keep the loss on device: async D2H now, read one step later (no sync stall)
+            if hasattr(loss, "copy_to_host_async"):
+                loss.copy_to_host_async()
+            batch_losses.append(loss)
 
-            # NaN detection: save emergency checkpoint and abort
-            if math.isnan(loss_float):
-                print(f"\n[NaN] FATAL: NaN loss detected at epoch {epoch}, "
-                      f"batch {batch_idx}, global_step {step}. "
-                      f"Saving emergency checkpoint and aborting.")
-                if checkpoint_callback is not None:
-                    checkpoint_callback(state, epoch, batch_idx, 0.0, save_flag=True)
-                watchdog.stop()
-                loss_mean = sum(b for b in batch_losses if not math.isnan(b)) / max(1, sum(1 for b in batch_losses if not math.isnan(b)))
-                return state, loss_mean, None, batch_idx
+            # NaN detection (delayed by one step by the async read above)
+            if len(batch_losses) >= 2:
+                prev_loss = batch_losses[-2]
+                if not isinstance(prev_loss, float):
+                    prev_loss = float(prev_loss)
+                    batch_losses[-2] = prev_loss
+                if math.isnan(prev_loss):
+                    print(f"\n[NaN] FATAL: NaN loss detected at epoch {epoch}, "
+                          f"batch {batch_idx - 1}, global_step {step}. "
+                          f"Saving emergency checkpoint and aborting.")
+                    if checkpoint_callback is not None:
+                        checkpoint_callback(state, epoch, batch_idx, 0.0, save_flag=True)
+                    watchdog.stop()
+                    finite = [b for b in _finalize_losses(batch_losses) if not math.isnan(b)]
+                    loss_mean = sum(finite) / max(1, len(finite))
+                    return state, loss_mean, None, batch_idx
 
             if log_ce_tables and not use_grad_accum:
                 cross_entropies.append(ce)
@@ -1077,7 +1158,7 @@ def train_epoch(
                     print(f"[Checkpoint] Timeout imminent! Saved at epoch={epoch}, step={batch_idx}")
                     print(f"[Checkpoint] Resume: RESTORE_STEP={step} RESUME_FROM_STEP={batch_idx+1}")
                     watchdog.stop()
-                    loss_mean = sum(batch_losses) / len(batch_losses) if batch_losses else float('nan')
+                    loss_mean = _mean_loss(batch_losses)
                     return state, loss_mean, None, batch_idx + 1
 
             # ── Mini-epoch validation ──
@@ -1089,7 +1170,7 @@ def train_epoch(
                 should_stop = validate_callback(state, epoch, batch_idx)
                 if should_stop:
                     watchdog.stop()
-                    loss_mean = sum(batch_losses) / len(batch_losses) if batch_losses else float('nan')
+                    loss_mean = _mean_loss(batch_losses)
                     ce_means = onp.mean(onp.concatenate(cross_entropies, axis=0), axis=0) if log_ce_tables else None
                     return state, loss_mean, ce_means, None
 
@@ -1104,7 +1185,7 @@ def train_epoch(
     else:
         ce_means=None
     # jax.debug.print("CE of epoch by token: {}",ce_means.shape)
-    loss_mean = sum(batch_losses) / len(batch_losses)
+    loss_mean = _mean_loss(batch_losses)
     return state, loss_mean, ce_means, None
 
 
@@ -1169,9 +1250,9 @@ def train_step(
         ce=np.mean(ce,axis=0)
         # average cross-ent loss
         loss = np.mean(ce)
-        return loss, (mod_vars, logits,ce)
+        return loss, (mod_vars, ce)
 
-    (loss, (mod_vars, logits,ce)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
+    (loss, (mod_vars, ce)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
 
 
@@ -1181,7 +1262,7 @@ def train_step(
     else:
         state = state.apply_gradients(grads=grads)
 
-    return state, loss, ce, logits
+    return state, loss, ce, np.float32(0.0)
 
 @partial(
     jax.jit,
@@ -1471,7 +1552,7 @@ def eval_step(
     losses = _compute_ce_unified(logits, batch_labels, ignore_times)
     accs = _compute_acc_unified(logits, batch_labels, ignore_times)
 
-    return losses, accs, logits
+    return losses, accs, np.float32(0.0)
 
 
 def eval_rnn_scan(apply_fn,hiddens,state,batch_inputs,batch_dones,batch_inttimes,batchnorm):

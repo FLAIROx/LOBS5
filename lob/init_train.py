@@ -441,7 +441,8 @@ def init_train_state(
             dt_max=args.dt_max,
             conj_sym=args.conj_sym,
             clip_eigs=args.clip_eigs,
-            bidirectional=args.bidirectional
+            bidirectional=args.bidirectional,
+            scan_impl=getattr(args, 'scan_impl', 'associative'),
         )
     
     token_mode = getattr(args, 'token_mode', '24tok')
@@ -503,6 +504,7 @@ def init_train_state(
                 prenorm=args.prenorm,
                 batchnorm=args.batchnorm,
                 bn_momentum=args.bn_momentum,
+                remat=getattr(args, 'remat', False),
             )
         elif args.merging == 'padded': #i.e. 'padded'
             model_cls = partial(
@@ -523,6 +525,7 @@ def init_train_state(
                 prenorm=args.prenorm,
                 batchnorm=args.batchnorm,
                 bn_momentum=args.bn_momentum,
+                remat=getattr(args, 'remat', False),
                 # MoE parameters
                 use_moe=getattr(args, 'use_moe', False),
                 num_experts=getattr(args, 'num_experts', 128),
