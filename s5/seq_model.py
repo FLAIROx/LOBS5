@@ -54,7 +54,7 @@ class StackedEncoderModel(nn.Module):
         else:
             self.encoder = nn.Dense(self.d_model)
 
-        #NOTE:  popjaxrl S5 doesn't have an encoding layer, tbd if this makes a differnce.
+        #NOTE:  popjaxrl S5 doesn't have an encoding layer, tbd if this makes a difference.
 
         layer_cls = (nn.remat(SequenceLayer, prevent_cse=False)
                      if self.remat else SequenceLayer)

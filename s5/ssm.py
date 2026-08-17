@@ -87,6 +87,10 @@ def _chunked_linear_scan(Lambda_bar, Bu, reverse=False, chunk_size=CHUNKED_SCAN_
     chunks, and one correction pass applies the carries via a Lambda-power
     table. Matches associative_scan to float32 precision.
     """
+    if chunk_size < 2 or (chunk_size & (chunk_size - 1)):
+        raise ValueError(
+            f"chunk_size must be a power of two >= 2, got {chunk_size}: the "
+            "within-chunk scan exits with A_pow == Lambda**C only for power-of-two C")
     if reverse:
         return np.flip(_chunked_linear_scan(Lambda_bar, np.flip(Bu, 0),
                                             chunk_size=chunk_size), 0)
