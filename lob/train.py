@@ -145,12 +145,7 @@ def train(args):
         if jax.process_count() > 1:
             mesh = initialize_mesh(jax.device_count(), hierarchical=use_hierarchical)
         else:
-            # Single-node: 1D mesh with 'data' axis — hierarchical 2D shard_map
-            # requires ('nodes', 'gpus') axes which don't exist in 1D mesh
-            if use_hierarchical:
-                print("[Sharding] Single-node: forcing hierarchical=False (1D mesh)")
-            use_hierarchical = False
-            mesh = initialize_mesh(args.num_devices)
+            mesh = initialize_mesh(args.num_devices, hierarchical=use_hierarchical)
 
         restored_metrics = {}
         if args.restore is not None and args.restore != '':
@@ -709,6 +704,48 @@ def train(args):
         del _dummy_inputs, _dummy_labels, _dummy_times, _w_loss, _w_acc
         gc.collect()
         print(f"[*] Eval warmup complete ({time.monotonic() - _warmup_t0:.1f}s)")
+
+    # ── Train warmup: pre-compile train_step to avoid compilation inside profiling window ──
+    if jit_train_step is not None:
+        print("[*] Warming up train_step JIT compilation...")
+        _train_warmup_t0 = time.monotonic()
+        
+        # Use same dummy data approach as eval warmup
+        import numpy as _np
+        _ppb = args.micro_bsz * args.num_devices
+        if args.use_book_data:
+            _dummy_inputs = (
+                _np.ones((_ppb, seq_len), dtype=_np.int32),
+                _np.ones((_ppb, book_seq_len, book_dim), dtype=_np.float32),
+            )
+        else:
+            _dummy_inputs = (_np.ones((_ppb, seq_len), dtype=_np.int32),)
+        _dummy_labels = _np.ones((_ppb, seq_len), dtype=_np.int32)
+        _dummy_times = (
+            _np.ones((_ppb, seq_len), dtype=_np.float32),
+            _np.ones((_ppb, seq_len), dtype=_np.float32),
+        )
+
+        from lob.sharding_utils import get_data_shardings_for_batch
+        _inp_sh, _lab_sh, _ts_sh = get_data_shardings_for_batch(
+            mesh, has_book_data=args.use_book_data)
+        _dummy_inputs = tuple(
+            jax.make_array_from_process_local_data(sh, inp)
+            for inp, sh in zip(_dummy_inputs, _inp_sh))
+        _dummy_labels = jax.make_array_from_process_local_data(_lab_sh, _dummy_labels)
+        _dummy_times = tuple(
+            jax.make_array_from_process_local_data(sh, ts)
+            for ts, sh in zip(_dummy_times, _ts_sh))
+
+        state, _w_loss, _, _ = jit_train_step(
+            state, jax.random.PRNGKey(0), _dummy_inputs, _dummy_labels, _dummy_times,
+            args.batchnorm, args.ignore_times
+        )
+        _w_loss.block_until_ready()
+        
+        del _dummy_inputs, _dummy_labels, _dummy_times, _w_loss
+        gc.collect()
+        print(f"[*] Train warmup complete ({time.monotonic() - _train_warmup_t0:.1f}s)")
 
     for epoch in range(start_epoch, args.epochs):
         # Free residual memory from previous epoch's val/test before training

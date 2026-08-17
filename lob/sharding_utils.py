@@ -51,6 +51,11 @@ def create_simple_mesh(num_devices: int, hierarchical: bool = False) -> Mesh:
         local_devs = jax.local_devices()
         devices = local_devs[:num_devices]
         print(f"[Sharding] Single-node mode: Using {len(devices)} local devices")
+        if hierarchical:
+            devices_2d = np.array(devices).reshape(1, len(devices))
+            mesh = Mesh(devices_2d, axis_names=("nodes", "gpus"))
+            print(f"[Sharding] 2D hierarchical mesh: (1 nodes, {len(devices)} gpus)")
+            return mesh
 
     devices_array = np.array(devices).reshape(-1)
     mesh = Mesh(devices_array, axis_names=('data',))
